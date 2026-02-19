@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 
-export type AIProvider = 'claude-code' | 'kimi-code' | 'vercel-ai-sdk'
+export type AIProvider = 'claude-code' | 'vercel-ai-sdk'
 
 interface AIConfig {
   provider: AIProvider

@@ -44,7 +44,6 @@ import { emit } from './core/agent-events.js'
 import { SessionStore } from './core/session.js'
 import { readAIConfig } from './core/ai-config.js'
 import { askClaudeCodeWithSession } from './providers/claude-code/index.js'
-import { cleanupKimiCodeProvider } from './providers/kimi-code/index.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const SEC_WALLET_FILE = resolve('data/securities-trading/commit.json')
@@ -301,7 +300,6 @@ async function main() {
           : [],
       },
       {}, // claudeCodeConfig
-      { mcpConfigFile: resolve('data/config/mcp.json') } // kimiCodeConfig
     ))
   }
 
@@ -482,7 +480,6 @@ async function main() {
     }
     await cryptoResult?.close()
     await secResult?.close()
-    await cleanupKimiCodeProvider()
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
