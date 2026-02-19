@@ -167,6 +167,10 @@ data/
   securities-trading/        # Securities wallet commit history
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=imsatoshi/TradeClaw&type=Date)](https://star-history.com/#imsatoshi/TradeClaw&Date)
+
 ## License
 
 [MIT](LICENSE)
