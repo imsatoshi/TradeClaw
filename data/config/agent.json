@@ -1,0 +1,14 @@
+{
+  "maxSteps": 20,
+  "claudeCode": {
+    "allowedTools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"],
+    "disallowedTools": [
+      "Task", "TaskOutput",
+      "AskUserQuestion", "TodoWrite",
+      "NotebookEdit", "Skill",
+      "EnterPlanMode", "ExitPlanMode",
+      "mcp__claude_ai_Figma__*"
+    ],
+    "maxTurns": 20
+  }
+}

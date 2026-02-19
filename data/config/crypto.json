@@ -1,0 +1,9 @@
+{
+  "allowedSymbols": ["BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "APT/USD", "SUI/USD", "HYPE/USD", "DOGE/USD", "XRP/USD"],
+  "provider": {
+    "type": "ccxt",
+    "exchange": "bybit",
+    "demoTrading": true,
+    "defaultMarketType": "swap"
+  }
+}

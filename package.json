@@ -1,0 +1,55 @@
+{
+  "name": "tradeclaw",
+  "version": "1.0.0",
+  "description": "File-based trading agent engine",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file=.env --watch src/main.ts",
+    "build": "tsup src/main.ts --format esm --dts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": ["trading", "ai-agent", "crypto", "securities", "file-driven"],
+  "author": "TradeClaw Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imsatoshi/TradeClaw.git"
+  },
+  "homepage": "https://github.com/imsatoshi/TradeClaw",
+  "packageManager": "pnpm@10.29.2",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.44",
+    "@alpacahq/alpaca-trade-api": "^3.1.3",
+    "@hono/node-server": "^1.19.9",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@sinclair/typebox": "0.34.48",
+    "ai": "^6.0.86",
+    "ajv": "^8.18.0",
+    "ccxt": "^4.5.38",
+    "chalk": "^5.6.2",
+    "decimal.js": "^10.6.0",
+    "express": "^5.2.1",
+    "file-type": "^21.3.0",
+    "hono": "^4.11.9",
+    "json5": "^2.2.3",
+    "pino": "^10.3.1",
+    "playwright-core": "1.58.2",
+    "sharp": "^0.34.5",
+    "tslog": "^4.10.2",
+    "undici": "^7.22.0",
+    "ws": "^8.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "^3.0.8",
+    "@grammyjs/types": "^3.24.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.2.3",
+    "@types/ws": "^8.18.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
