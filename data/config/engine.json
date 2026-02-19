@@ -1,8 +1,8 @@
 {
-  "pairs": ["BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "APT/USD", "SUI/USD", "HYPE/USD", "DOGE/USD"],
+  "pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
   "interval": 5000,
-  "port": 3000,
-  "mcpPort": 3001,
+  "port": 13001,
+  "mcpPort": 13002,
   "timeframe": "1h",
   "dataRefreshInterval": 300000
 }

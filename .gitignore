@@ -28,3 +28,9 @@ CLAUDE.md
 
 # Runtime state (written by writeAIConfig, not project config)
 data/config/ai-provider.json
+
+# User-specific config with credentials (use *.example.json as template)
+data/config/crypto.json
+data/config/crypto.json.backup
+data/config/model.json
+data/config/mcp.json

@@ -1,0 +1,22 @@
+{
+  "_comment": "Binance 交易所配置示例",
+  "allowedSymbols": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "BNB/USDT",
+    "XRP/USDT",
+    "DOGE/USDT"
+  ],
+  "provider": {
+    "type": "ccxt",
+    "exchange": "binance",
+    "sandbox": false,
+    "demoTrading": false,
+    "defaultMarketType": "swap",
+    "options": {
+      "defaultType": "future",
+      "adjustForTimeDifference": true
+    }
+  }
+}

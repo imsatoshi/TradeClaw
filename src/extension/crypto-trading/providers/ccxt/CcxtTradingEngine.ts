@@ -228,7 +228,11 @@ export class CcxtTradingEngine implements ICryptoTradingEngine {
   async getAccount(): Promise<CryptoAccountInfo> {
     this.ensureInit();
 
-    const balance = await this.exchange.fetchBalance();
+    // Binance requires type parameter for futures account
+    const balanceParams = this.config.exchange === 'binance' && this.config.defaultMarketType === 'swap'
+      ? { type: 'future' }
+      : {};
+    const balance = await this.exchange.fetchBalance(balanceParams);
 
     // CCXT Balance uses indexer to access currency
     const bal = balance as unknown as Record<string, Record<string, unknown>>;

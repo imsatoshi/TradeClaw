@@ -1,4 +1,5 @@
-import { anthropic } from '@ai-sdk/anthropic'
+import { createAnthropic } from '@ai-sdk/anthropic'
+import { createOpenAI } from '@ai-sdk/openai'
 import { readFile, writeFile, appendFile, mkdir } from 'fs/promises'
 import { resolve } from 'path'
 import { Engine } from './core/engine.js'
@@ -43,6 +44,7 @@ import { emit } from './core/agent-events.js'
 import { SessionStore } from './core/session.js'
 import { readAIConfig } from './core/ai-config.js'
 import { askClaudeCodeWithSession } from './providers/claude-code/index.js'
+import { cleanupKimiCodeProvider } from './providers/kimi-code/index.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const SEC_WALLET_FILE = resolve('data/securities-trading/commit.json')
@@ -55,7 +57,22 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 async function main() {
   const config = await loadConfig()
-  const model = anthropic(config.model.model)
+  
+  // Select AI provider based on config
+  let model
+  if (config.model.provider === 'openai') {
+    const openaiProvider = createOpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENAI_BASE_URL || config.model.baseUrl,
+    })
+    model = openaiProvider.chat(config.model.model)
+  } else {
+    const anthropicProvider = createAnthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      baseURL: process.env.ANTHROPIC_BASE_URL || config.model.baseUrl,
+    })
+    model = anthropicProvider.chat(config.model.model)
+  }
 
   // ==================== Infrastructure ====================
 
@@ -66,6 +83,11 @@ async function main() {
   let cryptoResult: Awaited<ReturnType<typeof createCryptoTradingEngine>> = null
   try {
     cryptoResult = await createCryptoTradingEngine(config)
+    if (cryptoResult) {
+      console.log('crypto trading engine: initialized')
+    } else {
+      console.log('crypto trading engine: disabled (provider = none)')
+    }
   } catch (err) {
     console.warn('crypto trading engine init failed (non-fatal, continuing without it):', err)
   }
@@ -205,6 +227,20 @@ async function main() {
     `**Frontal Lobe:** ${frontalLobe || '(empty)'}`,
     '',
     `**Emotion:** ${emotion}`,
+    '',
+    '---',
+    '## Trading System Access',
+    '',
+    'You are connected to a LIVE trading system via Binance (Freqtrade).',
+    '',
+    'CRITICAL RULES for position/portfolio/account queries:',
+    '1. You MUST call tools EVERY TIME the user asks about positions, balance, or account — even if you answered the same question before.',
+    '2. NEVER reuse position data from previous conversation turns. Market data changes every second.',
+    '3. Always call `cryptoGetPositions` for real-time positions from the exchange.',
+    '4. Always call `cryptoGetAccount` for real-time account balance.',
+    '5. Always call `cryptoGetOrders` for order history.',
+    '6. DO NOT use sandbox data for portfolio queries.',
+    '7. If the user says "看看持仓" or similar, you MUST call tools first, then respond with fresh data.',
   ].join('\n')
 
   // Refresh market data & news periodically
@@ -257,12 +293,16 @@ async function main() {
   }
 
   if (process.env.TELEGRAM_BOT_TOKEN) {
-    plugins.push(new TelegramPlugin({
-      token: process.env.TELEGRAM_BOT_TOKEN,
-      allowedChatIds: process.env.TELEGRAM_CHAT_ID
-        ? process.env.TELEGRAM_CHAT_ID.split(',').map(Number)
-        : [],
-    }))
+    plugins.push(new TelegramPlugin(
+      {
+        token: process.env.TELEGRAM_BOT_TOKEN,
+        allowedChatIds: process.env.TELEGRAM_CHAT_ID
+          ? process.env.TELEGRAM_CHAT_ID.split(',').map(Number)
+          : [],
+      },
+      {}, // claudeCodeConfig
+      { mcpConfigFile: resolve('data/config/mcp.json') } // kimiCodeConfig
+    ))
   }
 
   const ctx: EngineContext = { config, engine, sandbox, cryptoEngine }
@@ -442,6 +482,7 @@ async function main() {
     }
     await cryptoResult?.close()
     await secResult?.close()
+    await cleanupKimiCodeProvider()
     process.exit(0)
   }
   process.on('SIGINT', shutdown)

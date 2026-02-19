@@ -13,6 +13,49 @@ import { type SessionStore, toModelMessages } from './session.js'
 import { compactIfNeeded, type CompactionConfig } from './compaction.js'
 import { extractMediaFromToolOutput } from './media.js'
 
+// ==================== Tool Result Formatter ====================
+
+function formatToolResults(toolResults: any[]): string | null {
+  for (const tr of toolResults) {
+    // Format cryptoGetPositions
+    if (tr.toolName === 'cryptoGetPositions' && Array.isArray(tr.output) && tr.output.length > 0) {
+      const positions = tr.output
+      let text = '## 📊 您的持仓情况\n\n'
+      text += `**持仓数量:** ${positions.length}\n\n`
+
+      let totalPnl = 0
+      positions.forEach((p: any, i: number) => {
+        text += `**${i + 1}. ${p.symbol}**\n`
+        text += `- 方向: ${p.side === 'long' ? '做多 📈' : '做空 📉'}\n`
+        text += `- 数量: ${p.size}\n`
+        text += `- 开仓价: $${p.entryPrice}\n`
+        text += `- 标记价: $${typeof p.markPrice === 'number' ? p.markPrice.toFixed(2) : p.markPrice}\n`
+        text += `- 杠杆: ${p.leverage}x\n`
+        text += `- 未实现盈亏: $${typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL.toFixed(2) : p.unrealizedPnL}\n`
+        text += `- 仓位价值: $${typeof p.positionValue === 'number' ? p.positionValue.toFixed(2) : p.positionValue}\n`
+        if (p.percentageOfEquity) text += `- 占权益: ${p.percentageOfEquity}\n`
+        text += '\n'
+        totalPnl += typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL : 0
+      })
+
+      text += `**总未实现盈亏:** $${totalPnl.toFixed(2)}\n`
+      return text
+    }
+
+    // Format cryptoGetAccount
+    if (tr.toolName === 'cryptoGetAccount' && tr.output && typeof tr.output === 'object') {
+      const a = tr.output
+      let text = '## 💰 账户信息\n\n'
+      text += `- **可用余额:** $${typeof a.balance === 'number' ? a.balance.toFixed(2) : a.balance}\n`
+      text += `- **账户权益:** $${typeof a.equity === 'number' ? a.equity.toFixed(2) : a.equity}\n`
+      text += `- **保证金占用:** $${typeof a.totalMargin === 'number' ? a.totalMargin.toFixed(2) : a.totalMargin}\n`
+      text += `- **未实现盈亏:** $${typeof a.unrealizedPnL === 'number' ? a.unrealizedPnL.toFixed(2) : a.unrealizedPnL}\n`
+      return text
+    }
+  }
+  return null
+}
+
 // ==================== Types ====================
 
 export interface EngineOpts {
@@ -64,7 +107,25 @@ export class Engine {
         }
       },
     }))
-    return { text: result.text ?? '', media }
+
+    let text = result.text ?? ''
+
+    // Workaround for models that don't generate detailed responses after tool calls
+    const toolResults = (result as any).toolResults || []
+    const hasCryptoData = toolResults.some((tr: any) =>
+      tr.toolName?.startsWith('crypto') &&
+      tr.output &&
+      (Array.isArray(tr.output) || (typeof tr.output === 'object' && 'balance' in tr.output))
+    )
+
+    if (hasCryptoData && text.length < 100) {
+      const formatted = formatToolResults(toolResults)
+      if (formatted) {
+        text = formatted
+      }
+    }
+
+    return { text, media }
   }
 
   /** Prompt with session — appends to session and uses full history as context. */
@@ -99,7 +160,24 @@ export class Engine {
       }),
     )
 
-    const text = result.text ?? ''
+    let text = result.text ?? ''
+
+    // Workaround for models that don't generate detailed responses after tool calls
+    // Check if any tool results contain crypto/account data that should be displayed
+    const toolResults = (result as any).toolResults || []
+    const hasCryptoData = toolResults.some((tr: any) =>
+      tr.toolName?.startsWith('crypto') &&
+      tr.output &&
+      (Array.isArray(tr.output) || (typeof tr.output === 'object' && 'balance' in tr.output))
+    )
+
+    if (hasCryptoData && text.length < 100) {
+      // AI didn't generate detailed response, format tool results manually
+      const formatted = formatToolResults(toolResults)
+      if (formatted) {
+        text = formatted
+      }
+    }
 
     // Append assistant response to session
     await session.appendAssistant(text, 'engine')
