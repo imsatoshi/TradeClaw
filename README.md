@@ -2,6 +2,10 @@
   <img src="alice-full.png" alt="Open Alice" width="128">
 </p>
 
+<p align="center">
+  <a href="https://deepwiki.com/imsatoshi/TradeClaw">📖 Documentation</a> · <a href="https://github.com/imsatoshi/TradeClaw/live">🔴 Live Demo</a> · <a href="https://github.com/imsatoshi/TradeClaw/blob/master/LICENSE">MIT License</a>
+</p>
+
 # Open Alice
 
 A personal AI trading agent. She automatically fetches news, computes quantitative factors, logs trade rationale, builds strategies across different timeframes, and monitors and adjusts your portfolio 24/7.
