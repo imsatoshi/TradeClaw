@@ -4,6 +4,7 @@ import type { Sandbox } from '../sandbox/Sandbox';
 import { calculate } from '../tools/calculate.tool';
 import { calculateIndicator } from '../tools/calculate-indicator.tool';
 import { globNews, grepNews, readNews } from '../tools/news.tool';
+import { CRYPTO_ALLOWED_SYMBOLS } from '../../crypto-trading/interfaces.js';
 
 /**
  * Create analysis-only AI tools from Sandbox
@@ -189,10 +190,10 @@ Make sure to use the same lookback parameter to get consistent indices.
     }),
 
     getAllowedSymbols: tool({
-      description: 'Get available trading symbols/pairs',
+      description: 'Get available trading symbols/pairs (from exchange whitelist)',
       inputSchema: z.object({}),
       execute: async () => {
-        return sandbox.getAvailableSymbols();
+        return [...CRYPTO_ALLOWED_SYMBOLS];
       },
     }),
 

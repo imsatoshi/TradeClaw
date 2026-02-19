@@ -83,6 +83,11 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
   // Cache for order symbol mapping (needed for cancelOrder)
   private orderSymbolCache = new Map<string, string>();
 
+  /** Whitelist refresh: last sync time and in-flight guard */
+  private whitelistLastSync = 0;
+  private whitelistRefreshing = false;
+  private static readonly WHITELIST_REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
   constructor(config: FreqtradeEngineConfig) {
     this.config = config;
     this.authHeader = 'Basic ' + Buffer.from(`${config.username}:${config.password}`).toString('base64');
@@ -104,6 +109,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       initCryptoAllowedSymbols(whitelist);
       console.log(`freqtrade: synced ${whitelist.length} pairs from whitelist: ${whitelist.join(', ')}`);
     }
+    this.whitelistLastSync = Date.now();
 
     this.initialized = true;
     console.log(`freqtrade trading engine: connected to ${this.config.url}`);
@@ -188,6 +194,9 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
 
   async getPositions(): Promise<CryptoPosition[]> {
     this.ensureInit();
+
+    // Refresh whitelist in background (Freqtrade whitelist is dynamic based on VolumePairList etc.)
+    this.refreshWhitelistIfStale();
 
     // Get open trades from Freqtrade — /api/v1/status returns current_rate for open trades
     const trades = await this.get<FreqtradeTrade[]>('/api/v1/status');
@@ -333,6 +342,35 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
    */
   async fetchShowConfig(): Promise<FreqtradeShowConfigResponse> {
     return this.get<FreqtradeShowConfigResponse>('/api/v1/show_config');
+  }
+
+  /**
+   * Refresh CRYPTO_ALLOWED_SYMBOLS from Freqtrade if stale (fire-and-forget, non-blocking).
+   */
+  private refreshWhitelistIfStale(): void {
+    const now = Date.now();
+    if (this.whitelistRefreshing || now - this.whitelistLastSync < FreqtradeTradingEngine.WHITELIST_REFRESH_INTERVAL) return;
+    this.whitelistRefreshing = true;
+    this.fetchWhitelist()
+      .then((raw) => {
+        const whitelist = raw.map(normalizePair);
+        if (whitelist.length > 0) {
+          const prev = [...CRYPTO_ALLOWED_SYMBOLS];
+          initCryptoAllowedSymbols(whitelist);
+          const added = whitelist.filter(s => !prev.includes(s));
+          const removed = prev.filter(s => !whitelist.includes(s));
+          if (added.length > 0 || removed.length > 0) {
+            console.log(`freqtrade: whitelist updated — added: [${added.join(', ')}], removed: [${removed.join(', ')}]`);
+          }
+        }
+        this.whitelistLastSync = Date.now();
+      })
+      .catch((err) => {
+        console.warn('freqtrade: background whitelist refresh failed:', err);
+      })
+      .finally(() => {
+        this.whitelistRefreshing = false;
+      });
   }
 
   /**
