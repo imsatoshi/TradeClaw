@@ -263,18 +263,24 @@ export async function compactIfNeeded(
 
   // Phase 2: full compact
   console.log(`compaction: microcompact insufficient (saved ${savedTokens}), running full LLM summarization...`)
-  const prompt = buildSummarizationPrompt(activeEntries)
-  const summaryText = await summarize(prompt)
+  try {
+    const prompt = buildSummarizationPrompt(activeEntries)
+    const summaryText = await summarize(prompt)
 
-  const lastEntry = allEntries[allEntries.length - 1]
-  const boundary = createCompactBoundary('auto', currentTokens, session.id, lastEntry?.uuid ?? null)
-  const summary = createSummaryEntry(summaryText, session.id, boundary.uuid)
+    const lastEntry = allEntries[allEntries.length - 1]
+    const boundary = createCompactBoundary('auto', currentTokens, session.id, lastEntry?.uuid ?? null)
+    const summary = createSummaryEntry(summaryText, session.id, boundary.uuid)
 
-  await session.appendRaw(boundary)
-  await session.appendRaw(summary)
+    await session.appendRaw(boundary)
+    await session.appendRaw(summary)
 
-  console.log(`compaction: full compact done. ${activeEntries.length} entries → summary`)
-  return { compacted: true, method: 'full' }
+    console.log(`compaction: full compact done. ${activeEntries.length} entries → summary`)
+    return { compacted: true, method: 'full' }
+  } catch (err) {
+    console.error('compaction: LLM summarization failed, falling back to microcompact:', err)
+    // Fall back to microcompact even if savings are below threshold
+    return { compacted: savedTokens > 0, method: savedTokens > 0 ? 'microcompact' : 'none', activeEntries: microcompacted }
+  }
 }
 
 /**

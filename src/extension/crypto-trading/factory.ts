@@ -7,6 +7,7 @@
 import type { ICryptoTradingEngine } from './interfaces.js';
 import type { Config } from '../../core/config.js';
 import { CcxtTradingEngine } from './providers/ccxt/index.js';
+import { FreqtradeTradingEngine } from './providers/freqtrade/index.js';
 
 export interface CryptoTradingEngineResult {
   engine: ICryptoTradingEngine;
@@ -51,6 +52,26 @@ export async function createCryptoTradingEngine(
       });
 
       await engine.init();
+
+      console.log(`crypto trading engine: connected to ${providerConfig.exchange} (${providerConfig.defaultMarketType})`);
+
+      return {
+        engine,
+        close: () => engine.close(),
+      };
+    }
+
+    case 'freqtrade': {
+      const engine = new FreqtradeTradingEngine({
+        url: providerConfig.url,
+        username: providerConfig.username,
+        password: providerConfig.password,
+        defaultStakeAmount: providerConfig.defaultStakeAmount,
+      });
+
+      await engine.init();
+
+      console.log(`crypto trading engine: connected to freqtrade at ${providerConfig.url}`);
 
       return {
         engine,

@@ -6,6 +6,8 @@ import { parseUpdate, parseCallbackQuery } from './handler.js'
 import { MediaGroupMerger } from './media-group.js'
 import { askClaudeCode, askClaudeCodeWithSession } from '../../providers/claude-code/index.js'
 import type { ClaudeCodeConfig } from '../../providers/claude-code/index.js'
+import { askKimiCode, askKimiCodeWithSession } from '../../providers/kimi-code/index.js'
+import type { KimiCodeConfig } from '../../providers/kimi-code/index.js'
 import { SessionStore } from '../../core/session.js'
 import { forceCompact, type CompactionConfig } from '../../core/compaction.js'
 import { readAIConfig, writeAIConfig, type AIProvider } from '../../core/ai-config.js'
@@ -15,6 +17,7 @@ const MAX_MESSAGE_LENGTH = 4096
 
 const PROVIDER_LABELS: Record<AIProvider, string> = {
   'claude-code': 'Claude Code',
+  'kimi-code': 'Kimi Code',
   'vercel-ai-sdk': 'Vercel AI SDK',
 }
 
@@ -34,12 +37,19 @@ export class TelegramPlugin implements Plugin {
   /** Compaction config from engine config. */
   private compactionConfig!: CompactionConfig
 
+  /** Reference to engine for compact and other operations. */
+  private engineRef: import('../../core/engine.js').Engine | null = null
+
+  /** Per-user generation lock — prevents concurrent AI calls for the same user. */
+  private userLocks = new Map<number, Promise<void>>()
+
   /** Per-user unified session stores (keyed by userId). */
   private sessions = new Map<number, SessionStore>()
 
   constructor(
     config: Omit<TelegramConfig, 'pollingTimeout'> & { pollingTimeout?: number },
     claudeCodeConfig: ClaudeCodeConfig = {},
+    private kimiCodeConfig: KimiCodeConfig = {},
   ) {
     this.config = { pollingTimeout: 30, ...config }
     this.claudeCodeConfig = claudeCodeConfig
@@ -50,6 +60,7 @@ export class TelegramPlugin implements Plugin {
     const aiConfig = await readAIConfig()
     this.currentProvider = aiConfig.provider
     this.compactionConfig = ctx.config.compaction
+    this.engineRef = ctx.engine
 
     // Inject agent config into Claude Code config (constructor overrides take precedence)
     this.claudeCodeConfig = {
@@ -160,16 +171,18 @@ export class TelegramPlugin implements Plugin {
 
         // Edit the original settings message in-place
         const ccLabel = provider === 'claude-code' ? '> Claude Code' : 'Claude Code'
+        const kimiLabel = provider === 'kimi-code' ? '> Kimi Code' : 'Kimi Code'
         const aiLabel = provider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
         await client.editMessageText({
           chatId,
           messageId,
           text: `Current provider: ${PROVIDER_LABELS[provider]}\n\nChoose default AI provider:`,
           replyMarkup: {
-            inline_keyboard: [[
-              { text: ccLabel, callback_data: 'provider:claude-code' },
-              { text: aiLabel, callback_data: 'provider:vercel-ai-sdk' },
-            ]],
+            inline_keyboard: [
+              [{ text: ccLabel, callback_data: 'provider:claude-code' }],
+              [{ text: kimiLabel, callback_data: 'provider:kimi-code' }],
+              [{ text: aiLabel, callback_data: 'provider:vercel-ai-sdk' }],
+            ],
           },
         })
       } else {
@@ -181,31 +194,50 @@ export class TelegramPlugin implements Plugin {
   }
 
   private async handleMessage(ctx: EngineContext, client: TelegramClient, message: ParsedMessage) {
+    // Handle built-in commands without lock (lightweight operations)
+    if (message.command) {
+      try {
+        touchInteraction('telegram', String(message.chatId))
+        await this.handleCommand(client, message)
+      } catch (err) {
+        console.error('telegram command error:', err)
+      }
+      return
+    }
+
+    // Per-user lock: serialize AI generation for the same user
+    const userId = message.from.id
+    const prev = this.userLocks.get(userId) ?? Promise.resolve()
+    let releaseLock!: () => void
+    const lockPromise = new Promise<void>((r) => { releaseLock = r })
+    this.userLocks.set(userId, lockPromise)
+
+    await prev
+
     try {
-      // Record user interaction for delivery routing
       touchInteraction('telegram', String(message.chatId))
 
-      // Handle built-in commands
-      if (message.command) {
-        await this.handleCommand(client, message)
-        return
-      }
-
-      // Build prompt from message content
       const prompt = this.buildPrompt(message)
       if (!prompt) return
 
-      // Route based on configured provider
       if (this.currentProvider === 'claude-code') {
         await this.handleClaudeCodeMessage(client, message, prompt)
+      } else if (this.currentProvider === 'kimi-code') {
+        await this.handleKimiCodeMessage(client, message, prompt)
       } else {
-        const session = await this.getSession(message.from.id)
+        const session = await this.getSession(userId)
         const result = await ctx.engine.askWithSession(prompt, session)
         await this.sendReply(client, message.chatId, result.text, result.media)
       }
     } catch (err) {
       console.error('telegram message handling error:', err)
-      await this.sendReply(client, message.chatId, 'Sorry, something went wrong processing your message.').catch(() => {})
+      try {
+        await this.sendReply(client, message.chatId, 'Sorry, something went wrong processing your message.')
+      } catch (replyErr) {
+        console.error('telegram: failed to send error reply:', replyErr)
+      }
+    } finally {
+      releaseLock()
     }
   }
 
@@ -228,13 +260,22 @@ export class TelegramPlugin implements Plugin {
 
   private async handleCompactCommand(client: TelegramClient, message: ParsedMessage) {
     const session = await this.getSession(message.from.id)
-    await this.sendReply(client, message.chatId, '> Compacting session...')
+    await this.sendReply(client, message.chatId, `> Compacting session (via ${PROVIDER_LABELS[this.currentProvider]})...`)
 
     const result = await forceCompact(
       session,
       async (summarizePrompt) => {
-        const r = await askClaudeCode(summarizePrompt, { ...this.claudeCodeConfig, maxTurns: 1 })
-        return r.text
+        if (this.currentProvider === 'claude-code') {
+          const r = await askClaudeCode(summarizePrompt, { ...this.claudeCodeConfig, maxTurns: 1 })
+          return r.text
+        } else if (this.currentProvider === 'kimi-code') {
+          const r = await askKimiCode(summarizePrompt, { ...this.kimiCodeConfig })
+          return r.text
+        } else {
+          // vercel-ai-sdk: use engine's ask() (no session, single prompt)
+          const r = await this.engineRef!.ask(summarizePrompt)
+          return r.text
+        }
       },
     )
 
@@ -247,19 +288,22 @@ export class TelegramPlugin implements Plugin {
 
   private async sendSettingsMenu(client: TelegramClient, chatId: number) {
     const ccLabel = this.currentProvider === 'claude-code' ? '> Claude Code' : 'Claude Code'
+    const kimiLabel = this.currentProvider === 'kimi-code' ? '> Kimi Code' : 'Kimi Code'
     const aiLabel = this.currentProvider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
 
     await client.sendMessage({
       chatId,
       text: `Current provider: ${PROVIDER_LABELS[this.currentProvider]}\n\nChoose default AI provider:`,
       replyMarkup: {
-        inline_keyboard: [[
-          { text: ccLabel, callback_data: 'provider:claude-code' },
-          { text: aiLabel, callback_data: 'provider:vercel-ai-sdk' },
-        ]],
+        inline_keyboard: [
+          [{ text: ccLabel, callback_data: 'provider:claude-code' }],
+          [{ text: kimiLabel, callback_data: 'provider:kimi-code' }],
+          [{ text: aiLabel, callback_data: 'provider:vercel-ai-sdk' }],
+        ],
       },
     })
   }
+
 
   private async handleClaudeCodeMessage(client: TelegramClient, message: ParsedMessage, userPrompt: string) {
     await this.sendReply(client, message.chatId, '> Processing with Claude Code...')
@@ -268,12 +312,24 @@ export class TelegramPlugin implements Plugin {
     const result = await askClaudeCodeWithSession(userPrompt, session, {
       claudeCode: this.claudeCodeConfig,
       compaction: this.compactionConfig,
-      historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier messages.',
+      historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier events or decisions.',
     })
 
     await this.sendReply(client, message.chatId, result.text, result.media)
   }
 
+  private async handleKimiCodeMessage(client: TelegramClient, message: ParsedMessage, userPrompt: string) {
+    await this.sendReply(client, message.chatId, '> Processing with Kimi Code...')
+
+    const session = await this.getSession(message.from.id)
+    const result = await askKimiCodeWithSession(userPrompt, session, {
+      kimiCode: this.kimiCodeConfig,
+      compaction: this.compactionConfig,
+      historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier events or decisions.',
+    })
+
+    await this.sendReply(client, message.chatId, result.text, result.media)
+  }
   private buildPrompt(message: ParsedMessage): string | null {
     const parts: string[] = []
 

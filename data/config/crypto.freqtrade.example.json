@@ -1,0 +1,9 @@
+{
+  "provider": {
+    "type": "freqtrade",
+    "url": "http://localhost:8080",
+    "username": "alice",
+    "password": "your-freqtrade-api-password",
+    "defaultStakeAmount": 100
+  }
+}

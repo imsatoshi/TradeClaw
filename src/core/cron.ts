@@ -92,7 +92,7 @@ export function nextCronFire(expr: string, afterMs: number): number | null {
   const parts = expr.trim().split(/\s+/)
   if (parts.length !== 5) return null
 
-  const fields = parts.map(parseField)
+  const fields = parts.map((p, i) => parseField(p, i))
   if (fields.some((f) => f === null)) return null
 
   const [minutes, hours, doms, months, dows] = fields as number[][]
@@ -128,20 +128,21 @@ export function nextCronFire(expr: string, afterMs: number): number | null {
   return null
 }
 
-function parseField(field: string): number[] | null {
-  const rangeMap: Record<number, [number, number]> = {
-    0: [0, 59],   // minute
-    1: [0, 23],   // hour
-    2: [1, 31],   // dom
-    3: [1, 12],   // month
-    4: [0, 6],    // dow
-  }
-  // This is called per-field but we don't know which field index.
-  // We'll parse generically and let nextCronFire validate.
-  return parseFieldValues(field)
+/** Field index → valid range [min, max] */
+const FIELD_RANGES: Array<[number, number]> = [
+  [0, 59],   // 0: minute
+  [0, 23],   // 1: hour
+  [1, 31],   // 2: dom
+  [1, 12],   // 3: month
+  [0, 6],    // 4: dow
+]
+
+function parseField(field: string, fieldIndex: number): number[] | null {
+  const [min, max] = FIELD_RANGES[fieldIndex] ?? [0, 59]
+  return parseFieldValues(field, min, max)
 }
 
-function parseFieldValues(field: string): number[] | null {
+function parseFieldValues(field: string, min: number, max: number): number[] | null {
   const result: number[] = []
 
   for (const part of field.split(',')) {
@@ -152,7 +153,7 @@ function parseFieldValues(field: string): number[] | null {
       if (step === 0) return null
       let start: number, end: number
       if (stepMatch[1] === '*') {
-        start = 0; end = 59  // will be bounded by field context
+        start = min; end = max
       } else {
         const [a, b] = stepMatch[1].split('-').map(Number)
         start = a; end = b
@@ -172,8 +173,7 @@ function parseFieldValues(field: string): number[] | null {
 
     // Wildcard
     if (part === '*') {
-      // Return all possible values — caller determines the valid range
-      for (let i = 0; i <= 59; i++) result.push(i)
+      for (let i = min; i <= max; i++) result.push(i)
       continue
     }
 
@@ -339,7 +339,11 @@ export function createCronEngine(opts: CronEngineOpts): CronEngine {
     }
 
     if (!stopped) {
-      await save()
+      try {
+        await save()
+      } catch (err) {
+        console.error('cron: failed to save store after tick:', err)
+      }
       armTimer()
     }
   }

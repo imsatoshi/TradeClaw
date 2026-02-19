@@ -18,6 +18,7 @@ const engineSchema = z.object({
 const modelSchema = z.object({
   provider: z.string().default('anthropic'),
   model: z.string().default('claude-sonnet-4-5-20250929'),
+  baseUrl: z.string().optional(),
 })
 
 const agentSchema = z.object({
@@ -58,6 +59,13 @@ const cryptoSchema = z.object({
       demoTrading: z.boolean().default(false),
       defaultMarketType: z.enum(['spot', 'swap']).default('swap'),
       options: z.record(z.string(), z.unknown()).optional(),
+    }),
+    z.object({
+      type: z.literal('freqtrade'),
+      url: z.string().url(),
+      username: z.string(),
+      password: z.string(),
+      defaultStakeAmount: z.number().optional(),
     }),
     z.object({
       type: z.literal('none'),
