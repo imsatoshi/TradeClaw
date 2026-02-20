@@ -25,13 +25,22 @@ function formatToolResults(toolResults: any[]): string | null {
 
       let totalPnl = 0
       positions.forEach((p: any, i: number) => {
-        text += `**${i + 1}. ${p.symbol}**\n`
+        // NFI strategy context header
+        const nfiParts: string[] = []
+        if (p.enterTag) nfiParts.push(`signal: ${p.enterTag}`)
+        if (typeof p.grindCount === 'number' && p.grindCount > 0) nfiParts.push(`DCA: ${p.grindCount}x`)
+        if (typeof p.partialExitCount === 'number' && p.partialExitCount > 0) nfiParts.push(`partial exits: ${p.partialExitCount}`)
+        const nfiLabel = nfiParts.length > 0 ? ` [NFI ${nfiParts.join(', ')}]` : ''
+
+        text += `**${i + 1}. ${p.symbol}**${nfiLabel}\n`
         text += `- 方向: ${p.side === 'long' ? '做多 📈' : '做空 📉'}\n`
         text += `- 数量: ${p.size}\n`
         text += `- 开仓价: $${p.entryPrice}\n`
         text += `- 标记价: $${typeof p.markPrice === 'number' ? p.markPrice.toFixed(2) : p.markPrice}\n`
         text += `- 杠杆: ${p.leverage}x\n`
-        text += `- 未实现盈亏: $${typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL.toFixed(2) : p.unrealizedPnL}\n`
+        text += `- 未实现盈亏: $${typeof p.unrealizedPnL === 'number' ? p.unrealizedPnL.toFixed(2) : p.unrealizedPnL}`
+        if (typeof p.profitRatio === 'number') text += ` (${(p.profitRatio * 100).toFixed(2)}%)`
+        text += '\n'
         text += `- 仓位价值: $${typeof p.positionValue === 'number' ? p.positionValue.toFixed(2) : p.positionValue}\n`
         if (p.percentageOfEquity) text += `- 占权益: ${p.percentageOfEquity}\n`
         text += '\n'
@@ -117,9 +126,11 @@ export class Engine {
   /** Simple prompt (no session context). */
   async ask(prompt: string): Promise<EngineResult> {
     const media: MediaAttachment[] = []
+    let totalToolCalls = 0
     const result = await this.withLock(() => this.agent.generate({
       prompt,
       onStepFinish: (step) => {
+        totalToolCalls += step.toolCalls.length
         for (const tr of step.toolResults) {
           media.push(...extractMediaFromToolOutput(tr.output))
         }
@@ -127,6 +138,33 @@ export class Engine {
     }))
 
     let text = result.text ?? ''
+
+    // Trading hallucination guard (same as askWithSession)
+    if (isTradingHallucination(text, totalToolCalls)) {
+      console.warn('engine(ask): detected trading hallucination (0 tool calls), retrying with correction')
+
+      let retryToolCalls = 0
+      const retryResult = await this.withLock(() => this.agent.generate({
+        messages: [
+          { role: 'user', content: prompt } as ModelMessage,
+          { role: 'assistant', content: text } as ModelMessage,
+          { role: 'user', content: HALLUCINATION_CORRECTION } as ModelMessage,
+        ],
+        onStepFinish: (step) => {
+          retryToolCalls += step.toolCalls.length
+          for (const tr of step.toolResults) {
+            media.push(...extractMediaFromToolOutput(tr.output))
+          }
+        },
+      }))
+
+      text = retryResult.text ?? ''
+
+      if (isTradingHallucination(text, retryToolCalls)) {
+        console.warn('engine(ask): hallucination persisted after retry, blocking fake response')
+        text = '⚠️ 操作失败：系统未能正确执行交易指令。请重新发送你的请求，我会调用正确的工具来操作。'
+      }
+    }
 
     // Workaround for models that don't generate detailed responses after tool calls
     const toolResults = (result as any).toolResults || []

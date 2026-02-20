@@ -311,12 +311,129 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
       },
     }),
 
+    cryptoGetOpenOrders: tool({
+      description: 'Query current pending/open orders on exchange (limit orders waiting to fill). Use this to check if you have any unfilled limit orders (e.g. take-profit or stop-loss).',
+      inputSchema: z.object({
+        symbol: z.string().optional().describe('Trading pair symbol to filter (e.g. "BTC/USDT"), or omit for all open orders'),
+      }),
+      execute: async ({ symbol }) => {
+        if (!('getOpenOrders' in tradingEngine)) {
+          return { orders: [], message: 'Open orders query not supported by this trading engine.' };
+        }
+        const orders = await (tradingEngine as any).getOpenOrders(symbol);
+        if (orders.length === 0) {
+          return { orders: [], message: symbol ? `No open orders for ${symbol}.` : 'No open orders.' };
+        }
+        return orders;
+      },
+    }),
+
     cryptoGetAccount: tool({
       description:
         'Query crypto account info (balance, margin, unrealizedPnL, equity, realizedPnL, totalPnL). totalPnL = realizedPnL + unrealizedPnL.',
       inputSchema: z.object({}),
       execute: async () => {
         return await tradingEngine.getAccount();
+      },
+    }),
+
+    // ==================== Portfolio management tools (Fund Manager) ====================
+
+    cryptoManageBlacklist: tool({
+      description: 'Manage trading blacklist — prevent/allow the strategy from opening new trades on specific pairs. Use this to control which pairs the algorithm can trade.',
+      inputSchema: z.object({
+        action: z.enum(['list', 'add', 'remove']).describe('list: view current blacklist, add: block pairs, remove: unblock pairs'),
+        pairs: z.array(z.string()).optional().describe('Pairs to add/remove (e.g. ["ETH/USDT", "DOGE/USDT"]). Required for add/remove.'),
+      }),
+      execute: async ({ action, pairs }) => {
+        if (!('getBlacklist' in tradingEngine)) {
+          return { error: 'Blacklist management not supported by this trading engine.' };
+        }
+        const engine = tradingEngine as any;
+        switch (action) {
+          case 'list':
+            return { blacklist: await engine.getBlacklist() };
+          case 'add':
+            if (!pairs || pairs.length === 0) return { error: 'No pairs specified to add.' };
+            return await engine.addToBlacklist(pairs);
+          case 'remove':
+            if (!pairs || pairs.length === 0) return { error: 'No pairs specified to remove.' };
+            return await engine.removeFromBlacklist(pairs);
+        }
+      },
+    }),
+
+    cryptoLockPair: tool({
+      description: 'Temporarily lock a trading pair — prevent the strategy from opening new positions. Locks auto-expire. Use for short-term risk events (high volatility, news events). More granular than blacklist.',
+      inputSchema: z.object({
+        action: z.enum(['list', 'lock', 'unlock']).describe('list: view active locks, lock: create a lock, unlock: remove a lock'),
+        pair: z.string().optional().describe('Trading pair (e.g. "ETH/USDT"). Required for lock.'),
+        duration: z.string().optional().describe('Lock duration, e.g. "4h", "1d". Required for lock.'),
+        side: z.enum(['long', 'short', '*']).optional().describe('Side to lock. Default "*" (both sides).'),
+        reason: z.string().optional().describe('Reason for locking the pair.'),
+        lockId: z.number().optional().describe('Lock ID to remove. Required for unlock.'),
+      }),
+      execute: async ({ action, pair, duration, side, reason, lockId }) => {
+        if (!('getLocks' in tradingEngine)) {
+          return { error: 'Pair locking not supported by this trading engine.' };
+        }
+        const engine = tradingEngine as any;
+        switch (action) {
+          case 'list':
+            return { locks: await engine.getLocks() };
+          case 'lock': {
+            if (!pair) return { error: 'No pair specified.' };
+            if (!duration) return { error: 'No duration specified.' };
+            // Convert duration string to ISO datetime
+            const now = new Date();
+            const match = duration.match(/^(\d+)(m|h|d)$/);
+            if (!match) return { error: 'Invalid duration format. Use e.g. "30m", "4h", "1d".' };
+            const value = parseInt(match[1], 10);
+            const unit = match[2];
+            if (unit === 'm') now.setMinutes(now.getMinutes() + value);
+            else if (unit === 'h') now.setHours(now.getHours() + value);
+            else if (unit === 'd') now.setDate(now.getDate() + value);
+            const until = now.toISOString();
+            return await engine.lockPair(pair, until, side || '*', reason || 'Locked by AI portfolio manager');
+          }
+          case 'unlock':
+            if (!lockId) return { error: 'No lockId specified.' };
+            await engine.deleteLock(lockId);
+            return { success: true, message: `Lock ${lockId} removed.` };
+        }
+      },
+    }),
+
+    cryptoGetStrategyStats: tool({
+      description: 'View strategy performance by entry signal and exit reason. Use this to evaluate which trading signals are profitable and which should be disabled via blacklist.',
+      inputSchema: z.object({
+        type: z.enum(['entries', 'exits', 'mix_tags']).describe('entries: stats by entry signal, exits: stats by exit reason, mix_tags: combined entry+exit stats'),
+        pair: z.string().optional().describe('Filter by trading pair (e.g. "BTC/USDT"). Omit for all pairs.'),
+      }),
+      execute: async ({ type, pair }) => {
+        if (!('getEntryStats' in tradingEngine)) {
+          return { error: 'Strategy stats not supported by this trading engine.' };
+        }
+        const engine = tradingEngine as any;
+        switch (type) {
+          case 'entries':
+            return await engine.getEntryStats(pair);
+          case 'exits':
+            return await engine.getExitStats(pair);
+          case 'mix_tags':
+            return await engine.getMixTagStats(pair);
+        }
+      },
+    }),
+
+    cryptoReloadConfig: tool({
+      description: 'Reload Freqtrade configuration. Use after whitelist/blacklist changes to ensure the strategy picks up the new settings.',
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!('reloadConfig' in tradingEngine)) {
+          return { error: 'Config reload not supported by this trading engine.' };
+        }
+        return await (tradingEngine as any).reloadConfig();
       },
     }),
   };
