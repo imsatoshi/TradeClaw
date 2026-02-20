@@ -19,6 +19,7 @@
 - **加密货币交易** — CCXT（Bybit、OKX、Binance 等）或 [Freqtrade](https://www.freqtrade.io/) 策略机器人，动态白名单同步
 - **证券交易** — Alpaca 美股集成，git 风格的钱包（stage、commit、push）
 - **市场分析** — 技术指标（RSI、MACD、布林带等）、新闻搜索、价格模拟
+- **A 股行情** — 东方财富免费 API，支持搜索股票、实时行情、K 线数据和技术指标计算（只分析，不交易）
 - **认知状态** — 持久化的"大脑"，包含前额叶记忆、情绪追踪和提交历史
 - **调度系统** — 心跳循环 + 定时任务，自动压缩上下文、去重和消息投递队列
 - **连接器** — Telegram 机器人、HTTP Webhook、MCP Server
@@ -40,6 +41,7 @@ graph LR
 
   subgraph 扩展
     AK[Analysis Kit 分析工具]
+    AS[A-Share A股行情]
     CT[Crypto Trading 加密交易]
     ST[Securities Trading 证券交易]
     BR[Brain 大脑]
@@ -58,6 +60,7 @@ graph LR
   E --> S
   SC --> E
   AK --> E
+  AS --> E
   CT --> E
   ST --> E
   BR --> E
@@ -130,6 +133,21 @@ cp data/config/crypto.freqtrade.example.json data/config/crypto.json
 
 基于 [Alpaca](https://alpaca.markets/)。支持模拟盘和实盘 — 在 `data/config/securities.json` 中切换。
 
+### A 股行情分析
+
+内置东方财富免费 API，**无需配置**，开箱即用。只做分析，不做交易。
+
+提供 4 个 AI 工具：
+
+| 工具 | 说明 | 示例 |
+|------|------|------|
+| `searchAShare` | 搜索股票（代码或中文名） | "搜索茅台" |
+| `getAShareQuote` | 批量实时行情 | "看看 600519 和 000858 的行情" |
+| `getAShareKline` | K 线数据（日/周/月/分钟线） | "给我贵州茅台最近 60 天的日 K" |
+| `calculateAShareIndicator` | 技术指标计算 | "算一下茅台的 RSI" |
+
+支持的技术指标：SMA、EMA、RSI、MACD、BBANDS、ATR、STDEV 等，复用 Analysis Kit 的计算引擎。
+
 ### 环境变量
 
 | 变量 | 说明 |
@@ -179,6 +197,7 @@ src/
     vercel-ai-sdk/           # Vercel AI SDK ToolLoopAgent 封装
   extension/
     analysis-kit/            # 行情数据、指标计算、新闻、沙盒
+    ashare/                  # A 股行情分析（东方财富 API）
     crypto-trading/          # 交易引擎工厂 + 钱包
       providers/
         ccxt/                # 直连交易所（CCXT）
