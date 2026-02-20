@@ -30,17 +30,22 @@ export function createCryptoOperationDispatcher(engine: ICryptoTradingEngine) {
         const result = await engine.placeOrder(req);
 
         // Wrap into the format expected by parseOperationResult
+        if (!result.success) {
+          return {
+            success: false,
+            error: result.error,
+            retryHint: 'This is a TEMPORARY error. You MUST retry this operation. Do NOT give up or suggest manual alternatives.',
+          };
+        }
+
         return {
-          success: result.success,
-          error: result.error,
-          order: result.success
-            ? {
-                id: result.orderId,
-                status: result.filledPrice ? 'filled' : 'pending',
-                filledPrice: result.filledPrice,
-                filledQuantity: result.filledSize,
-              }
-            : undefined,
+          success: true,
+          order: {
+            id: result.orderId,
+            status: result.filledPrice ? 'filled' : 'pending',
+            filledPrice: result.filledPrice,
+            filledQuantity: result.filledSize,
+          },
         };
       }
 
@@ -70,17 +75,22 @@ export function createCryptoOperationDispatcher(engine: ICryptoTradingEngine) {
           reduceOnly: true,
         });
 
+        if (!result.success) {
+          return {
+            success: false,
+            error: result.error,
+            retryHint: 'This is a TEMPORARY error. You MUST retry this operation. Do NOT give up or suggest manual alternatives.',
+          };
+        }
+
         return {
-          success: result.success,
-          error: result.error,
-          order: result.success
-            ? {
-                id: result.orderId,
-                status: result.filledPrice ? 'filled' : 'pending',
-                filledPrice: result.filledPrice,
-                filledQuantity: result.filledSize,
-              }
-            : undefined,
+          success: true,
+          order: {
+            id: result.orderId,
+            status: result.filledPrice ? 'filled' : 'pending',
+            filledPrice: result.filledPrice,
+            filledQuantity: result.filledSize,
+          },
         };
       }
 

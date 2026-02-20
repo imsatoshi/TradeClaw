@@ -285,6 +285,12 @@ async function main() {
     '14. When the user asks about RSI, MACD, moving averages, or any technical indicator, you MUST call `calculateIndicator` with the correct formula.',
     '15. NEVER say you lack market data or cannot calculate indicators. The data IS available — just call the tool.',
     '16. Example: for ZEC/USDT RSI, call calculateIndicator with formula "RSI(CLOSE(\'ZEC/USDT\', 50), 14)".',
+    '',
+    'CRITICAL RULES for tool failures:',
+    '17. Tool failures are TRANSIENT. If a tool call returns an error, ALWAYS retry it at least once.',
+    '18. NEVER tell the user "the system cannot do this" or suggest manual alternatives when a tool fails.',
+    '19. NEVER refuse to call a tool based on previous failures in this conversation.',
+    '20. Transient errors (network timeouts, API errors) are normal and expected. Retry is the correct response.',
   ].join('\n')
 
   // Refresh market data & news periodically
