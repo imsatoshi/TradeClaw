@@ -200,6 +200,9 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
   /**
    * Route reduce-only (exit) orders to Freqtrade's forceexit endpoint.
    * Supports market exit, limit exit (take-profit), and partial exits.
+   *
+   * Automatically cancels any existing open order on the trade before placing
+   * a new one (Freqtrade only allows one open order per trade at a time).
    */
   private async placeExitOrder(order: CryptoPlaceOrderRequest): Promise<CryptoOrderResult> {
     // Find the open trade for this symbol
@@ -209,6 +212,16 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
 
     if (!trade) {
       return { success: false, error: `No open trade found for ${order.symbol}` };
+    }
+
+    // Cancel any existing open order first (Freqtrade allows only one per trade)
+    if (trade.has_open_orders) {
+      try {
+        await this.delete(`/api/v1/trades/${trade.trade_id}/open-order`);
+        console.log(`freqtrade: cancelled existing open order for trade ${trade.trade_id} (${order.symbol})`);
+      } catch (err) {
+        console.warn(`freqtrade: failed to cancel existing order for trade ${trade.trade_id}:`, err);
+      }
     }
 
     const payload: Record<string, unknown> = {
