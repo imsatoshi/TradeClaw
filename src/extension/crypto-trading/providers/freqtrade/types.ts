@@ -10,10 +10,13 @@
 export interface FreqtradeOrderRequest {
   pair: string;
   side: 'long' | 'short';
-  amount?: number;
+  /** Stake amount in stake currency (USDT). Field name must be stakeamount per Freqtrade API. */
+  stakeamount?: number;
   price?: number;
   ordertype: 'market' | 'limit' | 'stop_loss' | 'stop_loss_limit';
   stoploss?: number;
+  entry_tag?: string;
+  leverage?: number;
 }
 
 export interface FreqtradeOrderResponse {
