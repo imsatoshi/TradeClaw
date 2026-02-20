@@ -401,6 +401,10 @@ async function main() {
       }
     }
 
+    // Clear heartbeat session before each run to prevent stale data accumulation.
+    // Without this, the model copies previous responses instead of calling tools fresh.
+    await heartbeatSession.clear()
+
     // Read HEARTBEAT.md content upfront so we can inject it into the prompt
     // (the AI has no file-reading tool, so we must provide the content directly)
     const heartbeatContent = await readHeartbeatFile(heartbeatFilePath)

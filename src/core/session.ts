@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readFile, appendFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { getActiveEntries } from './compaction.js'
 
@@ -126,6 +126,13 @@ export class SessionStore {
     if (entries.length > 0) {
       this.lastUuid = entries[entries.length - 1].uuid
     }
+  }
+
+  /** Clear all entries from the session file. */
+  async clear(): Promise<void> {
+    await mkdir(dirname(this.filePath), { recursive: true })
+    await writeFile(this.filePath, '')
+    this.lastUuid = null
   }
 
   /** Check if this session file exists. */
