@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="line" x1="80" y1="320" x2="432" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#a3e635"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- Letter A -->
+  <path d="M256 100 L148 400 L188 400 L210 340 L302 340 L324 400 L364 400 Z M256 180 L290 310 L222 310 Z" fill="white" opacity="0.95"/>
+
+  <!-- Trading chart line overlaid -->
+  <polyline
+    points="80,330 140,300 200,340 260,240 320,260 380,160 432,140"
+    stroke="url(#line)"
+    stroke-width="14"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"
+  />
+
+  <!-- Pulse dot at the end -->
+  <circle cx="432" cy="140" r="12" fill="#a3e635"/>
+  <circle cx="432" cy="140" r="20" fill="#a3e635" opacity="0.3"/>
+</svg>
