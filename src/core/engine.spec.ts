@@ -3,6 +3,8 @@ import { MockLanguageModelV3 } from 'ai/test'
 import { Engine, type EngineOpts, type EngineResult } from './engine.js'
 import { DEFAULT_COMPACTION_CONFIG, type CompactionConfig } from './compaction.js'
 import type { SessionStore, SessionEntry } from './session.js'
+import type { AIProvider, AskOptions, ProviderResult } from './ai-provider.js'
+import { createAgent } from '../providers/vercel-ai-sdk/index.js'
 
 // ==================== Helpers ====================
 
@@ -23,15 +25,30 @@ function makeMockModel(text = 'mock response') {
   return new MockLanguageModelV3({ doGenerate: makeDoGenerate(text) })
 }
 
-function makeEngine(overrides: Partial<EngineOpts> = {}): Engine {
-  return new Engine({
-    model: makeMockModel(overrides.instructions ?? 'mock response'),
-    tools: {},
-    instructions: 'You are a test agent.',
-    maxSteps: 1,
-    compaction: DEFAULT_COMPACTION_CONFIG,
-    ...overrides,
-  })
+/** Create a mock AIProvider that returns a fixed text and tracks calls. */
+function makeMockProvider(text = 'provider response'): AIProvider & { calls: Array<{ prompt: string; opts?: AskOptions }> } {
+  const calls: Array<{ prompt: string; opts?: AskOptions }> = []
+  return {
+    calls,
+    askWithSession: vi.fn(async (prompt: string, _session: SessionStore, opts?: AskOptions): Promise<ProviderResult> => {
+      calls.push({ prompt, opts })
+      return { text, media: [] }
+    }),
+  }
+}
+
+function makeEngine(overrides: {
+  model?: any
+  tools?: Record<string, any>
+  provider?: AIProvider
+  instructions?: string
+} = {}): Engine {
+  const model = overrides.model ?? makeMockModel()
+  const tools = overrides.tools ?? {}
+  const agent = createAgent(model, tools, overrides.instructions ?? 'You are a test agent.', 1)
+  const provider = overrides.provider ?? makeMockProvider()
+
+  return new Engine({ agent, tools, provider })
 }
 
 /** In-memory SessionStore mock (no filesystem). */
@@ -71,16 +88,6 @@ function makeSessionMock(entries: SessionEntry[] = []): SessionStore {
   } as unknown as SessionStore
 }
 
-// ==================== Mock compaction ====================
-
-vi.mock('./compaction.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./compaction.js')>()
-  return {
-    ...actual,
-    compactIfNeeded: vi.fn().mockResolvedValue({ compacted: false, method: 'none' }),
-  }
-})
-
 // ==================== Tests ====================
 
 describe('Engine', () => {
@@ -91,7 +98,7 @@ describe('Engine', () => {
   // -------------------- Construction --------------------
 
   describe('constructor', () => {
-    it('creates an agent with the given tools and instructions', () => {
+    it('creates an engine with agent and tools', () => {
       const engine = makeEngine({ instructions: 'custom instructions' })
       expect(engine.agent).toBeDefined()
       expect(engine.tools).toEqual({})
@@ -135,10 +142,6 @@ describe('Engine', () => {
     })
 
     it('collects media from tool results via onStepFinish', async () => {
-      // Use a model that produces tool calls to test media extraction.
-      // Since MockLanguageModelV3 doesn't easily simulate multi-step tool calls,
-      // we'll test media extraction at the unit level separately.
-      // Here we verify the basic flow returns empty media when no tools produce media.
       const model = makeMockModel('no media')
       const engine = makeEngine({ model })
 
@@ -150,96 +153,31 @@ describe('Engine', () => {
   // -------------------- askWithSession() --------------------
 
   describe('askWithSession()', () => {
-    it('appends user message to session before generating', async () => {
-      const model = makeMockModel('session response')
-      const engine = makeEngine({ model })
+    it('delegates to the AIProvider', async () => {
+      const provider = makeMockProvider('provider reply')
+      const engine = makeEngine({ provider })
       const session = makeSessionMock()
 
-      await engine.askWithSession('user prompt', session)
+      const result = await engine.askWithSession('user prompt', session)
 
-      expect(session.appendUser).toHaveBeenCalledWith('user prompt', 'human')
-    })
-
-    it('appends assistant response to session after generating', async () => {
-      const model = makeMockModel('assistant reply')
-      const engine = makeEngine({ model })
-      const session = makeSessionMock()
-
-      await engine.askWithSession('hello', session)
-
-      expect(session.appendAssistant).toHaveBeenCalledWith('assistant reply', 'engine')
-    })
-
-    it('returns the generated text and empty media', async () => {
-      const model = makeMockModel('generated text')
-      const engine = makeEngine({ model })
-      const session = makeSessionMock()
-
-      const result = await engine.askWithSession('prompt', session)
-      expect(result.text).toBe('generated text')
+      expect(provider.askWithSession).toHaveBeenCalledWith('user prompt', session, undefined)
+      expect(result.text).toBe('provider reply')
       expect(result.media).toEqual([])
     })
 
-    it('calls compactIfNeeded with session and compaction config', async () => {
-      const { compactIfNeeded } = await import('./compaction.js')
-      const model = makeMockModel('ok')
-      const compaction: CompactionConfig = {
-        maxContextTokens: 100_000,
-        maxOutputTokens: 10_000,
-        autoCompactBuffer: 5_000,
-        microcompactKeepRecent: 2,
+    it('passes opts through to the provider', async () => {
+      const provider = makeMockProvider('with opts')
+      const engine = makeEngine({ provider })
+      const session = makeSessionMock()
+      const opts: AskOptions = {
+        systemPrompt: 'test',
+        maxHistoryEntries: 10,
+        historyPreamble: 'preamble',
       }
-      const engine = makeEngine({ model, compaction })
-      const session = makeSessionMock()
 
-      await engine.askWithSession('test', session)
+      await engine.askWithSession('prompt', session, opts)
 
-      expect(compactIfNeeded).toHaveBeenCalledWith(
-        session,
-        compaction,
-        expect.any(Function),
-      )
-    })
-
-    it('uses activeEntries from compaction result when available', async () => {
-      const { compactIfNeeded } = await import('./compaction.js')
-      const activeEntries: SessionEntry[] = [{
-        type: 'user',
-        message: { role: 'user', content: 'compacted entry' },
-        uuid: 'c1',
-        parentUuid: null,
-        sessionId: 'test-session',
-        timestamp: new Date().toISOString(),
-      }]
-      vi.mocked(compactIfNeeded).mockResolvedValueOnce({
-        compacted: true,
-        method: 'microcompact',
-        activeEntries,
-      })
-
-      const model = makeMockModel('from compacted')
-      const engine = makeEngine({ model })
-      const session = makeSessionMock()
-
-      const result = await engine.askWithSession('test', session)
-      expect(result.text).toBe('from compacted')
-      // readActive should NOT be called when activeEntries is provided
-      expect(session.readActive).not.toHaveBeenCalled()
-    })
-
-    it('falls back to session.readActive when no activeEntries', async () => {
-      const { compactIfNeeded } = await import('./compaction.js')
-      vi.mocked(compactIfNeeded).mockResolvedValueOnce({
-        compacted: false,
-        method: 'none',
-      })
-
-      const model = makeMockModel('from readActive')
-      const engine = makeEngine({ model })
-      const session = makeSessionMock()
-
-      await engine.askWithSession('test', session)
-      expect(session.readActive).toHaveBeenCalled()
+      expect(provider.askWithSession).toHaveBeenCalledWith('prompt', session, opts)
     })
   })
 
@@ -273,17 +211,15 @@ describe('Engine', () => {
     })
 
     it('serializes concurrent askWithSession() calls', async () => {
-      const order: number[] = []
       let callCount = 0
-      const model = new MockLanguageModelV3({
-        doGenerate: async () => {
+      const provider: AIProvider = {
+        askWithSession: vi.fn(async (_prompt, _session, _opts) => {
           const n = ++callCount
-          order.push(n)
           await new Promise((r) => setTimeout(r, 10))
-          return makeDoGenerate(`session response ${n}`)
-        },
-      })
-      const engine = makeEngine({ model })
+          return { text: `session response ${n}`, media: [] }
+        }),
+      }
+      const engine = makeEngine({ provider })
       const session = makeSessionMock()
 
       const [r1, r2] = await Promise.all([
@@ -291,7 +227,6 @@ describe('Engine', () => {
         engine.askWithSession('second', session),
       ])
 
-      expect(order).toEqual([1, 2])
       expect(r1.text).toBe('session response 1')
       expect(r2.text).toBe('session response 2')
     })
@@ -326,17 +261,7 @@ describe('Engine', () => {
 
     it('is true during generation and false after', async () => {
       let observedDuringGeneration = false
-      const model = new MockLanguageModelV3({
-        doGenerate: async () => {
-          // We can't check engine.isGenerating from inside doGenerate
-          // because we don't have the engine ref. But we test the state
-          // transitions via concurrent observation below.
-          return makeDoGenerate('done')
-        },
-      })
-      const engine = makeEngine({ model })
 
-      // Start a generation that takes some time
       const slowModel = new MockLanguageModelV3({
         doGenerate: async () => {
           await new Promise((r) => setTimeout(r, 50))

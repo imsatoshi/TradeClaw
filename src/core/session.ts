@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readFile, appendFile, mkdir, stat as fsStat, truncate as fsTruncate } from 'node:fs/promises'
+import { readFile, writeFile, appendFile, mkdir, stat as fsStat, truncate as fsTruncate } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { getActiveEntries } from './compaction.js'
 
@@ -158,6 +158,22 @@ export class SessionStore {
     } catch {
       // File may not exist — nothing to truncate
     }
+  }
+
+  /**
+   * Trim session to keep only the last N entries.
+   * Rewrites the file with only the retained entries.
+   * Used at startup to prevent stale data accumulation without losing all context.
+   */
+  async trimToLastN(n: number): Promise<void> {
+    const entries = await this.readAll()
+    if (entries.length <= n) return
+
+    const retained = entries.slice(-n)
+    await mkdir(dirname(this.filePath), { recursive: true })
+    const content = retained.map((e) => JSON.stringify(e)).join('\n') + '\n'
+    await writeFile(this.filePath, content)
+    this.lastUuid = retained.length > 0 ? retained[retained.length - 1].uuid : null
   }
 
   /** Check if this session file exists. */

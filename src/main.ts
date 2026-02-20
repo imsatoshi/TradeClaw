@@ -44,8 +44,9 @@ import { resolveDeliveryTarget } from './core/connector-registry.js'
 import { enqueue, ack, recoverPending } from './core/delivery.js'
 import { emit } from './core/agent-events.js'
 import { SessionStore } from './core/session.js'
-import { readAIConfig } from './core/ai-config.js'
-import { askClaudeCodeWithSession } from './providers/claude-code/index.js'
+import { ProviderRouter } from './core/ai-provider.js'
+import { createAgent, VercelAIProvider } from './providers/vercel-ai-sdk/index.js'
+import { ClaudeCodeProvider } from './providers/claude-code/index.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const SEC_WALLET_FILE = resolve('data/securities-trading/commit.json')
@@ -334,13 +335,11 @@ async function main() {
 
   // ==================== Engine ====================
 
-  const engine = new Engine({
-    model,
-    tools,
-    instructions,
-    maxSteps: config.agent.maxSteps,
-    compaction: config.compaction,
-  })
+  const agent = createAgent(model, tools, instructions, config.agent.maxSteps)
+  const vercelProvider = new VercelAIProvider(agent, config.compaction)
+  const claudeCodeProvider = new ClaudeCodeProvider(config.agent.claudeCode, config.compaction)
+  const router = new ProviderRouter(vercelProvider, claudeCodeProvider)
+  const engine = new Engine({ agent, tools, provider: router })
 
   // ==================== Plugins ====================
 
@@ -374,6 +373,9 @@ async function main() {
   // Dedicated session for heartbeat/cron conversations (separate from user chat sessions)
   const heartbeatSession = new SessionStore('heartbeat')
   await heartbeatSession.restore()
+  // Trim overly long heartbeat history on startup (prevent stale data accumulation)
+  // but keep last 6 entries for context continuity.
+  await heartbeatSession.trimToLastN(6)
 
   // Heartbeat dedup — suppress identical messages within 24h
   const heartbeatDedup = new HeartbeatDedup()
@@ -451,22 +453,12 @@ async function main() {
       }
     }
 
-    // Route based on configured AI provider
-    const aiConfig = await readAIConfig()
-    console.log(`scheduler: runOnce provider=${aiConfig.provider} hasCronEvents=${hasCronEvents}`)
-    let result: { text: string; media?: MediaAttachment[] }
-
-    if (aiConfig.provider === 'claude-code') {
-      result = await askClaudeCodeWithSession(fullPrompt, heartbeatSession, {
-        claudeCode: config.agent.claudeCode,
-        compaction: config.compaction,
-        systemPrompt: instructions,
-        maxHistoryEntries: 30,
-        historyPreamble: 'The following is the recent heartbeat/cron conversation history. Use it as context if it references earlier events or decisions.',
-      })
-    } else {
-      result = await engine.askWithSession(fullPrompt, heartbeatSession)
-    }
+    // ProviderRouter automatically routes to the correct backend (Vercel AI SDK or Claude Code)
+    const result = await engine.askWithSession(fullPrompt, heartbeatSession, {
+      systemPrompt: instructions,
+      maxHistoryEntries: 30,
+      historyPreamble: 'The following is the recent heartbeat/cron conversation history. Use it as context if it references earlier events or decisions.',
+    })
 
     // Strip ack token to decide if the response should be delivered.
     // Cron events bypass the ack check — they must always be delivered.
