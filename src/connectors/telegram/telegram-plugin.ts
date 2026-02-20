@@ -203,6 +203,13 @@ export class TelegramPlugin implements Plugin {
       const prompt = this.buildPrompt(message)
       if (!prompt) return
 
+      // Log: message received
+      const receivedEntry = await engineCtx.eventLog.append('message.received', {
+        channel: 'telegram',
+        to: String(message.chatId),
+        prompt,
+      })
+
       // Send placeholder + typing indicator while generating
       const placeholder = await this.bot!.api.sendMessage(message.chatId, '...').catch(() => null)
       const stopTyping = this.startTypingIndicator(message.chatId)
@@ -215,6 +222,15 @@ export class TelegramPlugin implements Plugin {
         })
         stopTyping()
         await this.sendReplyWithPlaceholder(message.chatId, result.text, result.media, placeholder?.message_id)
+
+        // Log: message sent
+        await engineCtx.eventLog.append('message.sent', {
+          channel: 'telegram',
+          to: String(message.chatId),
+          prompt,
+          reply: result.text,
+          durationMs: Date.now() - receivedEntry.ts,
+        })
       } catch (err) {
         stopTyping()
         // Edit placeholder to show error instead of leaving "..."

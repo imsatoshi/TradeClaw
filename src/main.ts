@@ -37,6 +37,7 @@ import { ProviderRouter } from './core/ai-provider.js'
 import { createAgent } from './providers/vercel-ai-sdk/index.js'
 import { VercelAIProvider } from './providers/vercel-ai-sdk/vercel-provider.js'
 import { ClaudeCodeProvider } from './providers/claude-code/claude-code-provider.js'
+import { createEventLog } from './core/event-log.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const SEC_WALLET_FILE = resolve('data/securities-trading/commit.json')
@@ -239,6 +240,10 @@ async function main() {
 
   const engine = new Engine({ agent, tools, provider: router })
 
+  // ==================== Event Log ====================
+
+  const eventLog = await createEventLog()
+
   // ==================== Plugins ====================
 
   const plugins: Plugin[] = [new HttpPlugin()]
@@ -260,7 +265,7 @@ async function main() {
     }))
   }
 
-  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine }
+  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine, eventLog }
 
   for (const plugin of plugins) {
     await plugin.start(ctx)
@@ -275,6 +280,7 @@ async function main() {
     for (const plugin of plugins) {
       await plugin.stop()
     }
+    await eventLog.close()
     await cryptoResult?.close()
     await secResult?.close()
     process.exit(0)

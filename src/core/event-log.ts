@@ -1,18 +1,16 @@
 /**
- * Event Log — append-only persistent event log.
+ * Event Log — append-only persistent event log with in-memory ring buffer.
  *
- * All events are serialized into a single JSONL file. Consumers maintain
- * their own read offsets and can replay from any point.
+ * Dual-write: every append goes to disk (JSONL) AND an in-memory buffer.
+ * The memory buffer holds the most recent N entries (default 500) for fast
+ * queries. Disk is the source of truth for crash recovery and full history.
  *
  * Storage: one JSON object per line (`events.jsonl`), append-only.
- * Recovery: on startup, reads the last line to restore the seq counter.
- *
- * This module is independent from `agent-events.ts` (in-memory fan-out).
- * agent-events stays for real-time ephemeral pub/sub; this is the
- * durable backbone.
+ * Recovery: on startup, loads the tail of the file into the memory buffer
+ * and restores the seq counter.
  */
 
-import { appendFile, readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
+import { appendFile, readFile, mkdir, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 // ==================== Types ====================
@@ -35,12 +33,22 @@ export interface EventLog {
   append<T>(type: string, payload: T): Promise<EventLogEntry<T>>
 
   /**
-   * Read events from the log file.
+   * Read events from the DISK log file.
    * - afterSeq: only return entries with seq > afterSeq (default: 0 = all)
    * - type: only return entries matching this type
    * - limit: max number of entries to return
    */
   read(opts?: { afterSeq?: number; limit?: number; type?: string }): Promise<EventLogEntry[]>
+
+  /**
+   * Query the in-memory buffer (fast, no disk I/O).
+   * - afterSeq: only return entries with seq > afterSeq
+   * - type: only return entries matching this type
+   * - limit: max number of entries to return
+   *
+   * Only sees the most recent `bufferSize` entries.
+   */
+  recent(opts?: { afterSeq?: number; limit?: number; type?: string }): EventLogEntry[]
 
   /** Current highest seq number (0 if empty). */
   lastSeq(): number
@@ -51,31 +59,41 @@ export interface EventLog {
   /** Subscribe to new events of a specific type. Returns unsubscribe fn. */
   subscribeType(type: string, listener: EventLogListener): () => void
 
-  /** Close the log (clear listeners). */
+  /** Close the log (clear listeners and buffer). */
   close(): Promise<void>
 
   /** Reset all state and delete the log file. For tests only. */
   _resetForTest(): Promise<void>
 }
 
+// ==================== Defaults ====================
+
+const DEFAULT_BUFFER_SIZE = 500
+
 // ==================== Implementation ====================
 
 /**
  * Create (or open) an append-only event log.
  *
- * Reads the existing file to restore the seq counter. If the file does
- * not exist, starts fresh from seq 0.
+ * Reads the existing file to restore the seq counter and populate the
+ * in-memory buffer with the most recent entries.
  */
 export async function createEventLog(opts?: {
   logPath?: string
+  /** Max entries in the in-memory ring buffer. Default: 500. */
+  bufferSize?: number
 }): Promise<EventLog> {
   const logPath = opts?.logPath ?? 'data/event-log/events.jsonl'
+  const bufferSize = opts?.bufferSize ?? DEFAULT_BUFFER_SIZE
 
   // Ensure directory exists
   await mkdir(dirname(logPath), { recursive: true })
 
-  // Recover last seq from existing file
-  let seq = await recoverLastSeq(logPath)
+  // In-memory ring buffer
+  let buffer: EventLogEntry[] = []
+
+  // Recover seq + buffer from existing file
+  let seq = await recoverState(logPath, buffer, bufferSize)
 
   // Listener sets
   const listeners = new Set<EventLogListener>()
@@ -92,8 +110,15 @@ export async function createEventLog(opts?: {
       payload,
     }
 
+    // Dual write: disk first, then memory
     const line = JSON.stringify(entry) + '\n'
     await appendFile(logPath, line, 'utf-8')
+
+    // Push to ring buffer, truncate if over limit
+    buffer.push(entry)
+    if (buffer.length > bufferSize) {
+      buffer = buffer.slice(buffer.length - bufferSize)
+    }
 
     // Fan-out to subscribers (swallow errors)
     for (const fn of listeners) {
@@ -109,7 +134,7 @@ export async function createEventLog(opts?: {
     return entry
   }
 
-  // ---------- read ----------
+  // ---------- read (disk) ----------
 
   async function read(readOpts?: {
     afterSeq?: number
@@ -147,6 +172,29 @@ export async function createEventLog(opts?: {
     return results
   }
 
+  // ---------- recent (memory) ----------
+
+  function recent(readOpts?: {
+    afterSeq?: number
+    limit?: number
+    type?: string
+  }): EventLogEntry[] {
+    const afterSeq = readOpts?.afterSeq ?? 0
+    const limit = readOpts?.limit ?? Infinity
+    const filterType = readOpts?.type
+
+    const results: EventLogEntry[] = []
+
+    for (const entry of buffer) {
+      if (entry.seq <= afterSeq) continue
+      if (filterType && entry.type !== filterType) continue
+      results.push(entry)
+      if (results.length >= limit) break
+    }
+
+    return results
+  }
+
   // ---------- subscribe ----------
 
   function subscribe(listener: EventLogListener): () => void {
@@ -172,12 +220,14 @@ export async function createEventLog(opts?: {
   async function close(): Promise<void> {
     listeners.clear()
     typeListeners.clear()
+    buffer = []
   }
 
   async function _resetForTest(): Promise<void> {
     seq = 0
     listeners.clear()
     typeListeners.clear()
+    buffer = []
     try {
       await unlink(logPath)
     } catch (err: unknown) {
@@ -188,6 +238,7 @@ export async function createEventLog(opts?: {
   return {
     append,
     read,
+    recent,
     lastSeq: () => seq,
     subscribe,
     subscribeType,
@@ -198,8 +249,15 @@ export async function createEventLog(opts?: {
 
 // ==================== Helpers ====================
 
-/** Read the last line of the log file to recover the seq counter. */
-async function recoverLastSeq(logPath: string): Promise<number> {
+/**
+ * Read the log file, restore the seq counter, and populate the in-memory
+ * buffer with the most recent `bufferSize` entries.
+ */
+async function recoverState(
+  logPath: string,
+  buffer: EventLogEntry[],
+  bufferSize: number,
+): Promise<number> {
   let raw: string
   try {
     raw = await readFile(logPath, 'utf-8')
@@ -210,20 +268,26 @@ async function recoverLastSeq(logPath: string): Promise<number> {
 
   if (!raw.trim()) return 0
 
-  // Walk backwards to find the last non-empty line
-  const lines = raw.trimEnd().split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim()
-    if (!line) continue
+  // Parse all valid entries
+  const entries: EventLogEntry[] = []
+  const lines = raw.split('\n')
+  for (const line of lines) {
+    if (!line.trim()) continue
     try {
-      const entry: EventLogEntry = JSON.parse(line)
-      return entry.seq
+      entries.push(JSON.parse(line))
     } catch {
-      // Skip malformed, keep scanning
+      // Skip malformed
     }
   }
 
-  return 0
+  if (entries.length === 0) return 0
+
+  // Load tail into buffer
+  const tail = entries.slice(-bufferSize)
+  buffer.push(...tail)
+
+  // Return last seq
+  return entries[entries.length - 1].seq
 }
 
 function isENOENT(err: unknown): boolean {

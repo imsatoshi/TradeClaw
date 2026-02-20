@@ -2,6 +2,7 @@ import type { Sandbox } from '../extension/analysis-kit/index.js'
 import type { ICryptoTradingEngine } from '../extension/crypto-trading/index.js'
 import type { Config } from './config.js'
 import type { Engine } from './engine.js'
+import type { EventLog } from './event-log.js'
 
 export type { Config }
 
@@ -16,6 +17,7 @@ export interface EngineContext {
   sandbox: Sandbox
   cryptoEngine: ICryptoTradingEngine
   engine: Engine
+  eventLog: EventLog
 }
 
 /** A media attachment collected from tool results (e.g. browser screenshots). */

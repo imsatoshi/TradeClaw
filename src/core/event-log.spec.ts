@@ -124,6 +124,116 @@ describe('event-log', () => {
     })
   })
 
+  // ==================== recent (memory buffer) ====================
+
+  describe('recent', () => {
+    it('should return same entries as read for small sets', async () => {
+      await log.append('a', { n: 1 })
+      await log.append('b', { n: 2 })
+      await log.append('c', { n: 3 })
+
+      const fromDisk = await log.read()
+      const fromMem = log.recent()
+
+      expect(fromMem).toHaveLength(3)
+      expect(fromMem.map((e) => e.seq)).toEqual(fromDisk.map((e) => e.seq))
+    })
+
+    it('should filter by afterSeq', async () => {
+      await log.append('a', {})
+      await log.append('b', {})
+      await log.append('c', {})
+
+      const entries = log.recent({ afterSeq: 2 })
+      expect(entries).toHaveLength(1)
+      expect(entries[0].seq).toBe(3)
+    })
+
+    it('should filter by type', async () => {
+      await log.append('trade.open', {})
+      await log.append('heartbeat', {})
+      await log.append('trade.open', {})
+
+      const entries = log.recent({ type: 'trade.open' })
+      expect(entries).toHaveLength(2)
+    })
+
+    it('should respect limit', async () => {
+      for (let i = 0; i < 10; i++) {
+        await log.append('tick', { i })
+      }
+
+      const entries = log.recent({ limit: 3 })
+      expect(entries).toHaveLength(3)
+      expect(entries[0].seq).toBe(1)
+    })
+
+    it('should combine afterSeq + type + limit', async () => {
+      await log.append('a', {})  // seq 1
+      await log.append('b', {})  // seq 2
+      await log.append('a', {})  // seq 3
+      await log.append('a', {})  // seq 4
+
+      const entries = log.recent({ afterSeq: 1, type: 'a', limit: 1 })
+      expect(entries).toHaveLength(1)
+      expect(entries[0].seq).toBe(3)
+    })
+
+    it('should return empty for no matches', async () => {
+      await log.append('a', {})
+      expect(log.recent({ type: 'z' })).toHaveLength(0)
+    })
+  })
+
+  // ==================== ring buffer truncation ====================
+
+  describe('ring buffer', () => {
+    it('should truncate buffer at bufferSize', async () => {
+      const logPath = tempLogPath()
+      const smallLog = await createEventLog({ logPath, bufferSize: 5 })
+
+      for (let i = 0; i < 10; i++) {
+        await smallLog.append('tick', { i })
+      }
+
+      // Memory only has last 5
+      const recent = smallLog.recent()
+      expect(recent).toHaveLength(5)
+      expect(recent[0].seq).toBe(6)
+      expect(recent[4].seq).toBe(10)
+
+      // Disk has all 10
+      const all = await smallLog.read()
+      expect(all).toHaveLength(10)
+
+      await smallLog._resetForTest()
+    })
+
+    it('should recover buffer from disk on restart', async () => {
+      const logPath = tempLogPath()
+      const log1 = await createEventLog({ logPath, bufferSize: 3 })
+
+      for (let i = 0; i < 7; i++) {
+        await log1.append('tick', { i })
+      }
+      await log1.close()
+
+      // Re-open — buffer should have last 3 entries
+      const log2 = await createEventLog({ logPath, bufferSize: 3 })
+
+      const recent = log2.recent()
+      expect(recent).toHaveLength(3)
+      expect(recent[0].seq).toBe(5)
+      expect(recent[2].seq).toBe(7)
+
+      // New appends continue from seq 7
+      const entry = await log2.append('new', {})
+      expect(entry.seq).toBe(8)
+
+      await log2._resetForTest()
+    })
+  })
+
   // ==================== lastSeq ====================
 
   describe('lastSeq', () => {
@@ -257,6 +367,25 @@ describe('event-log', () => {
 
       await log2._resetForTest()
     })
+
+    it('should restore buffer contents on recovery', async () => {
+      const logPath = tempLogPath()
+      const log1 = await createEventLog({ logPath })
+
+      await log1.append('a', { n: 1 })
+      await log1.append('b', { n: 2 })
+      await log1.close()
+
+      const log2 = await createEventLog({ logPath })
+
+      // recent() should see the recovered entries
+      const recent = log2.recent()
+      expect(recent).toHaveLength(2)
+      expect(recent[0].type).toBe('a')
+      expect(recent[1].type).toBe('b')
+
+      await log2._resetForTest()
+    })
   })
 
   // ==================== edge cases ====================
@@ -271,6 +400,9 @@ describe('event-log', () => {
       const entries = await freshLog.read()
       expect(entries).toHaveLength(0)
 
+      const recent = freshLog.recent()
+      expect(recent).toHaveLength(0)
+
       await freshLog._resetForTest()
     })
 
@@ -284,7 +416,7 @@ describe('event-log', () => {
   // ==================== _resetForTest ====================
 
   describe('_resetForTest', () => {
-    it('should clear seq and delete file', async () => {
+    it('should clear seq, buffer, and delete file', async () => {
       await log.append('a', {})
       await log.append('b', {})
       expect(log.lastSeq()).toBe(2)
@@ -294,6 +426,8 @@ describe('event-log', () => {
       expect(log.lastSeq()).toBe(0)
       const entries = await log.read()
       expect(entries).toHaveLength(0)
+      const recent = log.recent()
+      expect(recent).toHaveLength(0)
     })
   })
 })

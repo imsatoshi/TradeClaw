@@ -60,9 +60,25 @@ export class WebPlugin implements Plugin {
 
       touchInteraction('web', 'default')
 
+      // Log: message received
+      const receivedEntry = await ctx.eventLog.append('message.received', {
+        channel: 'web',
+        to: 'default',
+        prompt: message,
+      })
+
       // Route through unified provider (Engine → ProviderRouter → Vercel or Claude Code)
       const result = await ctx.engine.askWithSession(message, this.session, {
         historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
+      })
+
+      // Log: message sent
+      await ctx.eventLog.append('message.sent', {
+        channel: 'web',
+        to: 'default',
+        prompt: message,
+        reply: result.text,
+        durationMs: Date.now() - receivedEntry.ts,
       })
 
       // Map media files to serveable URLs
