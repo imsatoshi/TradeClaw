@@ -173,7 +173,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       pair: freqtradeSymbol,
       side: ftSide,
       ordertype: order.type,
-      amount: stakeAmount,
+      stakeamount: stakeAmount,
     };
 
     if (order.type === 'limit' && order.price) {
