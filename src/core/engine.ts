@@ -56,6 +56,24 @@ function formatToolResults(toolResults: any[]): string | null {
   return null
 }
 
+// ==================== Trading Hallucination Guard ====================
+
+/**
+ * Detect when the model claims to have executed a trading action but made
+ * zero tool calls — a hallucination that pollutes session history.
+ */
+const TRADING_CLAIM_RE = /已设置|已提交|订单已|已下单|已挂单|已修改|已取消|已撤单|已平仓|已止盈|已止损|已开仓|order placed|order modified|order cancel|position closed/i
+
+function isTradingHallucination(text: string, toolCallCount: number): boolean {
+  return toolCallCount === 0 && TRADING_CLAIM_RE.test(text)
+}
+
+const HALLUCINATION_CORRECTION = [
+  'SYSTEM CORRECTION: Your previous response claimed to execute a trading action without calling any tools.',
+  'This is NOT allowed. You MUST call the actual trading tools (cryptoClosePosition, cryptoPlaceOrder, etc.) to execute orders.',
+  'Please try again — call the correct tools NOW to fulfill the user\'s request.',
+].join(' ')
+
 // ==================== Types ====================
 
 export interface EngineOpts {
@@ -149,10 +167,12 @@ export class Engine {
 
     // Generate with conversation context — collect media from tool results
     const media: MediaAttachment[] = []
+    let totalToolCalls = 0
     const result = await this.withLock(() =>
       this.agent.generate({
         messages: messages as ModelMessage[],
         onStepFinish: (step) => {
+          totalToolCalls += step.toolCalls.length
           for (const tr of step.toolResults) {
             media.push(...extractMediaFromToolOutput(tr.output))
           }
@@ -161,6 +181,41 @@ export class Engine {
     )
 
     let text = result.text ?? ''
+
+    // ---- Trading hallucination guard ----
+    // If the model claims to have executed trading actions but made zero tool calls,
+    // inject a correction and retry once. This prevents session pollution.
+    if (isTradingHallucination(text, totalToolCalls)) {
+      console.warn('engine: detected trading hallucination (0 tool calls), retrying with correction')
+
+      // Add the hallucinated response + correction as context for retry
+      const retryMessages: ModelMessage[] = [
+        ...messages as ModelMessage[],
+        { role: 'assistant', content: text } as ModelMessage,
+        { role: 'user', content: HALLUCINATION_CORRECTION } as ModelMessage,
+      ]
+
+      let retryToolCalls = 0
+      const retryResult = await this.withLock(() =>
+        this.agent.generate({
+          messages: retryMessages,
+          onStepFinish: (step) => {
+            retryToolCalls += step.toolCalls.length
+            for (const tr of step.toolResults) {
+              media.push(...extractMediaFromToolOutput(tr.output))
+            }
+          },
+        }),
+      )
+
+      text = retryResult.text ?? ''
+
+      // If still hallucinating after retry, replace with a safe message
+      if (isTradingHallucination(text, retryToolCalls)) {
+        console.warn('engine: hallucination persisted after retry, blocking fake response')
+        text = '⚠️ 操作失败：系统未能正确执行交易指令。请重新发送你的请求，我会调用正确的工具来操作。'
+      }
+    }
 
     // Workaround for models that don't generate detailed responses after tool calls
     // Check if any tool results contain crypto/account data that should be displayed
