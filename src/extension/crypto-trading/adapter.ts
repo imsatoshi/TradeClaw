@@ -163,21 +163,31 @@ NOTE: This stages the operation. Call cryptoWalletCommit + cryptoWalletPush to e
 Stage a crypto position close in wallet (will execute on cryptoWalletPush).
 
 This is the preferred way to close positions instead of using cryptoPlaceOrder with reduceOnly.
+Supports both market close (immediate) and limit close (take-profit / stop-loss at a specific price).
 
 NOTE: This stages the operation. Call cryptoWalletCommit + cryptoWalletPush to execute.
       `.trim(),
       inputSchema: z.object({
-        symbol: z.string().describe('Trading pair symbol, e.g. BTC/USD'),
+        symbol: z.string().describe('Trading pair symbol, e.g. BTC/USDT'),
         size: z
           .number()
           .positive()
           .optional()
-          .describe('Size to close (default: close entire position)'),
+          .describe('Size to close in coins (default: close entire position)'),
+        price: z
+          .number()
+          .positive()
+          .optional()
+          .describe('Limit price for take-profit or stop-loss exit. If omitted, closes at market price.'),
+        type: z
+          .enum(['market', 'limit'])
+          .optional()
+          .describe('Order type: market (immediate, default) or limit (at specific price)'),
       }),
-      execute: ({ symbol, size }) => {
+      execute: ({ symbol, size, price, type }) => {
         return wallet.add({
           action: 'closePosition',
-          params: { symbol, size },
+          params: { symbol, size, price, type: price ? (type ?? 'limit') : (type ?? 'market') },
         });
       },
     }),
