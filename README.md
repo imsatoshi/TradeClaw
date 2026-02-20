@@ -1,19 +1,21 @@
 <p align="center">
-  <img src="logo.png" alt="Open Alice" width="128">
+  <img src="logo.png" alt="TradeClaw" width="128">
 </p>
 
-# Open Alice
+<h1 align="center">TradeClaw</h1>
 
-一个个人 AI 交易代理。她自动抓取新闻、计算量化因子、记录交易逻辑、在不同时间框架上构建策略，并 24/7 监控和调整你的投资组合。
+<p align="center">AI 交易代理 — 自动抓取新闻、计算量化因子、记录交易逻辑，24/7 监控和调整你的投资组合。</p>
 
-- **文件驱动** — Markdown 定义人格和任务，JSON 定义配置，JSONL 存储对话。人类和 AI 都通过读写文件来控制 Alice。没有数据库、没有容器，只有文件。
-- **推理驱动** — 每一个交易决策都基于持续推理和信号混合。访问 [traderalice.com/live](https://traderalice.com/live) 查看 Alice 的实时推理过程。
-- **系统原生** — Alice 可以与你的操作系统交互。通过浏览器搜索网页、通过 Telegram 发送消息、连接本地设备。
+---
+
+- **文件驱动** — Markdown 定义人格，JSON 定义配置，JSONL 存储对话。没有数据库、没有容器，只有文件。
+- **推理驱动** — 每一个交易决策都基于持续推理和信号混合。
+- **系统原生** — 可以与操作系统交互：浏览器搜索、Telegram 消息、本地设备连接。
 
 ## 功能
 
 - **双 AI 引擎** — 运行时通过 Telegram `/settings` 切换 Claude Code CLI 和 Vercel AI SDK
-- **灵活的模型后端** — Vercel AI SDK 支持任何 OpenAI 兼容的服务商（Anthropic、OpenAI、DeepSeek、Google 等）
+- **灵活的模型后端** — 支持任何 OpenAI 兼容服务商（Anthropic、OpenAI、DeepSeek、Google 等）
 - **加密货币交易** — CCXT（Bybit、OKX、Binance 等）或 [Freqtrade](https://www.freqtrade.io/) 策略机器人，动态白名单同步
 - **证券交易** — Alpaca 美股集成，git 风格的钱包（stage、commit、push）
 - **市场分析** — 技术指标（RSI、MACD、布林带等）、新闻搜索、价格模拟
@@ -84,17 +86,17 @@ graph LR
 ### 安装
 
 ```bash
-git clone https://github.com/TraderAlice/OpenAlice.git
-cd OpenAlice
+git clone https://github.com/imsatoshi/TradeClaw.git
+cd TradeClaw
 pnpm install
 cp .env.example .env    # 然后填入你的 API 密钥
 ```
 
 ### AI 服务商
 
-OpenAlice 提供两种模式：
+提供两种模式：
 
-- **Vercel AI SDK**（默认）— 在进程内运行代理。支持任何 [Vercel AI SDK](https://sdk.vercel.ai/docs) 兼容的服务商。在 `data/config/model.json` 中配置：
+- **Vercel AI SDK**（默认）— 在进程内运行代理。在 `data/config/model.json` 中配置：
 
   ```json
   { "provider": "anthropic", "model": "claude-sonnet-4-20250514" }
@@ -112,13 +114,13 @@ OpenAlice 提供两种模式：
 
 支持两种执行后端：
 
-**CCXT（直连交易所）** — 连接任何 [CCXT 支持的交易所](https://docs.ccxt.com/)。复制并编辑示例配置：
+**CCXT（直连交易所）** — 连接任何 [CCXT 支持的交易所](https://docs.ccxt.com/)：
 
 ```bash
 cp data/config/crypto.binance.example.json data/config/crypto.json
 ```
 
-**Freqtrade（策略机器人）** — 通过 REST API 连接运行中的 [Freqtrade](https://www.freqtrade.io/) 实例。交易白名单从 Freqtrade 动态同步（每 5 分钟刷新），支持 VolumePairList 等动态对列表。
+**Freqtrade（策略机器人）** — 通过 REST API 连接 [Freqtrade](https://www.freqtrade.io/) 实例，白名单动态同步（每 5 分钟刷新）：
 
 ```bash
 cp data/config/crypto.freqtrade.example.json data/config/crypto.json
@@ -126,7 +128,7 @@ cp data/config/crypto.freqtrade.example.json data/config/crypto.json
 
 ### 证券交易
 
-基于 [Alpaca](https://alpaca.markets/)。支持模拟盘和实盘交易 — 在 `data/config/securities.json` 中切换。在 Alpaca 注册并将密钥添加到 `.env`。
+基于 [Alpaca](https://alpaca.markets/)。支持模拟盘和实盘 — 在 `data/config/securities.json` 中切换。
 
 ### 环境变量
 
@@ -136,7 +138,7 @@ cp data/config/crypto.freqtrade.example.json data/config/crypto.json
 | `OPENAI_API_KEY` | OpenAI 兼容 API 密钥（DeepSeek、Kimi 等） |
 | `OPENAI_BASE_URL` | OpenAI 兼容服务的自定义端点 |
 | `EXCHANGE_API_KEY` | 交易所 API 密钥（CCXT 模式） |
-| `EXCHANGE_API_SECRET` | 交易所 API 密钥（CCXT 模式） |
+| `EXCHANGE_API_SECRET` | 交易所 API Secret（CCXT 模式） |
 | `EXCHANGE_PASSWORD` | 交易所口令（OKX 等） |
 | `TELEGRAM_BOT_TOKEN` | Telegram 机器人 Token |
 | `TELEGRAM_CHAT_ID` | 允许的聊天 ID，逗号分隔 |
@@ -153,17 +155,17 @@ pnpm test       # 运行测试
 
 ## 配置
 
-所有配置位于 `data/config/`，使用 JSON 格式 + Zod 校验。缺少的文件会使用默认值。
+所有配置位于 `data/config/`，JSON 格式 + Zod 校验。缺少的文件使用默认值。
 
 | 文件 | 用途 |
 |------|------|
 | `engine.json` | 交易对、轮询间隔、HTTP/MCP 端口、时间框架 |
 | `model.json` | AI 模型服务商、模型名称、可选 base URL |
 | `agent.json` | 最大代理步数、Claude Code 允许/禁止的工具 |
-| `crypto.json` | 加密交易配置 — CCXT（交易所、交易对）或 Freqtrade（URL、凭证） |
-| `securities.json` | 证券交易配置、Alpaca 账户、模拟盘开关 |
+| `crypto.json` | 加密交易 — CCXT（交易所、交易对）或 Freqtrade（URL、凭证） |
+| `securities.json` | 证券交易、Alpaca 账户、模拟盘开关 |
 | `compaction.json` | 上下文窗口限制、自动压缩阈值 |
-| `scheduler.json` | 心跳间隔、定时任务开关、消息投递队列设置 |
+| `scheduler.json` | 心跳间隔、定时任务开关、消息投递队列 |
 | `persona.md` | 系统提示词人格（自由格式 Markdown） |
 
 ## 项目结构
