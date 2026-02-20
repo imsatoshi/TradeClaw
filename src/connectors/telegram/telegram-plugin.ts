@@ -184,21 +184,50 @@ export class TelegramPlugin implements Plugin {
     return session
   }
 
+  /**
+   * Sends "typing..." chat action and refreshes it every 4 seconds.
+   * Returns a function to stop the indicator.
+   */
+  private startTypingIndicator(chatId: number): () => void {
+    const send = () => {
+      this.bot?.api.sendChatAction(chatId, 'typing').catch(() => {})
+    }
+    send()
+    const interval = setInterval(send, 4000)
+    return () => clearInterval(interval)
+  }
+
   private async handleMessage(engineCtx: EngineContext, message: ParsedMessage) {
     try {
       // Build prompt from message content
       const prompt = this.buildPrompt(message)
       if (!prompt) return
 
-      // Route through unified provider (Engine → ProviderRouter → Vercel or Claude Code)
-      const session = await this.getSession(message.from.id)
-      const result = await engineCtx.engine.askWithSession(prompt, session, {
-        historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier messages.',
-      })
-      await this.sendReply(message.chatId, result.text, result.media)
+      // Send placeholder + typing indicator while generating
+      const placeholder = await this.bot!.api.sendMessage(message.chatId, '...').catch(() => null)
+      const stopTyping = this.startTypingIndicator(message.chatId)
+
+      try {
+        // Route through unified provider (Engine → ProviderRouter → Vercel or Claude Code)
+        const session = await this.getSession(message.from.id)
+        const result = await engineCtx.engine.askWithSession(prompt, session, {
+          historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier messages.',
+        })
+        stopTyping()
+        await this.sendReplyWithPlaceholder(message.chatId, result.text, result.media, placeholder?.message_id)
+      } catch (err) {
+        stopTyping()
+        // Edit placeholder to show error instead of leaving "..."
+        if (placeholder) {
+          await this.bot!.api.editMessageText(
+            message.chatId, placeholder.message_id,
+            'Sorry, something went wrong processing your message.',
+          ).catch(() => {})
+        }
+        throw err
+      }
     } catch (err) {
       console.error('telegram message handling error:', err)
-      await this.sendReply(message.chatId, 'Sorry, something went wrong processing your message.').catch(() => {})
     }
   }
 
@@ -264,7 +293,10 @@ export class TelegramPlugin implements Plugin {
     return prompt || null
   }
 
-  private async sendReply(chatId: number, text: string, media?: MediaAttachment[]) {
+  /**
+   * Send a reply, optionally editing a placeholder "..." message into the first text chunk.
+   */
+  private async sendReplyWithPlaceholder(chatId: number, text: string, media?: MediaAttachment[], placeholderMsgId?: number) {
     console.log(`telegram: sendReply chatId=${chatId} textLen=${text.length} media=${media?.length ?? 0}`)
 
     // Send images first (if any)
@@ -283,7 +315,31 @@ export class TelegramPlugin implements Plugin {
       }
     }
 
-    // Then send text
+    // Send text — edit placeholder for first chunk, send the rest as new messages
+    if (text) {
+      const chunks = splitMessage(text, MAX_MESSAGE_LENGTH)
+      let startIdx = 0
+
+      if (placeholderMsgId && chunks.length > 0) {
+        const edited = await this.bot!.api.editMessageText(chatId, placeholderMsgId, chunks[0]).then(() => true).catch(() => false)
+        if (edited) startIdx = 1
+      }
+
+      for (let i = startIdx; i < chunks.length; i++) {
+        await this.bot!.api.sendMessage(chatId, chunks[i])
+      }
+
+      // Placeholder was edited — done
+      if (startIdx > 0) return
+    }
+
+    // No text or edit failed — clean up the placeholder
+    if (placeholderMsgId) {
+      await this.bot!.api.deleteMessage(chatId, placeholderMsgId).catch(() => {})
+    }
+  }
+
+  private async sendReply(chatId: number, text: string) {
     if (text) {
       const chunks = splitMessage(text, MAX_MESSAGE_LENGTH)
       for (const chunk of chunks) {
