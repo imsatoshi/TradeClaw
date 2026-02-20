@@ -31,6 +31,9 @@ export class TelegramPlugin implements Plugin {
   /** Per-user unified session stores (keyed by userId). */
   private sessions = new Map<number, SessionStore>()
 
+  /** Throttle: last time we sent an auth-guidance reply per chatId. */
+  private authReplyThrottle = new Map<number, number>()
+
   constructor(
     config: Omit<TelegramConfig, 'pollingTimeout'> & { pollingTimeout?: number },
     claudeCodeConfig: ClaudeCodeConfig = {},
@@ -58,14 +61,21 @@ export class TelegramPlugin implements Plugin {
       console.error('telegram bot error:', err)
     })
 
-    // ── Middleware: filter allowed chats ──
-    if (this.config.allowedChatIds.length > 0) {
-      bot.use(async (ctx, next) => {
-        const chatId = ctx.chat?.id
-        if (chatId && !this.config.allowedChatIds.includes(chatId)) return
-        await next()
-      })
-    }
+    // ── Middleware: auth guard (always active) ──
+    bot.use(async (ctx, next) => {
+      const chatId = ctx.chat?.id
+      if (!chatId) return
+      if (this.config.allowedChatIds.includes(chatId)) return next()
+
+      // Unauthorized — log chat ID for operator, throttle reply (60s)
+      const now = Date.now()
+      const last = this.authReplyThrottle.get(chatId) ?? 0
+      if (now - last > 60_000) {
+        this.authReplyThrottle.set(chatId, now)
+        console.log(`telegram: unauthorized chat ${chatId}, set TELEGRAM_CHAT_ID=${chatId} to allow`)
+        await ctx.reply('This chat is not authorized. Add this chat ID to TELEGRAM_CHAT_ID in your environment config.').catch(() => {})
+      }
+    })
 
     // ── Commands ──
     bot.command('status', async (ctx) => {
