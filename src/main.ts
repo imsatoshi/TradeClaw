@@ -400,6 +400,10 @@ async function main() {
       }
     }
 
+    // Read HEARTBEAT.md content upfront so we can inject it into the prompt
+    // (the AI has no file-reading tool, so we must provide the content directly)
+    const heartbeatContent = await readHeartbeatFile(heartbeatFilePath)
+
     // Build prompt — cron/exec events get a dedicated prompt instead of the heartbeat one
     const hasCronEvents = systemEvents.some((e) => e.source === 'cron')
     let fullPrompt: string
@@ -415,14 +419,30 @@ async function main() {
         ...eventLines,
       ].join('\n')
     } else if (systemEvents.length > 0) {
-      // Other system events (exec, etc.): append to heartbeat prompt
-      const parts: string[] = [prompt, '', '--- System Events ---']
+      // Other system events (exec, etc.): append to heartbeat prompt with file content
+      const parts: string[] = []
+      if (heartbeatContent) {
+        parts.push('Here is the current HEARTBEAT.md content:', '', heartbeatContent, '')
+      }
+      parts.push('--- System Events ---')
       for (const evt of systemEvents) {
         parts.push(`[${evt.source}] ${evt.text}`)
       }
+      parts.push('', 'Check the above and act on anything that needs attention. Reply HEARTBEAT_OK if nothing to report.')
       fullPrompt = parts.join('\n')
     } else {
-      fullPrompt = prompt
+      // Regular heartbeat: inject file content directly into prompt
+      if (heartbeatContent) {
+        fullPrompt = [
+          'Here is the current HEARTBEAT.md content:',
+          '',
+          heartbeatContent,
+          '',
+          'Check if anything needs attention based on the above instructions. Use your trading tools (cryptoGetPositions, cryptoGetAccount, etc.) to gather the data requested. Reply HEARTBEAT_OK if nothing to report.',
+        ].join('\n')
+      } else {
+        fullPrompt = prompt
+      }
     }
 
     // Route based on configured AI provider
