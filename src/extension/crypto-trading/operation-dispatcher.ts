@@ -47,6 +47,8 @@ export function createCryptoOperationDispatcher(engine: ICryptoTradingEngine) {
       case 'closePosition': {
         const symbol = op.params.symbol as string;
         const size = op.params.size as number | undefined;
+        const price = op.params.price as number | undefined;
+        const orderType = (op.params.type as 'market' | 'limit') || (price ? 'limit' : 'market');
 
         // Look up the current position and place a reverse order to close
         const positions = await engine.getPositions();
@@ -62,8 +64,9 @@ export function createCryptoOperationDispatcher(engine: ICryptoTradingEngine) {
         const result = await engine.placeOrder({
           symbol,
           side: closeSide,
-          type: 'market',
+          type: orderType,
           size: closeSize,
+          price,
           reduceOnly: true,
         });
 

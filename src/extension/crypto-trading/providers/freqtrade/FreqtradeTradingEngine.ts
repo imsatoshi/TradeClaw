@@ -134,6 +134,11 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       };
     }
 
+    // reduceOnly orders → route to forceexit (close/take-profit)
+    if (order.reduceOnly) {
+      return this.placeExitOrder(order);
+    }
+
     const freqtradeSymbol = toFreqtradeSymbol(order.symbol);
 
     // Calculate stake amount from size or usd_size
@@ -183,6 +188,50 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         message: `Order ${result.order_id} ${status}`,
         filledPrice: result.average || (status === 'filled' ? result.price : undefined),
         filledSize: result.filled || (status === 'filled' ? result.amount : undefined),
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Route reduce-only (exit) orders to Freqtrade's forceexit endpoint.
+   * Supports market exit, limit exit (take-profit), and partial exits.
+   */
+  private async placeExitOrder(order: CryptoPlaceOrderRequest): Promise<CryptoOrderResult> {
+    // Find the open trade for this symbol
+    const trades = await this.get<FreqtradeTrade[]>('/api/v1/status');
+    const normalizedSymbol = order.symbol;
+    const trade = trades.find(t => t.is_open && normalizePair(t.pair) === normalizedSymbol);
+
+    if (!trade) {
+      return { success: false, error: `No open trade found for ${order.symbol}` };
+    }
+
+    const payload: Record<string, unknown> = {
+      tradeid: trade.trade_id,
+      ordertype: order.type,
+    };
+
+    // Partial exit: pass coin amount
+    if (order.size && order.size < trade.amount) {
+      payload.amount = order.size;
+    }
+
+    // Limit price (take-profit / stop-loss)
+    if (order.type === 'limit' && order.price) {
+      payload.price = order.price;
+    }
+
+    try {
+      const result = await this.post<{ result: string }>('/api/v1/forceexit', payload);
+      return {
+        success: true,
+        orderId: String(trade.trade_id),
+        message: result.result || `Exit order placed for trade ${trade.trade_id}`,
       };
     } catch (err) {
       return {
