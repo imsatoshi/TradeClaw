@@ -1,26 +1,26 @@
 /**
  * Engine — AI conversation service.
  *
- * Pure responsibility: manage a ToolLoopAgent and provide ask/askWithSession.
- * Does NOT own plugins, tools assembly, tick loops, or extension instances.
- * Those concerns live in main.ts (the composition root).
+ * Owns the generation lock (one-at-a-time) and delegates to an AIProvider
+ * for session-aware calls.  The stateless `ask()` still goes directly through
+ * the Vercel AI SDK agent (for MCP, compaction callbacks, etc.).
  */
 
-import type { LanguageModel, ModelMessage, Tool } from 'ai'
+import type { Tool } from 'ai'
 import type { MediaAttachment } from './types.js'
-import { createAgent, type Agent } from '../providers/vercel-ai-sdk/index.js'
-import { type SessionStore, toModelMessages } from './session.js'
-import { compactIfNeeded, type CompactionConfig } from './compaction.js'
+import type { SessionStore } from './session.js'
+import type { AIProvider, AskOptions, ProviderResult } from './ai-provider.js'
+import { type Agent } from '../providers/vercel-ai-sdk/index.js'
 import { extractMediaFromToolOutput } from './media.js'
 
 // ==================== Types ====================
 
 export interface EngineOpts {
-  model: LanguageModel
+  /** Pre-built Vercel AI SDK agent (still used by `ask()` and MCP tool exposure). */
+  agent: Agent
   tools: Record<string, Tool>
-  instructions: string
-  maxSteps: number
-  compaction: CompactionConfig
+  /** The provider router (or any AIProvider) that handles session-aware calls. */
+  provider: AIProvider
 }
 
 export interface EngineResult {
@@ -34,18 +34,18 @@ export interface EngineResult {
 export class Engine {
   private generationLock = Promise.resolve()
   private _generating = false
-  private compaction: CompactionConfig
+  private provider: AIProvider
 
-  /** The underlying ToolLoopAgent. */
+  /** The underlying ToolLoopAgent (used by `ask()` and exposed for MCP). */
   readonly agent: Agent
 
   /** Tools registered with the agent (for MCP exposure, etc.). */
   readonly tools: Record<string, Tool>
 
   constructor(opts: EngineOpts) {
+    this.agent = opts.agent
     this.tools = opts.tools
-    this.compaction = opts.compaction
-    this.agent = createAgent(opts.model, opts.tools, opts.instructions, opts.maxSteps)
+    this.provider = opts.provider
   }
 
   // ==================== Public API ====================
@@ -53,7 +53,7 @@ export class Engine {
   /** Whether a generation is currently in progress (for requests-in-flight guard). */
   get isGenerating(): boolean { return this._generating }
 
-  /** Simple prompt (no session context). */
+  /** Simple prompt (no session context). Uses the Vercel agent directly. */
   async ask(prompt: string): Promise<EngineResult> {
     const media: MediaAttachment[] = []
     const result = await this.withLock(() => this.agent.generate({
@@ -67,44 +67,9 @@ export class Engine {
     return { text: result.text ?? '', media }
   }
 
-  /** Prompt with session — appends to session and uses full history as context. */
-  async askWithSession(prompt: string, session: SessionStore): Promise<EngineResult> {
-    // Append user message to session
-    await session.appendUser(prompt, 'human')
-
-    // Compact if needed before loading context
-    const compactionResult = await compactIfNeeded(
-      session,
-      this.compaction,
-      async (summarizePrompt) => {
-        const r = await this.agent.generate({ prompt: summarizePrompt })
-        return r.text ?? ''
-      },
-    )
-
-    // Load active window (from last compact boundary onward) and convert
-    const entries = compactionResult.activeEntries ?? await session.readActive()
-    const messages = toModelMessages(entries)
-
-    // Generate with conversation context — collect media from tool results
-    const media: MediaAttachment[] = []
-    const result = await this.withLock(() =>
-      this.agent.generate({
-        messages: messages as ModelMessage[],
-        onStepFinish: (step) => {
-          for (const tr of step.toolResults) {
-            media.push(...extractMediaFromToolOutput(tr.output))
-          }
-        },
-      }),
-    )
-
-    const text = result.text ?? ''
-
-    // Append assistant response to session
-    await session.appendAssistant(text, 'engine')
-
-    return { text, media }
+  /** Prompt with session — delegates to the configured AIProvider, serialized by the generation lock. */
+  async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<EngineResult> {
+    return this.withLock(() => this.provider.askWithSession(prompt, session, opts))
   }
 
   // ==================== Internals ====================

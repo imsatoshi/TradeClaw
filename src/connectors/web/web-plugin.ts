@@ -7,8 +7,8 @@ import { randomUUID } from 'node:crypto'
 import type { Plugin, EngineContext } from '../../core/types.js'
 import { SessionStore, toTextHistory } from '../../core/session.js'
 import { registerConnector, touchInteraction } from '../../core/connector-registry.js'
-import { readAIConfig } from '../../core/ai-config.js'
-import { askClaudeCodeWithSession } from '../../providers/claude-code/index.js'
+import { loadConfig, writeConfigSection, type ConfigSection } from '../../core/config.js'
+import { readAIConfig, writeAIConfig, type AIProvider } from '../../core/ai-config.js'
 import { WEB_UI_HTML } from './ui.js'
 
 export interface WebConfig {
@@ -60,23 +60,10 @@ export class WebPlugin implements Plugin {
 
       touchInteraction('web', 'default')
 
-      // Route based on configured AI provider (same as Telegram connector)
-      const aiConfig = await readAIConfig()
-      let result: { text: string; media?: Array<{ type: 'image'; path: string }> }
-
-      if (aiConfig.provider === 'claude-code') {
-        result = await askClaudeCodeWithSession(message, this.session, {
-          claudeCode: {
-            allowedTools: ctx.config.agent.claudeCode.allowedTools,
-            disallowedTools: ctx.config.agent.claudeCode.disallowedTools,
-            maxTurns: ctx.config.agent.claudeCode.maxTurns,
-          },
-          compaction: ctx.config.compaction,
-          historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
-        })
-      } else {
-        result = await ctx.engine.askWithSession(message, this.session)
-      }
+      // Route through unified provider (Engine → ProviderRouter → Vercel or Claude Code)
+      const result = await ctx.engine.askWithSession(message, this.session, {
+        historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
+      })
 
       // Map media files to serveable URLs
       const media = (result.media ?? []).map((m) => {
@@ -163,6 +150,48 @@ export class WebPlugin implements Plugin {
         return c.body(buf, { headers: { 'Content-Type': mime } })
       } catch {
         return c.notFound()
+      }
+    })
+
+    // ==================== Config endpoints ====================
+    app.get('/api/config', async (c) => {
+      try {
+        const [config, aiConfig] = await Promise.all([loadConfig(), readAIConfig()])
+        return c.json({ ...config, aiProvider: aiConfig.provider })
+      } catch (err) {
+        return c.json({ error: String(err) }, 500)
+      }
+    })
+
+    app.put('/api/config/ai-provider', async (c) => {
+      try {
+        const body = await c.req.json<{ provider?: string }>()
+        const provider = body.provider
+        if (provider !== 'claude-code' && provider !== 'vercel-ai-sdk') {
+          return c.json({ error: 'Invalid provider. Must be "claude-code" or "vercel-ai-sdk".' }, 400)
+        }
+        await writeAIConfig(provider as AIProvider)
+        return c.json({ provider })
+      } catch (err) {
+        return c.json({ error: String(err) }, 500)
+      }
+    })
+
+    app.put('/api/config/:section', async (c) => {
+      try {
+        const section = c.req.param('section') as ConfigSection
+        const validSections: ConfigSection[] = ['engine', 'model', 'agent', 'crypto', 'securities', 'compaction', 'scheduler']
+        if (!validSections.includes(section)) {
+          return c.json({ error: `Invalid section "${section}". Valid: ${validSections.join(', ')}` }, 400)
+        }
+        const body = await c.req.json()
+        const validated = await writeConfigSection(section, body)
+        return c.json(validated)
+      } catch (err) {
+        if (err instanceof Error && err.name === 'ZodError') {
+          return c.json({ error: 'Validation failed', details: JSON.parse(err.message) }, 400)
+        }
+        return c.json({ error: String(err) }, 500)
       }
     })
 

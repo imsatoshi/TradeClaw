@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { LanguageModel, Tool } from 'ai'
 import { MockLanguageModelV3 } from 'ai/test'
-import { Engine, type EngineOpts, type EngineResult } from './engine.js'
+import { Engine, type EngineResult } from './engine.js'
 import { DEFAULT_COMPACTION_CONFIG, type CompactionConfig } from './compaction.js'
+import { createAgent } from '../providers/vercel-ai-sdk/index.js'
+import { VercelAIProvider } from '../providers/vercel-ai-sdk/vercel-provider.js'
 import type { SessionStore, SessionEntry } from './session.js'
 
 // ==================== Helpers ====================
@@ -23,15 +26,25 @@ function makeMockModel(text = 'mock response') {
   return new MockLanguageModelV3({ doGenerate: makeDoGenerate(text) })
 }
 
-function makeEngine(overrides: Partial<EngineOpts> = {}): Engine {
-  return new Engine({
-    model: makeMockModel(overrides.instructions ?? 'mock response'),
-    tools: {},
-    instructions: 'You are a test agent.',
-    maxSteps: 1,
-    compaction: DEFAULT_COMPACTION_CONFIG,
-    ...overrides,
-  })
+interface MakeEngineOpts {
+  model?: LanguageModel
+  tools?: Record<string, Tool>
+  instructions?: string
+  maxSteps?: number
+  compaction?: CompactionConfig
+}
+
+function makeEngine(overrides: MakeEngineOpts = {}): Engine {
+  const model = overrides.model ?? makeMockModel()
+  const tools = overrides.tools ?? {}
+  const instructions = overrides.instructions ?? 'You are a test agent.'
+  const maxSteps = overrides.maxSteps ?? 1
+  const compaction = overrides.compaction ?? DEFAULT_COMPACTION_CONFIG
+
+  const agent = createAgent(model, tools, instructions, maxSteps)
+  const provider = new VercelAIProvider(agent, compaction)
+
+  return new Engine({ agent, tools, provider })
 }
 
 /** In-memory SessionStore mock (no filesystem). */

@@ -3,7 +3,7 @@ import { readFile, writeFile, appendFile, mkdir } from 'fs/promises'
 import { resolve } from 'path'
 import { Engine } from './core/engine.js'
 import { loadConfig } from './core/config.js'
-import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
+import type { Plugin, EngineContext } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
@@ -42,8 +42,10 @@ import { resolveDeliveryTarget } from './core/connector-registry.js'
 import { enqueue, ack, recoverPending } from './core/delivery.js'
 import { emit } from './core/agent-events.js'
 import { SessionStore } from './core/session.js'
-import { readAIConfig } from './core/ai-config.js'
-import { askClaudeCodeWithSession } from './providers/claude-code/index.js'
+import { ProviderRouter } from './core/ai-provider.js'
+import { createAgent } from './providers/vercel-ai-sdk/index.js'
+import { VercelAIProvider } from './providers/vercel-ai-sdk/vercel-provider.js'
+import { ClaudeCodeProvider } from './providers/claude-code/claude-code-provider.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const SEC_WALLET_FILE = resolve('data/securities-trading/commit.json')
@@ -239,15 +241,14 @@ async function main() {
     ...(cronEngine ? createCronTools(cronEngine) : {}),
   }
 
-  // ==================== Engine ====================
+  // ==================== AI Provider Chain ====================
 
-  const engine = new Engine({
-    model,
-    tools,
-    instructions,
-    maxSteps: config.agent.maxSteps,
-    compaction: config.compaction,
-  })
+  const agent = createAgent(model, tools, instructions, config.agent.maxSteps)
+  const vercelProvider = new VercelAIProvider(agent, config.compaction)
+  const claudeCodeProvider = new ClaudeCodeProvider(config.agent.claudeCode, config.compaction)
+  const router = new ProviderRouter(vercelProvider, claudeCodeProvider)
+
+  const engine = new Engine({ agent, tools, provider: router })
 
   // ==================== Plugins ====================
 
@@ -334,22 +335,12 @@ async function main() {
       fullPrompt = prompt
     }
 
-    // Route based on configured AI provider
-    const aiConfig = await readAIConfig()
-    console.log(`scheduler: runOnce provider=${aiConfig.provider} hasCronEvents=${hasCronEvents}`)
-    let result: { text: string; media?: MediaAttachment[] }
-
-    if (aiConfig.provider === 'claude-code') {
-      result = await askClaudeCodeWithSession(fullPrompt, heartbeatSession, {
-        claudeCode: config.agent.claudeCode,
-        compaction: config.compaction,
-        systemPrompt: instructions,
-        maxHistoryEntries: 30,
-        historyPreamble: 'The following is the recent heartbeat/cron conversation history. Use it as context if it references earlier events or decisions.',
-      })
-    } else {
-      result = await engine.askWithSession(fullPrompt, heartbeatSession)
-    }
+    // Route through unified provider (Engine → ProviderRouter → Vercel or Claude Code)
+    const result = await engine.askWithSession(fullPrompt, heartbeatSession, {
+      systemPrompt: instructions,
+      maxHistoryEntries: 30,
+      historyPreamble: 'The following is the recent heartbeat/cron conversation history. Use it as context if it references earlier events or decisions.',
+    })
 
     // Strip ack token to decide if the response should be delivered.
     // Cron events bypass the ack check — they must always be delivered.
