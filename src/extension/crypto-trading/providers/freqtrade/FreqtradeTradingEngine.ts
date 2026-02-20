@@ -638,95 +638,116 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     }
   }
 
-  private async get<T>(path: string): Promise<T> {
-    const url = `${this.config.url}${path}`;
-    this.disableProxy();
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Authorization': this.authHeader,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+  private async withRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
+    for (let i = 0; i <= retries; i++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (i === retries) throw error;
+        console.warn(`freqtrade: request failed, retrying (${i + 1}/${retries})...`);
+        await new Promise(r => setTimeout(r, 1000));
       }
-
-      return response.json() as Promise<T>;
-    } finally {
-      this.restoreProxy();
     }
+    throw new Error('unreachable');
+  }
+
+  private async get<T>(path: string): Promise<T> {
+    return this.withRetry(async () => {
+      const url = `${this.config.url}${path}`;
+      this.disableProxy();
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Authorization': this.authHeader,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        }
+
+        return response.json() as Promise<T>;
+      } finally {
+        this.restoreProxy();
+      }
+    });
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const url = `${this.config.url}${path}`;
-    this.disableProxy();
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': this.authHeader,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
+    return this.withRetry(async () => {
+      const url = `${this.config.url}${path}`;
+      this.disableProxy();
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': this.authHeader,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        }
+
+        return response.json() as Promise<T>;
+      } finally {
+        this.restoreProxy();
       }
-
-      return response.json() as Promise<T>;
-    } finally {
-      this.restoreProxy();
-    }
+    });
   }
 
   private async deleteWithBody<T>(path: string, body: unknown): Promise<T> {
-    const url = `${this.config.url}${path}`;
-    this.disableProxy();
-    try {
-      const response = await fetch(url, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': this.authHeader,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
+    return this.withRetry(async () => {
+      const url = `${this.config.url}${path}`;
+      this.disableProxy();
+      try {
+        const response = await fetch(url, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': this.authHeader,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        }
+
+        return response.json() as Promise<T>;
+      } finally {
+        this.restoreProxy();
       }
-
-      return response.json() as Promise<T>;
-    } finally {
-      this.restoreProxy();
-    }
+    });
   }
 
   private async delete(path: string): Promise<void> {
-    const url = `${this.config.url}${path}`;
-    this.disableProxy();
-    try {
-      const response = await fetch(url, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': this.authHeader,
-          'Content-Type': 'application/json',
-        },
-      });
+    return this.withRetry(async () => {
+      const url = `${this.config.url}${path}`;
+      this.disableProxy();
+      try {
+        const response = await fetch(url, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': this.authHeader,
+            'Content-Type': 'application/json',
+          },
+        });
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+        }
+      } finally {
+        this.restoreProxy();
       }
-    } finally {
-      this.restoreProxy();
-    }
+    });
   }
 }

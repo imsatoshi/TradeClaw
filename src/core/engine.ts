@@ -83,6 +83,26 @@ const HALLUCINATION_CORRECTION = [
   'Please try again — call the correct tools NOW to fulfill the user\'s request.',
 ].join(' ')
 
+// ==================== Tool Refusal Guard ====================
+
+/**
+ * Detect when the model gives up after a tool failure — claiming "compatibility issues",
+ * suggesting manual alternatives, etc. This prevents session pollution where the model
+ * "learns" from its own refusal text in subsequent turns.
+ */
+const TOOL_REFUSAL_RE = /无法执行|兼容性问题|替代方案|手动操作|系统无法|不支持该操作|cannot execute|compatibility issue|alternative approach|manual operation|unable to perform|not supported/i
+
+function isToolRefusal(text: string, toolCallCount: number): boolean {
+  return toolCallCount > 0 && TOOL_REFUSAL_RE.test(text)
+}
+
+const REFUSAL_CORRECTION = [
+  'SYSTEM CORRECTION: The tool failure you encountered was TEMPORARY.',
+  'Do NOT suggest manual alternatives or claim the system cannot execute.',
+  'You MUST retry the operation NOW using the correct tools.',
+  'If the tool failed, try again — transient errors are normal.',
+].join(' ')
+
 // ==================== Types ====================
 
 export interface EngineOpts {
@@ -163,6 +183,33 @@ export class Engine {
       if (isTradingHallucination(text, retryToolCalls)) {
         console.warn('engine(ask): hallucination persisted after retry, blocking fake response')
         text = '⚠️ 操作失败：系统未能正确执行交易指令。请重新发送你的请求，我会调用正确的工具来操作。'
+      }
+    }
+
+    // Tool refusal guard (same as askWithSession)
+    if (isToolRefusal(text, totalToolCalls)) {
+      console.warn('engine(ask): detected tool refusal after tool failure, retrying with correction')
+
+      let refusalRetryToolCalls = 0
+      const refusalRetryResult = await this.withLock(() => this.agent.generate({
+        messages: [
+          { role: 'user', content: prompt } as ModelMessage,
+          { role: 'assistant', content: text } as ModelMessage,
+          { role: 'user', content: REFUSAL_CORRECTION } as ModelMessage,
+        ],
+        onStepFinish: (step) => {
+          refusalRetryToolCalls += step.toolCalls.length
+          for (const tr of step.toolResults) {
+            media.push(...extractMediaFromToolOutput(tr.output))
+          }
+        },
+      }))
+
+      text = refusalRetryResult.text ?? ''
+
+      if (isToolRefusal(text, refusalRetryToolCalls)) {
+        console.warn('engine(ask): tool refusal persisted after retry, blocking refusal response')
+        text = '⚠️ 操作遇到临时错误，请稍后重试。系统工具正常可用，这只是暂时性问题。'
       }
     }
 
@@ -252,6 +299,40 @@ export class Engine {
       if (isTradingHallucination(text, retryToolCalls)) {
         console.warn('engine: hallucination persisted after retry, blocking fake response')
         text = '⚠️ 操作失败：系统未能正确执行交易指令。请重新发送你的请求，我会调用正确的工具来操作。'
+      }
+    }
+
+    // ---- Tool refusal guard ----
+    // If the model had tool calls but then gave up (claiming "compatibility issues",
+    // suggesting manual alternatives), inject a correction and retry once.
+    if (isToolRefusal(text, totalToolCalls)) {
+      console.warn('engine: detected tool refusal after tool failure, retrying with correction')
+
+      const refusalRetryMessages: ModelMessage[] = [
+        ...messages as ModelMessage[],
+        { role: 'assistant', content: text } as ModelMessage,
+        { role: 'user', content: REFUSAL_CORRECTION } as ModelMessage,
+      ]
+
+      let refusalRetryToolCalls = 0
+      const refusalRetryResult = await this.withLock(() =>
+        this.agent.generate({
+          messages: refusalRetryMessages,
+          onStepFinish: (step) => {
+            refusalRetryToolCalls += step.toolCalls.length
+            for (const tr of step.toolResults) {
+              media.push(...extractMediaFromToolOutput(tr.output))
+            }
+          },
+        }),
+      )
+
+      text = refusalRetryResult.text ?? ''
+
+      // If still refusing after retry, replace with a safe message
+      if (isToolRefusal(text, refusalRetryToolCalls)) {
+        console.warn('engine: tool refusal persisted after retry, blocking refusal response')
+        text = '⚠️ 操作遇到临时错误，请稍后重试。系统工具正常可用，这只是暂时性问题。'
       }
     }
 
