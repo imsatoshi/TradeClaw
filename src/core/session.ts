@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises'
+import { readFile, appendFile, mkdir, stat as fsStat, truncate as fsTruncate } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { getActiveEntries } from './compaction.js'
 
@@ -128,11 +128,36 @@ export class SessionStore {
     }
   }
 
-  /** Clear all entries from the session file. */
-  async clear(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true })
-    await writeFile(this.filePath, '')
-    this.lastUuid = null
+  /**
+   * Capture the current file size so we can truncate back to it later.
+   * Used by heartbeat to prune no-op turns (openclaw-style transcript pruning).
+   */
+  async captureSize(): Promise<number> {
+    try {
+      const s = await fsStat(this.filePath)
+      return s.size
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Truncate the session file back to a previously captured size,
+   * effectively removing entries appended since that snapshot.
+   * Also restores lastUuid by re-reading the truncated file.
+   */
+  async truncateTo(size: number): Promise<void> {
+    try {
+      const currentSize = (await fsStat(this.filePath)).size
+      if (currentSize > size) {
+        await fsTruncate(this.filePath, size)
+        // Restore lastUuid from the truncated file
+        const entries = await this.readAll()
+        this.lastUuid = entries.length > 0 ? entries[entries.length - 1].uuid : null
+      }
+    } catch {
+      // File may not exist — nothing to truncate
+    }
   }
 
   /** Check if this session file exists. */
