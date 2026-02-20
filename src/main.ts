@@ -8,11 +8,12 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
 import type { ICryptoTradingEngine, Operation, WalletExportState } from './extension/crypto-trading/index.js'
 import {
   Wallet,
+  CRYPTO_ALLOWED_SYMBOLS,
   initCryptoAllowedSymbols,
   createCryptoTradingEngine,
   createCryptoTradingTools,
@@ -178,6 +179,15 @@ async function main() {
 
   // Sandbox (data access + realtime market & news data)
   const { marketData, news } = await fetchRealtimeData()
+
+  // Supplement with exchange OHLCV for all whitelisted pairs (Binance public API)
+  try {
+    const exchangeData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
+    Object.assign(marketData, exchangeData)
+  } catch (err) {
+    console.warn('exchange OHLCV fetch failed (non-fatal):', err)
+  }
+
   const marketProvider = new RealMarketDataProvider(marketData)
   const newsProvider = new RealNewsProvider(news)
 
@@ -247,6 +257,13 @@ async function main() {
   setInterval(async () => {
     try {
       const { marketData, news } = await fetchRealtimeData()
+
+      // Merge exchange OHLCV for whitelisted pairs
+      try {
+        const exchangeData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
+        Object.assign(marketData, exchangeData)
+      } catch { /* non-fatal */ }
+
       marketProvider.reload(marketData)
       newsProvider.reload(news)
     } catch (err) {
