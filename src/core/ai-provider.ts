@@ -1,0 +1,50 @@
+/**
+ * AIProvider — unified abstraction over AI backends.
+ *
+ * Each provider (Vercel AI SDK, Claude Code CLI, …) implements this interface
+ * with its own session management flow.  ProviderRouter reads the runtime
+ * config and delegates to the correct implementation.
+ */
+
+import type { SessionStore } from './session.js'
+import type { MediaAttachment } from './types.js'
+import { readAIConfig } from './ai-config.js'
+
+// ==================== Types ====================
+
+export interface AskOptions {
+  /** Preamble text inside <chat_history> block (Claude Code only). */
+  historyPreamble?: string
+  /** System prompt override (Claude Code only). */
+  systemPrompt?: string
+  /** Max text history entries in <chat_history>. Default: 50 (Claude Code only). */
+  maxHistoryEntries?: number
+}
+
+export interface ProviderResult {
+  text: string
+  media: MediaAttachment[]
+}
+
+/** Unified AI provider — each backend implements its own session handling. */
+export interface AIProvider {
+  askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult>
+}
+
+// ==================== Router ====================
+
+/** Reads runtime AI config and delegates to the correct provider. */
+export class ProviderRouter implements AIProvider {
+  constructor(
+    private vercel: AIProvider,
+    private claudeCode: AIProvider | null,
+  ) {}
+
+  async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
+    const aiConfig = await readAIConfig()
+    if (aiConfig.provider === 'claude-code' && this.claudeCode) {
+      return this.claudeCode.askWithSession(prompt, session, opts)
+    }
+    return this.vercel.askWithSession(prompt, session, opts)
+  }
+}

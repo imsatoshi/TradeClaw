@@ -7,8 +7,6 @@ import { randomUUID } from 'node:crypto'
 import type { Plugin, EngineContext } from '../../core/types.js'
 import { SessionStore, toTextHistory } from '../../core/session.js'
 import { registerConnector, touchInteraction } from '../../core/connector-registry.js'
-import { readAIConfig } from '../../core/ai-config.js'
-import { askClaudeCodeWithSession } from '../../providers/claude-code/index.js'
 import { WEB_UI_HTML } from './ui.js'
 
 export interface WebConfig {
@@ -60,23 +58,10 @@ export class WebPlugin implements Plugin {
 
       touchInteraction('web', 'default')
 
-      // Route based on configured AI provider (same as Telegram connector)
-      const aiConfig = await readAIConfig()
-      let result: { text: string; media?: Array<{ type: 'image'; path: string }> }
-
-      if (aiConfig.provider === 'claude-code') {
-        result = await askClaudeCodeWithSession(message, this.session, {
-          claudeCode: {
-            allowedTools: ctx.config.agent.claudeCode.allowedTools,
-            disallowedTools: ctx.config.agent.claudeCode.disallowedTools,
-            maxTurns: ctx.config.agent.claudeCode.maxTurns,
-          },
-          compaction: ctx.config.compaction,
-          historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
-        })
-      } else {
-        result = await ctx.engine.askWithSession(message, this.session)
-      }
+      // Route through unified provider (Engine → ProviderRouter → Vercel or Claude Code)
+      const result = await ctx.engine.askWithSession(message, this.session, {
+        historyPreamble: 'The following is the recent conversation from the Web UI. Use it as context if the user references earlier messages.',
+      })
 
       // Map media files to serveable URLs
       const media = (result.media ?? []).map((m) => {
