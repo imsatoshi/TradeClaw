@@ -28,6 +28,7 @@ import {
   createSecOperationDispatcher,
   createSecWalletStateBridge,
 } from './extension/securities-trading/index.js'
+import { createAShareTools } from './extension/ashare/index.js'
 import { Brain, createBrainTools } from './extension/brain/index.js'
 import type { BrainExportState } from './extension/brain/index.js'
 import { createBrowserTools } from './extension/browser/index.js'
@@ -266,6 +267,7 @@ async function main() {
 
   const tools = {
     ...createAnalysisTools(sandbox),
+    ...createAShareTools(),
     ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge),
     ...(secResult ? createSecuritiesTradingTools(secResult.engine, secWallet, secWalletStateBridge) : {}),
     ...createBrainTools(brain),
