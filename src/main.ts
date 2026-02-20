@@ -401,9 +401,10 @@ async function main() {
       }
     }
 
-    // Clear heartbeat session before each run to prevent stale data accumulation.
-    // Without this, the model copies previous responses instead of calling tools fresh.
-    await heartbeatSession.clear()
+    // Capture session file size before heartbeat so we can prune no-op turns later.
+    // (openclaw-style transcript pruning: HEARTBEAT_OK rounds get truncated away,
+    // meaningful alerts stay in session for context continuity)
+    const preHeartbeatSize = await heartbeatSession.captureSize()
 
     // Read HEARTBEAT.md content upfront so we can inject it into the prompt
     // (the AI has no file-reading tool, so we must provide the content directly)
@@ -476,10 +477,13 @@ async function main() {
     )
 
     if (shouldSkip && !hasCronEvents) {
+      // Prune no-op heartbeat turns from session to prevent stale data accumulation
+      await heartbeatSession.truncateTo(preHeartbeatSize)
       return { status: 'ok-ack', text }
     }
 
     if (!text.trim()) {
+      await heartbeatSession.truncateTo(preHeartbeatSize)
       return { status: 'ok-empty' }
     }
 
@@ -487,6 +491,7 @@ async function main() {
     // Suppress identical alert text within 24h window
     if (heartbeatDedup.isDuplicate(text)) {
       console.log('scheduler: duplicate heartbeat response suppressed')
+      await heartbeatSession.truncateTo(preHeartbeatSize)
       return { status: 'skipped', reason: 'duplicate' }
     }
 
