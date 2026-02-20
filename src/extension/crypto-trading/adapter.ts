@@ -241,12 +241,16 @@ NOTE: This stages the operation. Call cryptoWalletCommit + cryptoWalletPush to e
       description: `Query current open crypto positions. Can filter by symbol or get all positions.
 
 Each position includes:
-- All standard position fields (symbol, side, size, entryPrice, leverage, margin, markPrice, unrealizedPnL, positionValue, etc.)
-- percentageOfEquity: This position's value as percentage of TOTAL CAPITAL (use this for risk control, e.g. "max 10% per trade")
-- percentageOfTotal: This position's value as percentage of total positions (use this for diversification check)
-- pnlRatioToMargin: Unrealized PnL as a percentage of margin
+- symbol, side, size, entryPrice, leverage, markPrice, unrealizedPnL, liquidationPrice
+- capitalInvested: The ACTUAL money (margin) locked in this position. Use this for account calculations.
+- leveragedNotionalValue: The leveraged exposure (= size × price). This is NOT real money — do NOT add this to balance.
+- percentageOfEquity: This position's capital as percentage of TOTAL account equity
+- percentageOfTotal: This position's capital as percentage of total invested capital
+- pnlRatioToMargin: Unrealized PnL as a percentage of capitalInvested
 
 IMPORTANT: If result is an empty array [], it means you currently have NO open positions.
+IMPORTANT: When calculating total account value, use capitalInvested (NOT leveragedNotionalValue).
+  Total account value = availableBalance + sum(capitalInvested) + unrealizedPnL
 RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't exceed your per-trade limit.`,
       inputSchema: z.object({
         symbol: z
@@ -260,8 +264,8 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
         const allPositions = await tradingEngine.getPositions();
         const account = await tradingEngine.getAccount();
 
-        const totalPositionValue = allPositions.reduce(
-          (sum, p) => sum + p.positionValue,
+        const totalCapitalInvested = allPositions.reduce(
+          (sum, p) => sum + p.margin,
           0,
         );
 
@@ -272,17 +276,29 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
               : 0;
           const percentOfEquity =
             account.equity > 0
-              ? (position.positionValue / account.equity) * 100
+              ? (position.margin / account.equity) * 100
               : 0;
-          const percentOfPositions =
-            totalPositionValue > 0
-              ? (position.positionValue / totalPositionValue) * 100
+          const percentOfTotal =
+            totalCapitalInvested > 0
+              ? (position.margin / totalCapitalInvested) * 100
               : 0;
 
           return {
-            ...position,
+            symbol: position.symbol,
+            side: position.side,
+            size: position.size,
+            entryPrice: position.entryPrice,
+            leverage: position.leverage,
+            markPrice: position.markPrice,
+            liquidationPrice: position.liquidationPrice,
+            unrealizedPnL: position.unrealizedPnL,
+            capitalInvested: position.margin,
+            leveragedNotionalValue: position.positionValue,
+            enterTag: position.enterTag,
+            grindCount: position.grindCount,
+            profitRatio: position.profitRatio,
             percentageOfEquity: `${percentOfEquity.toFixed(1)}%`,
-            percentageOfTotal: `${percentOfPositions.toFixed(1)}%`,
+            percentageOfTotal: `${percentOfTotal.toFixed(1)}%`,
             pnlRatioToMargin: `${pnlRatio >= 0 ? '+' : ''}${pnlRatio.toFixed(1)}%`,
           };
         });
@@ -299,7 +315,12 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
           };
         }
 
-        return filtered;
+        return {
+          positions: filtered,
+          totalCapitalInvested: totalCapitalInvested.toFixed(2),
+          totalLeveragedNotional: allPositions.reduce((sum, p) => sum + p.positionValue, 0).toFixed(2),
+          accountEquity: account.equity.toFixed(2),
+        };
       },
     }),
 
@@ -330,10 +351,18 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
 
     cryptoGetAccount: tool({
       description:
-        'Query crypto account info (balance, margin, unrealizedPnL, equity, realizedPnL, totalPnL). totalPnL = realizedPnL + unrealizedPnL.',
+        'Query crypto account info. Returns totalAccountValue (= equity, the TRUE total), availableBalance, marginUsedByPositions, unrealizedPnL, realizedPnL, totalPnL. totalAccountValue is the correct number to report as "total assets".',
       inputSchema: z.object({}),
       execute: async () => {
-        return await tradingEngine.getAccount();
+        const account = await tradingEngine.getAccount();
+        return {
+          availableBalance: account.balance,
+          marginUsedByPositions: account.totalMargin,
+          unrealizedPnL: account.unrealizedPnL,
+          realizedPnL: account.realizedPnL,
+          totalPnL: account.totalPnL,
+          totalAccountValue: account.equity,
+        };
       },
     }),
 

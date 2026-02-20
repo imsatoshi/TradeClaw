@@ -1,0 +1,58 @@
+/**
+ * Fetch funding rate data from Binance Futures public API (no auth required).
+ *
+ * GET https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT
+ */
+
+import type { FundingRateInfo } from '../tools/strategy-scanner/types.js'
+
+/**
+ * Fetch current funding rates for multiple symbols.
+ *
+ * @param symbols - Standard format like ["BTC/USDT", "ETH/USDT"]
+ * @returns Record mapping symbol → FundingRateInfo (failed symbols silently skipped)
+ */
+export async function fetchFundingRates(
+  symbols: string[],
+): Promise<Record<string, FundingRateInfo>> {
+  const result: Record<string, FundingRateInfo> = {}
+
+  const BATCH_SIZE = 10
+  for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+    const batch = symbols.slice(i, i + BATCH_SIZE)
+    const promises = batch.map(async (symbol) => {
+      const binanceSymbol = symbol.replace('/', '')
+      const url = `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${binanceSymbol}`
+
+      try {
+        const res = await fetch(url)
+        if (!res.ok) return
+
+        const data = await res.json() as {
+          symbol: string
+          lastFundingRate: string
+          markPrice: string
+          indexPrice: string
+          nextFundingTime: number
+        }
+
+        const rate = parseFloat(data.lastFundingRate)
+        result[symbol] = {
+          symbol,
+          fundingRate: rate,
+          fundingRatePercent: `${(rate * 100).toFixed(4)}%`,
+          markPrice: parseFloat(data.markPrice),
+          indexPrice: parseFloat(data.indexPrice),
+          nextFundingTime: data.nextFundingTime,
+          nextFundingTimeISO: new Date(data.nextFundingTime).toISOString(),
+        }
+      } catch {
+        // Skip failed symbols silently
+      }
+    })
+
+    await Promise.all(promises)
+  }
+
+  return result
+}

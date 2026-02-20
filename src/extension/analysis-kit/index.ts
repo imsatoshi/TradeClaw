@@ -12,3 +12,6 @@ export { RealNewsProvider } from './data/RealNewsProvider';
 export { MockDataProvider } from './data/MockDataProvider';
 export { fetchRealtimeData } from './data/DotApiClient';
 export { fetchExchangeOHLCV } from './data/ExchangeClient';
+export { fetchFundingRates } from './data/FundingRateClient';
+export { runStrategyScan } from './tools/strategy-scanner/index';
+export type { StrategySignal, ScanResult, FundingRateInfo } from './tools/strategy-scanner/index';

@@ -5,6 +5,8 @@ import { calculate } from '../tools/calculate.tool';
 import { calculateIndicator } from '../tools/calculate-indicator.tool';
 import { globNews, grepNews, readNews } from '../tools/news.tool';
 import { CRYPTO_ALLOWED_SYMBOLS } from '../../crypto-trading/interfaces.js';
+import { runStrategyScan } from '../tools/strategy-scanner/index.js';
+import { fetchFundingRates } from '../data/FundingRateClient.js';
 
 /**
  * Create analysis-only AI tools from Sandbox
@@ -421,6 +423,71 @@ Example use cases:
           approved: true,
           message: 'Approved automatically',
         };
+      },
+    }),
+
+    // ==================== Strategy scanning ====================
+
+    strategyScan: tool({
+      description: `
+Scan all whitelisted trading pairs for active strategy signals in one call.
+
+Runs three strategies on 4H candlestick data fetched automatically from Binance:
+1. RSI Divergence + Volume Exhaustion (mean-reversion, ~60-65% win rate)
+2. Bollinger Band Squeeze + MACD Crossover (breakout, ~55% win rate)
+3. Funding Rate Fade + RSI Confirmation (contrarian, uses funding rate extremes)
+
+Returns structured signals sorted by confidence (highest first), plus session info.
+
+Each signal includes:
+- direction: 'long' or 'short'
+- confidence: 0-100 (only act on >= 70)
+- strength: 'strong' | 'moderate' | 'weak'
+- entry, stopLoss, takeProfit, riskRewardRatio
+- reason: human-readable explanation
+
+Call this once per heartbeat cycle instead of manually calculating indicators.
+      `.trim(),
+      inputSchema: z.object({
+        symbols: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Symbols to scan. Defaults to all whitelisted pairs if omitted. Example: ["BTC/USDT", "ETH/USDT"]',
+          ),
+      }),
+      execute: async ({ symbols }) => {
+        const targetSymbols = symbols && symbols.length > 0
+          ? symbols
+          : [...CRYPTO_ALLOWED_SYMBOLS];
+        return await runStrategyScan(targetSymbols);
+      },
+    }),
+
+    cryptoGetFundingRate: tool({
+      description: `
+Get current funding rates for one or more perpetual futures symbols from Binance.
+
+Funding rate indicates market sentiment and carry cost:
+- Positive rate (> 0): Longs pay shorts. Crowd is over-leveraged long.
+- Negative rate (< 0): Shorts pay longs. Crowd is over-leveraged short.
+
+Extreme thresholds:
+- > 0.10%/8h: Extremely bullish sentiment, contrarian short opportunity
+- < -0.05%/8h: Extremely bearish sentiment, contrarian long opportunity
+
+Use this to check funding on held positions or to get standalone funding data.
+For full strategy scanning (including funding fade), use strategyScan instead.
+      `.trim(),
+      inputSchema: z.object({
+        symbols: z
+          .array(z.string())
+          .describe(
+            'Symbols to query, e.g. ["BTC/USDT", "ETH/USDT"]. Use USDT pairs for Binance futures.',
+          ),
+      }),
+      execute: async ({ symbols }) => {
+        return await fetchFundingRates(symbols);
       },
     }),
 
