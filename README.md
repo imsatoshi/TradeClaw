@@ -4,7 +4,7 @@
 
 <h1 align="center">TradeClaw</h1>
 
-<p align="center">AI 交易代理 — 自动抓取新闻、计算量化因子、记录交易逻辑，24/7 监控和调整你的投资组合。</p>
+<p align="center">AI 投资组合经理 — 管理算法策略的交易范围、监控风险、分析信号表现，24/7 守护你的投资组合。</p>
 
 ---
 
@@ -16,7 +16,7 @@
 
 - **双 AI 引擎** — 运行时通过 Telegram `/settings` 切换 Claude Code CLI 和 Vercel AI SDK
 - **灵活的模型后端** — 支持任何 OpenAI 兼容服务商（Anthropic、OpenAI、DeepSeek、Google 等）
-- **加密货币交易** — CCXT（Bybit、OKX、Binance 等）或 [Freqtrade](https://www.freqtrade.io/) 策略机器人，动态白名单同步
+- **加密货币交易** — CCXT（Bybit、OKX、Binance 等）或 [Freqtrade](https://www.freqtrade.io/) 策略机器人，AI 作为基金经理管理策略范围
 - **证券交易** — Alpaca 美股集成，git 风格的钱包（stage、commit、push）
 - **市场分析** — 技术指标（RSI、MACD、布林带等）、新闻搜索、价格模拟
 - **A 股行情** — 东方财富免费 API，支持搜索股票、实时行情、K 线数据和技术指标计算（只分析，不交易）
@@ -123,11 +123,22 @@ cp .env.example .env    # 然后填入你的 API 密钥
 cp data/config/crypto.binance.example.json data/config/crypto.json
 ```
 
-**Freqtrade（策略机器人）** — 通过 REST API 连接 [Freqtrade](https://www.freqtrade.io/) 实例，白名单动态同步（每 5 分钟刷新）：
+**Freqtrade（策略机器人）** — 通过 REST API 连接 [Freqtrade](https://www.freqtrade.io/) 实例。AI 作为**基金经理**管理策略：
 
 ```bash
 cp data/config/crypto.freqtrade.example.json data/config/crypto.json
 ```
+
+Freqtrade 模式下，AI 不直接下单，而是管理宏观层面：
+
+| 工具 | 说明 |
+|------|------|
+| `cryptoManageBlacklist` | 黑名单管理 — 控制策略可以交易哪些币对 |
+| `cryptoLockPair` | 临时锁定 — 短期暂停某个币对的交易（如高波动、突发新闻） |
+| `cryptoGetStrategyStats` | 策略分析 — 按入场信号/退出原因查看胜率和收益 |
+| `cryptoReloadConfig` | 重载配置 — 黑名单/白名单修改后刷新策略 |
+| `cryptoGetPositions` | 持仓监控 — 显示 NFI 信号标签、DCA 次数、利润率 |
+| `cryptoClosePosition` | 紧急平仓 — 仅用于黑天鹅等系统性风险 |
 
 ### 证券交易
 
