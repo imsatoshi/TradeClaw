@@ -251,6 +251,12 @@ async function main() {
     '5. Always call `cryptoGetOrders` for order history.',
     '6. DO NOT use sandbox data for portfolio queries.',
     '7. If the user says "看看持仓" or similar, you MUST call tools first, then respond with fresh data.',
+    '',
+    'CRITICAL RULES for technical analysis queries:',
+    '8. You HAVE OHLCV K-line data for ALL whitelisted trading pairs (fetched from Binance exchange).',
+    '9. When the user asks about RSI, MACD, moving averages, or any technical indicator, you MUST call `calculateIndicator` with the correct formula.',
+    '10. NEVER say you lack market data or cannot calculate indicators. The data IS available — just call the tool.',
+    '11. Example: for ZEC/USDT RSI, call calculateIndicator with formula "RSI(CLOSE(\'ZEC/USDT\', 50), 14)".',
   ].join('\n')
 
   // Refresh market data & news periodically

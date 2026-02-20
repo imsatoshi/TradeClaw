@@ -29,7 +29,7 @@ export function createAnalysisToolsImpl(sandbox: Sandbox) {
 
     getLatestOHLCV: tool({
       description:
-        'Get the latest OHLCV (Open, High, Low, Close, Volume) candlestick data for multiple trading pairs at current time. Returns K-line data with the specified interval (e.g., 1h, 4h, 1d). Use this to batch-fetch market data for all symbols you need in one call.',
+        'Get the latest OHLCV (Open, High, Low, Close, Volume) candlestick data for multiple trading pairs at current time. Has data for ALL whitelisted pairs (e.g. ZEC/USDT, BTC/USDT, etc.). Use this to batch-fetch market data for all symbols you need in one call.',
       inputSchema: z.object({
         symbols: z
           .array(z.string())
@@ -297,6 +297,10 @@ This commits you to a specific action plan before execution.
       description: `
 Calculate technical indicators and statistics using formula expressions.
 
+IMPORTANT: This tool has OHLCV data for ALL whitelisted trading pairs (fetched from exchange).
+You MUST use this tool whenever the user asks about technical indicators, RSI, MACD, moving averages, etc.
+Do NOT say you lack data — call this tool with the correct symbol (e.g. 'ZEC/USDT').
+
 **Supported Functions:**
 
 Data Access (returns array):
@@ -323,17 +327,18 @@ Technical Indicators (input: array, returns: number or object):
 
 Array Access:
 - Use [index] to access array elements (supports negative indices)
-- Example: CLOSE('BTC/USD', 1)[0] gets the latest close price
+- Example: CLOSE('ZEC/USDT', 1)[0] gets the latest close price
 
 **Examples:**
-- "SMA(CLOSE('BTC/USD', 100), 20)" - 20-period moving average
-- "RSI(CLOSE('BTC/USD', 50), 14)" - 14-period RSI
-- "BBANDS(CLOSE('BTC/USD', 100), 20, 2)" - Bollinger Bands
-- "(CLOSE('BTC/USD', 1)[0] - SMA(CLOSE('BTC/USD', 100), 50)) / SMA(CLOSE('BTC/USD', 100), 50) * 100" - Price deviation from 50MA in percentage
+- "SMA(CLOSE('ZEC/USDT', 100), 20)" - 20-period moving average of ZEC
+- "RSI(CLOSE('BTC/USDT', 50), 14)" - 14-period RSI of BTC
+- "BBANDS(CLOSE('ETH/USDT', 100), 20, 2)" - Bollinger Bands of ETH
+- "MACD(CLOSE('SOL/USDT', 100), 12, 26, 9)" - MACD of SOL
 
 **Important Notes:**
+- Symbol format: use 'XXX/USDT' (e.g. 'ZEC/USDT', 'BTC/USDT')
 - lookback parameter: number of K-lines to look back from current time
-- All calculations respect time isolation (only see data <= currentTime)
+- Up to 500 hourly candles available per symbol
 - Arrays are ordered chronologically (oldest first, newest last)
 - Use [0] for latest value, [-1] for oldest value in the array
       `.trim(),
