@@ -170,9 +170,12 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       };
     }
 
+    // Map buy/sell → long/short for Freqtrade forceenter API
+    const ftSide: 'long' | 'short' = order.side === 'buy' ? 'long' : 'short';
+
     const payload: FreqtradeOrderRequest = {
       pair: freqtradeSymbol,
-      side: order.side,
+      side: ftSide,
       ordertype: order.type,
       amount: stakeAmount,
     };

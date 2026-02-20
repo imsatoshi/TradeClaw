@@ -9,7 +9,7 @@
 
 export interface FreqtradeOrderRequest {
   pair: string;
-  side: 'buy' | 'sell';
+  side: 'long' | 'short';
   amount?: number;
   price?: number;
   ordertype: 'market' | 'limit' | 'stop_loss' | 'stop_loss_limit';
