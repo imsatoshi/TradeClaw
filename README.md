@@ -21,7 +21,7 @@
 - **市场分析** — 技术指标（RSI、MACD、布林带等）、新闻搜索、价格模拟
 - **A 股行情** — 东方财富免费 API，支持搜索股票、实时行情、K 线数据和技术指标计算（只分析，不交易）
 - **认知状态** — 持久化的"大脑"，包含前额叶记忆、情绪追踪和提交历史
-- **调度系统** — 心跳循环 + 定时任务，自动压缩上下文、去重和消息投递队列
+- **调度系统** — 心跳循环 + 定时任务，自动压缩上下文、去重、Transcript 修剪和消息投递队列
 - **连接器** — Telegram 机器人、HTTP Webhook、MCP Server
 
 ## 架构
@@ -73,7 +73,7 @@ graph LR
 
 **服务商** — 可互换的 AI 后端。Claude Code 以子进程方式启动 `claude -p`；Vercel AI SDK 在进程内运行 `ToolLoopAgent`，支持任何 OpenAI 兼容模型。
 
-**核心** — `Engine` 管理 AI 对话，支持会话持久化（JSONL）和自动压缩。`Scheduler` 驱动自主心跳/定时循环。
+**核心** — `Engine` 管理 AI 对话，支持会话持久化（JSONL）和自动压缩。内置交易幻觉检测（模型声称交易但未调工具）和工具放弃检测（工具失败后模型拒绝重试）。`Scheduler` 驱动自主心跳/定时循环，使用 Transcript 修剪防止无用心跳污染会话上下文。
 
 **扩展** — 按领域划分的工具集，注入到引擎中。每个扩展拥有自己的工具、状态和持久化逻辑。
 
@@ -139,6 +139,9 @@ Freqtrade 模式下，AI 不直接下单，而是管理宏观层面：
 | `cryptoReloadConfig` | 重载配置 — 黑名单/白名单修改后刷新策略 |
 | `cryptoGetPositions` | 持仓监控 — 显示 NFI 信号标签、DCA 次数、利润率 |
 | `cryptoClosePosition` | 紧急平仓 — 仅用于黑天鹅等系统性风险 |
+| `cryptoGetWhitelist` | 白名单查询 — 查看策略当前交易的币对列表 |
+
+Freqtrade HTTP 请求内置自动重试（最多 2 次，间隔 1s），瞬态网络错误在引擎层消化，不会暴露给 AI 模型。
 
 ### 证券交易
 
@@ -202,7 +205,7 @@ pnpm test       # 运行测试
 ```
 src/
   main.ts                    # 组合根 — 连接所有模块
-  core/                      # 引擎、会话、压缩、调度、定时、投递
+  core/                      # 引擎、会话、压缩、调度、定时、投递、幻觉/放弃检测
   providers/
     claude-code/             # Claude Code CLI 子进程封装
     vercel-ai-sdk/           # Vercel AI SDK ToolLoopAgent 封装
