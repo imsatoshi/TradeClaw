@@ -252,11 +252,18 @@ async function main() {
     '6. DO NOT use sandbox data for portfolio queries.',
     '7. If the user says "看看持仓" or similar, you MUST call tools first, then respond with fresh data.',
     '',
+    'CRITICAL RULES for trading operations:',
+    '8. You MUST call trading tools to execute ANY order. NEVER pretend you placed/modified/cancelled an order without actually calling the tool.',
+    '9. To place orders: use `cryptoPlaceOrder` → `cryptoWalletCommit` → `cryptoWalletPush`. All three steps are required.',
+    '10. To close/take-profit: use `cryptoClosePosition` → `cryptoWalletCommit` → `cryptoWalletPush`. Set `price` for limit exits.',
+    '11. To modify an existing order: call `cryptoClosePosition` with the new price — the system will auto-cancel the old order.',
+    '12. NEVER respond with "order placed" or "order modified" unless you see a SUCCESS result from `cryptoWalletPush`.',
+    '',
     'CRITICAL RULES for technical analysis queries:',
-    '8. You HAVE OHLCV K-line data for ALL whitelisted trading pairs (fetched from Binance exchange).',
-    '9. When the user asks about RSI, MACD, moving averages, or any technical indicator, you MUST call `calculateIndicator` with the correct formula.',
-    '10. NEVER say you lack market data or cannot calculate indicators. The data IS available — just call the tool.',
-    '11. Example: for ZEC/USDT RSI, call calculateIndicator with formula "RSI(CLOSE(\'ZEC/USDT\', 50), 14)".',
+    '13. You HAVE OHLCV K-line data for ALL whitelisted trading pairs (fetched from Binance exchange).',
+    '14. When the user asks about RSI, MACD, moving averages, or any technical indicator, you MUST call `calculateIndicator` with the correct formula.',
+    '15. NEVER say you lack market data or cannot calculate indicators. The data IS available — just call the tool.',
+    '16. Example: for ZEC/USDT RSI, call calculateIndicator with formula "RSI(CLOSE(\'ZEC/USDT\', 50), 14)".',
   ].join('\n')
 
   // Refresh market data & news periodically
