@@ -81,7 +81,7 @@ export async function searchStock(query: string): Promise<StockSearchResult[]> {
   return items.map((item: any) => ({
     code: item.Code as string,
     name: item.Name as string,
-    market: item.MktNum === '01' ? 1 : 0,
+    market: item.MktNum === '1' ? 1 : 0,
   }))
 }
 
@@ -107,6 +107,7 @@ export async function getKline(
     `&klt=${klt}` +
     `&fqt=1` +
     `&lmt=${count}` +
+    `&end=20500101` +
     `&fields1=f1,f2,f3,f4,f5,f6` +
     `&fields2=f51,f52,f53,f54,f55,f56,f57`
 
