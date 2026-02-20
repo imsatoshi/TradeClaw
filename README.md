@@ -18,6 +18,7 @@
 - **灵活的模型后端** — 支持任何 OpenAI 兼容服务商（Anthropic、OpenAI、DeepSeek、Google 等）
 - **加密货币交易** — CCXT（Bybit、OKX、Binance 等）或 [Freqtrade](https://www.freqtrade.io/) 策略机器人，AI 作为基金经理管理策略范围
 - **证券交易** — Alpaca 美股集成，git 风格的钱包（stage、commit、push）
+- **策略自动扫描** — 一键扫描全仓位品种，内置 RSI 背离、布林带挤压、资金费率反转三套策略，心跳自动触发，返回带入场/止损/目标/盈亏比的结构化信号
 - **市场分析** — 技术指标（RSI、MACD、布林带等）、新闻搜索、价格模拟
 - **A 股行情** — 东方财富免费 API，支持搜索股票、实时行情、K 线数据和技术指标计算（只分析，不交易）
 - **认知状态** — 持久化的"大脑"，包含前额叶记忆、情绪追踪和提交历史
@@ -143,6 +144,33 @@ Freqtrade 模式下，AI 不直接下单，而是管理宏观层面：
 
 Freqtrade HTTP 请求内置自动重试（最多 2 次，间隔 1s），瞬态网络错误在引擎层消化，不会暴露给 AI 模型。
 
+### 策略自动扫描
+
+每次心跳，AI 调用 `strategyScan` 一次性扫描所有白名单品种，内置三套 4H 策略：
+
+| 策略 | 类型 | 胜率 | 触发条件 |
+|------|------|------|----------|
+| RSI 背离 + 成交量耗尽 | 均值回归 | ~60-65% | 价格新低/高但 RSI 背离，成交量萎缩确认 |
+| 布林带挤压 + MACD 交叉 | 突破 | ~55% | 带宽低于均值（挤压态），histogram 穿零 + 成交量放大 |
+| 资金费率反转 | 逆向 | — | 极端资金费率（>0.10% 或 <-0.05%）+ RSI 超买/超卖 |
+
+**设计原则：** 信号检测由确定性代码完成（不依赖 AI 逐步计算），AI 负责结合持仓/时段/账户状态做最终决策。
+
+每个信号包含：方向、置信度（0-100）、强度、建议入场价、ATR 止损、盈亏比目标，以及人类可读的触发原因。心跳只通知置信度 ≥ 70 的信号。
+
+时段感知（UTC）：
+- `08:00-12:00` 伦敦开盘 — 布林带突破最佳
+- `12:00-16:00` 纽伦重叠 — 最佳流动性，三种策略均有效
+- `16:00-21:00` 纽约时段 — RSI 背离为主
+- `21:00-08:00` 亚洲/深夜 — 仅执行强信号（置信度 ≥ 80）
+
+资金费率相关工具：
+
+| 工具 | 说明 |
+|------|------|
+| `strategyScan` | 一次调用扫描所有品种所有策略，返回 `ScanResult`（含 `StrategySignal[]` + 时段信息） |
+| `cryptoGetFundingRate` | 查询 Binance 当前资金费率（正费率=多头付空头，极端时为反转信号） |
+
 ### 证券交易
 
 基于 [Alpaca](https://alpaca.markets/)。支持模拟盘和实盘 — 在 `data/config/securities.json` 中切换。
@@ -211,6 +239,18 @@ src/
     vercel-ai-sdk/           # Vercel AI SDK ToolLoopAgent 封装
   extension/
     analysis-kit/            # 行情数据、指标计算、新闻、沙盒
+      data/
+        ExchangeClient.ts    # Binance Futures OHLCV 公开 API
+        FundingRateClient.ts # Binance 资金费率公开 API
+      tools/
+        strategy-scanner/    # 策略扫描系统
+          types.ts           # StrategySignal、ScanResult、FundingRateInfo 接口
+          helpers.ts         # rsiSeries、bandwidthSeries、macdHistogramSeries 等序列计算
+          scanner.ts         # 编排器：并发获取数据 → 运行策略 → 返回带时段信息的 ScanResult
+          strategies/
+            rsi-divergence.ts     # RSI 背离 + 成交量耗尽
+            bollinger-squeeze.ts  # 布林带挤压 + MACD 零轴交叉
+            funding-fade.ts       # 资金费率极端反转
     ashare/                  # A 股行情分析（东方财富 API）
     crypto-trading/          # 交易引擎工厂 + 钱包
       providers/
