@@ -61,6 +61,8 @@ export interface FreqtradeTrade {
   trading_mode?: 'spot' | 'margin' | 'futures';
   /** Accumulated funding fees (futures only) */
   funding_fees?: number;
+  /** Whether this trade has a pending (open) order on the exchange */
+  has_open_orders?: boolean;
   /** Distance to current stoploss */
   stoploss_current_dist?: number;
   stoploss_current_dist_ratio?: number;
