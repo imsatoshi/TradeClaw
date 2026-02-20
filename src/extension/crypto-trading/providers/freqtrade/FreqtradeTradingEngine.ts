@@ -22,6 +22,8 @@ import type {
   FreqtradeBalanceResponse,
   FreqtradeShowConfigResponse,
   FreqtradeWhitelistResponse,
+  FreqtradeBlacklistResponse,
+  FreqtradeLockResponse,
 } from './types.js';
 import { CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols } from '../../interfaces.js';
 
@@ -144,9 +146,17 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     // Calculate stake amount from size or usd_size
     let stakeAmount = order.usd_size;
     if (!stakeAmount && order.size) {
-      // For Freqtrade, we use stake amount instead of size
-      // Size will be calculated by Freqtrade based on price
-      stakeAmount = order.size * (order.price || 0);
+      if (order.price) {
+        stakeAmount = order.size * order.price;
+      } else {
+        // Market order: estimate stake using live price from open trades
+        const trades = await this.get<FreqtradeTrade[]>('/api/v1/status');
+        const trade = trades.find(t => normalizePair(t.pair) === order.symbol);
+        const currentPrice = trade?.current_rate || 0;
+        if (currentPrice > 0) {
+          stakeAmount = order.size * currentPrice;
+        }
+      }
     }
 
     if (!stakeAmount) {
@@ -218,9 +228,11 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     if (trade.has_open_orders) {
       try {
         await this.delete(`/api/v1/trades/${trade.trade_id}/open-order`);
+        // Wait for exchange to process the cancellation before placing new order
+        await new Promise(resolve => setTimeout(resolve, 500));
         console.log(`freqtrade: cancelled existing open order for trade ${trade.trade_id} (${order.symbol})`);
       } catch (err) {
-        console.warn(`freqtrade: failed to cancel existing order for trade ${trade.trade_id}:`, err);
+        return { success: false, error: `Failed to cancel existing order for trade ${trade.trade_id}: ${err}` };
       }
     }
 
@@ -289,6 +301,10 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         markPrice: currentPrice,
         unrealizedPnL: trade.profit_abs,
         positionValue: trade.amount * currentPrice,
+        enterTag: trade.enter_tag,
+        grindCount: (trade.filled_entry_orders || 1) - 1,  // first entry doesn't count as grind
+        partialExitCount: trade.filled_exit_orders || 0,
+        profitRatio: trade.profit_ratio,
       });
     }
 
@@ -397,6 +413,42 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     };
   }
 
+  /**
+   * Get open (pending) orders across all trades.
+   * Extracts unfilled orders from each trade's `orders` sub-array.
+   */
+  async getOpenOrders(symbol?: string): Promise<CryptoOrder[]> {
+    this.ensureInit();
+
+    const trades = await this.get<FreqtradeTrade[]>('/api/v1/status');
+    const openOrders: CryptoOrder[] = [];
+
+    for (const trade of trades) {
+      if (!trade.is_open || !trade.orders) continue;
+
+      const tradeSymbol = normalizePair(trade.pair);
+      if (symbol && tradeSymbol !== symbol) continue;
+
+      for (const order of trade.orders) {
+        if (order.status !== 'open') continue;
+
+        openOrders.push({
+          id: order.order_id,
+          symbol: tradeSymbol,
+          side: order.side,
+          type: order.order_type === 'limit' ? 'limit' : 'market',
+          size: order.amount,
+          price: order.price,
+          status: 'pending',
+          filledSize: order.filled,
+          createdAt: new Date(order.order_date),
+        });
+      }
+    }
+
+    return openOrders;
+  }
+
   // ==================== Additional Freqtrade-specific methods ====================
 
   /**
@@ -498,6 +550,70 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     }
   }
 
+  // ==================== Blacklist Management ====================
+
+  async getBlacklist(): Promise<string[]> {
+    const response = await this.get<FreqtradeBlacklistResponse>('/api/v1/blacklist');
+    return response.blacklist || [];
+  }
+
+  async addToBlacklist(pairs: string[]): Promise<{ blacklist: string[] }> {
+    const response = await this.post<FreqtradeBlacklistResponse>('/api/v1/blacklist', {
+      blacklist: pairs,
+    });
+    return { blacklist: response.blacklist };
+  }
+
+  async removeFromBlacklist(pairs: string[]): Promise<{ blacklist: string[] }> {
+    const response = await this.deleteWithBody<FreqtradeBlacklistResponse>('/api/v1/blacklist', {
+      blacklist_delete: pairs,
+    });
+    return { blacklist: response.blacklist };
+  }
+
+  // ==================== Pair Lock Management ====================
+
+  async getLocks(): Promise<FreqtradeLockResponse[]> {
+    const response = await this.get<{ locks: FreqtradeLockResponse[] }>('/api/v1/locks');
+    return response.locks || [];
+  }
+
+  async lockPair(pair: string, until: string, side: string, reason: string): Promise<FreqtradeLockResponse> {
+    return this.post<FreqtradeLockResponse>('/api/v1/locks', {
+      pair,
+      until,
+      side,
+      reason,
+    });
+  }
+
+  async deleteLock(lockId: number): Promise<void> {
+    await this.delete(`/api/v1/locks/${lockId}`);
+  }
+
+  // ==================== Strategy Stats ====================
+
+  async getEntryStats(pair?: string): Promise<any> {
+    const query = pair ? `?pair=${encodeURIComponent(pair)}` : '';
+    return this.get(`/api/v1/entries${query}`);
+  }
+
+  async getExitStats(pair?: string): Promise<any> {
+    const query = pair ? `?pair=${encodeURIComponent(pair)}` : '';
+    return this.get(`/api/v1/exits${query}`);
+  }
+
+  async getMixTagStats(pair?: string): Promise<any> {
+    const query = pair ? `?pair=${encodeURIComponent(pair)}` : '';
+    return this.get(`/api/v1/mix_tags${query}`);
+  }
+
+  // ==================== Config Reload ====================
+
+  async reloadConfig(): Promise<{ status: string }> {
+    return this.post<{ status: string }>('/api/v1/reload_config', {});
+  }
+
   // ==================== HTTP Helpers ====================
 
   private ensureInit(): void {
@@ -548,6 +664,30 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     try {
       const response = await fetch(url, {
         method: 'POST',
+        headers: {
+          'Authorization': this.authHeader,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Freqtrade API error ${response.status}: ${text}`);
+      }
+
+      return response.json() as Promise<T>;
+    } finally {
+      this.restoreProxy();
+    }
+  }
+
+  private async deleteWithBody<T>(path: string, body: unknown): Promise<T> {
+    const url = `${this.config.url}${path}`;
+    this.disableProxy();
+    try {
+      const response = await fetch(url, {
+        method: 'DELETE',
         headers: {
           'Authorization': this.authHeader,
           'Content-Type': 'application/json',

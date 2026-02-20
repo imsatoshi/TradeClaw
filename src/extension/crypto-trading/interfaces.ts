@@ -87,6 +87,11 @@ export interface CryptoPosition {
   markPrice: number;
   unrealizedPnL: number;
   positionValue: number;
+  // Strategy context (optional, provider-specific)
+  enterTag?: string;           // Strategy entry signal tag
+  grindCount?: number;         // DCA/grinding count
+  partialExitCount?: number;   // Partial take-profit count
+  profitRatio?: number;        // Current profit ratio (decimal, e.g. 0.035 = 3.5%)
 }
 
 // ==================== Account ====================
