@@ -51,14 +51,6 @@ function normalizePair(pair: string): string {
   return colonIdx > 0 ? pair.slice(0, colonIdx) : pair;
 }
 
-/**
- * Convert standard symbol to Freqtrade format.
- * In futures mode, Freqtrade may need "ZEC/USDT:USDT" but /api/v1/forceenter
- * accepts "ZEC/USDT" and resolves it automatically.
- */
-function toFreqtradeSymbol(symbol: string): string {
-  return symbol;
-}
 
 /**
  * Map Freqtrade order status to OpenAlice order status
@@ -85,6 +77,9 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
   // Cache for order symbol mapping (needed for cancelOrder)
   private orderSymbolCache = new Map<string, string>();
 
+  /** Trading mode, populated during init() from show_config */
+  private tradingMode: 'spot' | 'margin' | 'futures' = 'spot';
+
   /** Whitelist refresh: last sync time and in-flight guard */
   private whitelistLastSync = 0;
   private whitelistRefreshing = false;
@@ -102,6 +97,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     // Get bot config (requires auth — validates credentials)
     const showConfig = await this.fetchShowConfig();
     this.stakeCurrency = showConfig.stake_currency || 'USDT';
+    this.tradingMode = showConfig.trading_mode || 'spot';
 
     // Fetch whitelist from Freqtrade and sync with OpenAlice
     // Normalize futures format: "ZEC/USDT:USDT" → "ZEC/USDT"
@@ -141,7 +137,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       return this.placeExitOrder(order);
     }
 
-    const freqtradeSymbol = toFreqtradeSymbol(order.symbol);
+    const freqtradeSymbol = this.toFreqtradeSymbol(order.symbol);
 
     // Calculate stake amount from size or usd_size
     let stakeAmount = order.usd_size;
@@ -512,7 +508,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
 
     try {
       const result = await this.post<FreqtradeOrderResponse>('/api/v1/forceenter', {
-        pair: toFreqtradeSymbol(pair),
+        pair: this.toFreqtradeSymbol(pair),
         side,
       });
 
@@ -615,6 +611,20 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
 
   async reloadConfig(): Promise<{ status: string }> {
     return this.post<{ status: string }>('/api/v1/reload_config', {});
+  }
+
+  // ==================== Symbol Helpers ====================
+
+  /**
+   * Convert standard symbol to Freqtrade wire format.
+   * In futures mode: "ICP/USDT" → "ICP/USDT:USDT"
+   * In spot mode:    "ICP/USDT" → "ICP/USDT" (no-op)
+   * Already-qualified symbols pass through unchanged.
+   */
+  private toFreqtradeSymbol(symbol: string): string {
+    if (symbol.includes(':')) return symbol; // already qualified
+    if (this.tradingMode === 'futures') return `${symbol}:${this.stakeCurrency}`;
+    return symbol;
   }
 
   // ==================== HTTP Helpers ====================
