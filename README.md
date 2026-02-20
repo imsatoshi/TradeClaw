@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="alice-full.png" alt="Open Alice" width="128">
+  <img src="logo.png" alt="Open Alice" width="128">
 </p>
 
 # Open Alice
