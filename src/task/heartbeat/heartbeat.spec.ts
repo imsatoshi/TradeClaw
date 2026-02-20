@@ -16,6 +16,11 @@ import {
 import { SessionStore } from '../../core/session.js'
 import * as connectorRegistry from '../../core/connector-registry.js'
 
+// Mock writeConfigSection to avoid disk writes in tests
+vi.mock('../../core/config.js', () => ({
+  writeConfigSection: vi.fn(async () => ({})),
+}))
+
 function tempPath(ext: string): string {
   return join(tmpdir(), `heartbeat-test-${randomUUID()}.${ext}`)
 }
@@ -118,7 +123,7 @@ describe('heartbeat', () => {
       expect(jobs[0].schedule).toEqual({ kind: 'every', every: '1h' })
     })
 
-    it('should not register job when disabled', async () => {
+    it('should register disabled job when config.enabled is false', async () => {
       heartbeat = createHeartbeat({
         config: makeConfig({ enabled: false }),
         cronEngine, eventLog,
@@ -128,7 +133,10 @@ describe('heartbeat', () => {
 
       await heartbeat.start()
 
-      expect(cronEngine.list()).toHaveLength(0)
+      const jobs = cronEngine.list()
+      expect(jobs).toHaveLength(1)
+      expect(jobs[0].enabled).toBe(false)
+      expect(heartbeat.isEnabled()).toBe(false)
     })
   })
 
@@ -354,6 +362,87 @@ describe('heartbeat', () => {
       await new Promise((r) => setTimeout(r, 50))
 
       expect(mockEngine.askWithSession).not.toHaveBeenCalled()
+    })
+  })
+
+  // ==================== setEnabled / isEnabled ====================
+
+  describe('setEnabled', () => {
+    it('should enable a previously disabled heartbeat', async () => {
+      heartbeat = createHeartbeat({
+        config: makeConfig({ enabled: false }),
+        cronEngine, eventLog,
+        engine: mockEngine as any,
+        session,
+      })
+      await heartbeat.start()
+
+      expect(heartbeat.isEnabled()).toBe(false)
+      expect(cronEngine.list()[0].enabled).toBe(false)
+
+      await heartbeat.setEnabled(true)
+
+      expect(heartbeat.isEnabled()).toBe(true)
+      expect(cronEngine.list()[0].enabled).toBe(true)
+    })
+
+    it('should disable an enabled heartbeat', async () => {
+      heartbeat = createHeartbeat({
+        config: makeConfig({ enabled: true }),
+        cronEngine, eventLog,
+        engine: mockEngine as any,
+        session,
+      })
+      await heartbeat.start()
+
+      expect(heartbeat.isEnabled()).toBe(true)
+
+      await heartbeat.setEnabled(false)
+
+      expect(heartbeat.isEnabled()).toBe(false)
+      expect(cronEngine.list()[0].enabled).toBe(false)
+    })
+
+    it('should persist config via writeConfigSection', async () => {
+      const { writeConfigSection } = await import('../../core/config.js')
+
+      heartbeat = createHeartbeat({
+        config: makeConfig({ enabled: false }),
+        cronEngine, eventLog,
+        engine: mockEngine as any,
+        session,
+      })
+      await heartbeat.start()
+      await heartbeat.setEnabled(true)
+
+      expect(writeConfigSection).toHaveBeenCalledWith('heartbeat', expect.objectContaining({ enabled: true }))
+    })
+
+    it('should allow firing after setEnabled(true)', async () => {
+      const delivered: string[] = []
+      connectorRegistry.registerConnector({
+        channel: 'test', to: 'user1',
+        deliver: async (text) => { delivered.push(text) },
+      })
+      connectorRegistry.touchInteraction('test', 'user1')
+
+      heartbeat = createHeartbeat({
+        config: makeConfig({ enabled: false }),
+        cronEngine, eventLog,
+        engine: mockEngine as any,
+        session,
+      })
+      await heartbeat.start()
+
+      // Enable heartbeat
+      await heartbeat.setEnabled(true)
+
+      // Fire — should process since now enabled
+      await cronEngine.runNow(cronEngine.list()[0].id)
+
+      await vi.waitFor(() => {
+        expect(delivered).toHaveLength(1)
+      })
     })
   })
 })

@@ -19,6 +19,7 @@ import type { EventLog, EventLogEntry } from '../../core/event-log.js'
 import type { Engine } from '../../core/engine.js'
 import { SessionStore } from '../../core/session.js'
 import { resolveDeliveryTarget } from '../../core/connector-registry.js'
+import { writeConfigSection } from '../../core/config.js'
 import type { CronEngine, CronFirePayload } from '../cron/engine.js'
 
 // ==================== Constants ====================
@@ -70,6 +71,10 @@ export interface HeartbeatOpts {
 export interface Heartbeat {
   start(): Promise<void>
   stop(): void
+  /** Hot-toggle heartbeat on/off (persists to config + updates cron job). */
+  setEnabled(enabled: boolean): Promise<void>
+  /** Current enabled state. */
+  isEnabled(): boolean
 }
 
 // ==================== Factory ====================
@@ -82,6 +87,7 @@ export function createHeartbeat(opts: HeartbeatOpts): Heartbeat {
   let unsubscribe: (() => void) | null = null
   let jobId: string | null = null
   let processing = false
+  let enabled = config.enabled
 
   const dedup = new HeartbeatDedup()
 
@@ -157,40 +163,60 @@ export function createHeartbeat(opts: HeartbeatOpts): Heartbeat {
     }
   }
 
-  return {
-    async start() {
-      if (!config.enabled) return
+  /** Ensure the cron job and event listener exist (idempotent). */
+  async function ensureJobAndListener(): Promise<void> {
+    // Idempotent: find existing heartbeat job or create one
+    const existing = cronEngine.list().find((j) => j.name === HEARTBEAT_JOB_NAME)
+    if (existing) {
+      jobId = existing.id
+      await cronEngine.update(existing.id, {
+        schedule: { kind: 'every', every: config.every },
+        payload: config.prompt,
+        enabled,
+      })
+    } else {
+      jobId = await cronEngine.add({
+        name: HEARTBEAT_JOB_NAME,
+        schedule: { kind: 'every', every: config.every },
+        payload: config.prompt,
+        enabled,
+      })
+    }
 
-      // Idempotent: find existing heartbeat job or create one
-      const existing = cronEngine.list().find((j) => j.name === HEARTBEAT_JOB_NAME)
-      if (existing) {
-        jobId = existing.id
-        // Update schedule & payload in case config changed
-        await cronEngine.update(existing.id, {
-          schedule: { kind: 'every', every: config.every },
-          payload: config.prompt,
-          enabled: true,
-        })
-      } else {
-        jobId = await cronEngine.add({
-          name: HEARTBEAT_JOB_NAME,
-          schedule: { kind: 'every', every: config.every },
-          payload: config.prompt,
-        })
-      }
-
-      // Subscribe to cron.fire events (filtered in handler)
+    // Subscribe to cron.fire events if not already subscribed
+    if (!unsubscribe) {
       unsubscribe = eventLog.subscribeType('cron.fire', (entry) => {
         handleFire(entry).catch((err) => {
           console.error('heartbeat: unhandled error:', err)
         })
       })
+    }
+  }
+
+  return {
+    async start() {
+      // Always register job + listener (even if disabled) so setEnabled can toggle later
+      await ensureJobAndListener()
     },
 
     stop() {
       unsubscribe?.()
       unsubscribe = null
       // Don't delete the cron job — it persists for restart recovery
+    },
+
+    async setEnabled(newEnabled: boolean) {
+      enabled = newEnabled
+
+      // Ensure infrastructure exists (handles cold enable when start() was called with disabled)
+      await ensureJobAndListener()
+
+      // Persist to config file
+      await writeConfigSection('heartbeat', { ...config, enabled: newEnabled })
+    },
+
+    isEnabled() {
+      return enabled
     },
   }
 }

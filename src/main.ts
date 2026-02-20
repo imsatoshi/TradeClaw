@@ -292,7 +292,7 @@ async function main() {
     }))
   }
 
-  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine, eventLog }
+  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine, eventLog, heartbeat }
 
   for (const plugin of plugins) {
     await plugin.start(ctx)
