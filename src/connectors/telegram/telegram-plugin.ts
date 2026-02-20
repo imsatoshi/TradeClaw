@@ -89,6 +89,11 @@ export class TelegramPlugin implements Plugin {
       await this.sendSettingsMenu(ctx.chat.id)
     })
 
+    bot.command('heartbeat', async (ctx) => {
+      touchInteraction('telegram', String(ctx.chat.id))
+      await this.sendHeartbeatMenu(ctx.chat.id, engineCtx)
+    })
+
     bot.command('compact', async (ctx) => {
       touchInteraction('telegram', String(ctx.chat.id))
       const userId = ctx.from?.id
@@ -113,6 +118,21 @@ export class TelegramPlugin implements Plugin {
             .text(aiLabel, 'provider:vercel-ai-sdk')
           await ctx.editMessageText(
             `Current provider: ${PROVIDER_LABELS[provider]}\n\nChoose default AI provider:`,
+            { reply_markup: keyboard },
+          )
+        } else if (data.startsWith('heartbeat:')) {
+          const newEnabled = data === 'heartbeat:on'
+          await engineCtx.heartbeat.setEnabled(newEnabled)
+          await ctx.answerCallbackQuery({ text: `Heartbeat ${newEnabled ? 'ON' : 'OFF'}` })
+
+          // Edit message in-place
+          const onLabel = newEnabled ? '> ON' : 'ON'
+          const offLabel = !newEnabled ? '> OFF' : 'OFF'
+          const keyboard = new InlineKeyboard()
+            .text(onLabel, 'heartbeat:on')
+            .text(offLabel, 'heartbeat:off')
+          await ctx.editMessageText(
+            `Heartbeat: ${newEnabled ? 'ON' : 'OFF'}\n\nToggle heartbeat self-check:`,
             { reply_markup: keyboard },
           )
         } else {
@@ -144,6 +164,7 @@ export class TelegramPlugin implements Plugin {
     await bot.api.setMyCommands([
       { command: 'status', description: 'Show engine status' },
       { command: 'settings', description: 'Choose default AI provider' },
+      { command: 'heartbeat', description: 'Toggle heartbeat self-check' },
       { command: 'compact', description: 'Force compact session context' },
     ])
 
@@ -288,6 +309,22 @@ export class TelegramPlugin implements Plugin {
     await this.bot!.api.sendMessage(
       chatId,
       `Current provider: ${PROVIDER_LABELS[aiConfig.provider]}\n\nChoose default AI provider:`,
+      { reply_markup: keyboard },
+    )
+  }
+
+  private async sendHeartbeatMenu(chatId: number, engineCtx: EngineContext) {
+    const enabled = engineCtx.heartbeat.isEnabled()
+    const onLabel = enabled ? '> ON' : 'ON'
+    const offLabel = !enabled ? '> OFF' : 'OFF'
+
+    const keyboard = new InlineKeyboard()
+      .text(onLabel, 'heartbeat:on')
+      .text(offLabel, 'heartbeat:off')
+
+    await this.bot!.api.sendMessage(
+      chatId,
+      `Heartbeat: ${enabled ? 'ON' : 'OFF'}\n\nToggle heartbeat self-check:`,
       { reply_markup: keyboard },
     )
   }
