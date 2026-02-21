@@ -8,7 +8,7 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
 import { computeSignalStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
 import type { ICryptoTradingEngine, Operation, WalletExportState } from './extension/crypto-trading/index.js'
@@ -361,9 +361,16 @@ async function main() {
         ? (cryptoEngine as any).getHeartbeatData().catch(() => null)
         : Promise.resolve(null)
 
-      const [positions, account, scanResult, signalStats, ftData] = await Promise.all([
+      // Fetch 4H OHLCV once — shared by regime detection and strategy scan
+      const ohlcv4hPromise = fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], '4h', 60).catch((err: unknown) => {
+        console.warn('heartbeat: 4H OHLCV fetch failed (non-fatal):', err)
+        return {} as Record<string, import('./extension/analysis-kit/data/interfaces.js').MarketData[]>
+      })
+
+      const [positions, account, ohlcv4h, scanResult, signalStats, ftData] = await Promise.all([
         (tools.cryptoGetPositions as any).execute({}),
         (tools.cryptoGetAccount as any).execute({}),
+        ohlcv4hPromise,
         runStrategyScan([...CRYPTO_ALLOWED_SYMBOLS]).catch((err: unknown) => {
           console.warn('heartbeat: strategy scan failed (non-fatal):', err)
           return null
@@ -371,6 +378,10 @@ async function main() {
         computeSignalStats().catch(() => null),
         ftDataPromise,
       ])
+
+      // Run regime detection on the pre-fetched 4H data (synchronous, no network)
+      const whitelistSymbols = [...CRYPTO_ALLOWED_SYMBOLS]
+      const regimeResults = detectMarketRegime(whitelistSymbols, ohlcv4h)
 
       // Fetch funding rates for held positions
       const heldSymbols = Array.isArray(positions?.positions)
@@ -380,19 +391,49 @@ async function main() {
         ? await (tools.cryptoGetFundingRate as any).execute({ symbols: heldSymbols })
         : {}
 
-      // Build strategy signals block
+      // Build market regime block (replaces strategy signals)
+      let regimeBlock = ''
+      if (regimeResults.length > 0) {
+        const regimeLines = regimeResults.map((r) => {
+          const icon = r.regime === 'downtrend' ? '\u26A0\uFE0F' // ⚠️
+            : r.regime === 'uptrend' ? '\u2713' // ✓
+            : '\u2014' // —
+          const label = r.regime.toUpperCase()
+          const nfiNote = r.regime === 'downtrend' ? ' → NFI long DANGEROUS'
+            : r.regime === 'uptrend' ? ' → NFI long safe'
+            : ' → NFI long neutral'
+          return `${r.symbol}: ${icon} ${label} — ${r.reason}${nfiNote}`
+        })
+
+        const downCount = regimeResults.filter((r) => r.regime === 'downtrend').length
+        const upCount = regimeResults.filter((r) => r.regime === 'uptrend').length
+        const rangingCount = regimeResults.filter((r) => r.regime === 'ranging').length
+
+        regimeBlock = [
+          '',
+          '--- MARKET REGIME (4H EMA9/21/55 trend detection) ---',
+          `Summary: ${downCount} downtrend, ${upCount} uptrend, ${rangingCount} ranging out of ${regimeResults.length} pairs`,
+          '',
+          ...regimeLines,
+        ].join('\n')
+      }
+
+      // Build strategy signals block (supplementary trade opportunities)
       let strategyBlock = ''
       if (scanResult) {
         const actionable = scanResult.signals.filter((s: any) => s.confidence >= 70)
         const session = scanResult.sessionInfo
         const signalLines = actionable.map((s: any, i: number) => {
           const details = s.details ? Object.values(s.details).join(', ') : ''
-          return `${i + 1}. ${s.strategy} ${s.direction.toUpperCase()} ${s.symbol}: confidence ${s.confidence}%, entry $${s.entry?.toFixed(4) ?? 'N/A'}, SL $${s.stopLoss?.toFixed(4) ?? 'N/A'}, TP $${s.takeProfit?.toFixed(4) ?? 'N/A'} | ${details}`
+          // Tag signal with regime context
+          const regime = regimeResults.find((r) => r.symbol === s.symbol)
+          const regimeTag = regime ? ` [${regime.regime}]` : ''
+          return `${i + 1}. ${s.strategy} ${s.direction.toUpperCase()} ${s.symbol}${regimeTag}: confidence ${s.confidence}%, entry $${s.entry?.toFixed(4) ?? 'N/A'}, SL $${s.stopLoss?.toFixed(4) ?? 'N/A'}, TP $${s.takeProfit?.toFixed(4) ?? 'N/A'} | ${details}`
         })
 
         strategyBlock = [
           '',
-          '--- STRATEGY SIGNALS (auto-scanned) ---',
+          '--- STRATEGY SIGNALS (auto-scanned, supplementary trade ideas) ---',
           `Session: ${session.sessionName} — ${session.note}`,
           `Scanned ${scanResult.symbols.length} symbols, found ${actionable.length} actionable signals (confidence >= 70):`,
           '',
@@ -485,6 +526,7 @@ async function main() {
           ? JSON.stringify(funding, null, 2)
           : '(none)',
         freqtradeBlock,
+        regimeBlock,
         strategyBlock,
         statsBlock,
         '',

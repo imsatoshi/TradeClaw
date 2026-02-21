@@ -10,19 +10,29 @@
 - Check current prices for ZEC and INIT
 - Note any significant price movements (>3% in either direction since last check)
 
-## Strategy Scan
-- Strategy signals are AUTO-SCANNED and injected into the LIVE DATA section above every heartbeat
-- Do NOT call strategyScan again — the data is already fresh
-- Only act on signals with confidence >= 70 and strength "strong" or "moderate"
-- Use SIGNAL STATS to prioritize high win-rate strategies
-- If a strong signal is found during an optimal session, use proposeTradeWithButtons to propose the trade
+## Market Regime (4H Trend Context)
+- MARKET REGIME is AUTO-INJECTED in LIVE DATA above (4H EMA9/21/55 trend detection)
+- Each pair is classified as DOWNTREND / UPTREND / RANGING
+- Use regime as CONTEXT for evaluating strategy signals and NFI positions
 
-## Session Awareness (UTC)
-- 00:00-08:00 Asian: funding fade signals most relevant
-- 08:00-12:00 London: good for breakout and trend signals
-- 12:00-16:00 NY overlap: best liquidity, all strategies valid
-- 16:00-21:00 NY: RSI divergence primary, trend continuation
-- 21:00-00:00 Late: only strong signals (confidence >= 80)
+## Strategy Signals (Supplementary Trade Ideas)
+- Strategy signals are AUTO-SCANNED and injected into LIVE DATA above every heartbeat
+- Each signal is tagged with its regime context (e.g. [uptrend], [downtrend])
+- Do NOT call strategyScan again — the data is already fresh
+- Prefer signals that ALIGN with the regime:
+  → LONG signals in UPTREND pairs = high conviction
+  → SHORT signals in DOWNTREND pairs = high conviction
+  → Signals AGAINST the regime = lower conviction, require higher confidence (>= 80)
+- Use SIGNAL STATS to prioritize high win-rate strategies
+- If a strong aligned signal is found, use proposeTradeWithButtons to propose the trade
+
+## NFI Grinding Monitor
+- NFI X7 uses grinding (DCA up to 20 layers) — this is its core profit mechanism, usually works fine
+- Only alert when grinding gets extreme in a hostile regime:
+  → grindCount >= 8 in DOWNTREND (long) or UPTREND (short): alert user, recommend review
+  → grindCount >= 5 AND unrealizedPnL worsening over multiple heartbeats: flag to user
+- Do NOT preemptively lock pairs just because of regime — NFI's grinding handles most situations
+- Do NOT panic over grindCount 1-4, that's normal NFI operation
 
 ## Funding Rate Check
 - For held positions: check if funding rate is working against us
