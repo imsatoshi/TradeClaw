@@ -645,14 +645,76 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     exitStats: any;
     botConfig: FreqtradeShowConfigResponse;
     pendingOrders: CryptoOrder[];
+    health: { status: 'ok' | 'degraded' | 'down'; ping: boolean; lastProcessed: string | null; details: string };
   }> {
-    const [entryStats, exitStats, botConfig, pendingOrders] = await Promise.all([
+    // Health check: ping + /api/v1/health (last_process_ts)
+    const healthPromise = this.checkHealth();
+
+    const [entryStats, exitStats, botConfig, pendingOrders, health] = await Promise.all([
       this.getEntryStats().catch(() => null),
       this.getExitStats().catch(() => null),
       this.fetchShowConfig().catch(() => null),
       this.getOpenOrders().catch(() => []),
+      healthPromise,
     ]);
-    return { entryStats, exitStats, botConfig: botConfig!, pendingOrders };
+    return { entryStats, exitStats, botConfig: botConfig!, pendingOrders, health };
+  }
+
+  /**
+   * Check Freqtrade health: ping + last process timestamp.
+   * Returns a structured health status for heartbeat display.
+   */
+  private async checkHealth(): Promise<{
+    status: 'ok' | 'degraded' | 'down';
+    ping: boolean;
+    lastProcessed: string | null;
+    details: string;
+  }> {
+    // Ping check (no auth required)
+    let ping = false;
+    try {
+      await this.get<{ status: string }>('/api/v1/ping');
+      ping = true;
+    } catch {
+      return { status: 'down', ping: false, lastProcessed: null, details: 'Freqtrade API unreachable' };
+    }
+
+    // Health endpoint — returns last_process / last_process_ts
+    try {
+      const healthData = await this.get<{
+        last_process?: string;
+        last_process_loc?: string;
+        last_process_ts?: number;
+      }>('/api/v1/health');
+
+      const lastProcessed = healthData.last_process_loc || healthData.last_process || null;
+      const lastTs = healthData.last_process_ts;
+
+      // If last process was more than 5 minutes ago, consider degraded
+      if (lastTs) {
+        const ageMs = Date.now() - lastTs * 1000;
+        const ageMin = Math.round(ageMs / 60000);
+        if (ageMs > 5 * 60 * 1000) {
+          return {
+            status: 'degraded',
+            ping: true,
+            lastProcessed,
+            details: `Last candle processed ${ageMin}m ago (stale > 5m, possible network issue)`,
+          };
+        }
+        return {
+          status: 'ok',
+          ping: true,
+          lastProcessed,
+          details: `Last processed ${ageMin}m ago`,
+        };
+      }
+
+      return { status: 'ok', ping: true, lastProcessed, details: 'Healthy' };
+    } catch {
+      // Ping works but health endpoint failed — partial
+      return { status: 'degraded', ping: true, lastProcessed: null, details: 'Ping OK but /health endpoint failed' };
+    }
   }
 
   // ==================== Strategy Stats ====================
