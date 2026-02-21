@@ -311,7 +311,7 @@ export function toModelMessages(entries: SessionEntry[], opts?: ToModelMessagesO
           // Model won't see old numbers → forced to call tools for fresh data.
           continue
         }
-        messages.push({ role: 'assistant', content: message.content })
+        if (message.content) messages.push({ role: 'assistant', content: message.content })
       } else {
         if (isExpired) {
           // Drop expired structured responses (tool_use blocks) entirely
@@ -322,7 +322,7 @@ export function toModelMessages(entries: SessionEntry[], opts?: ToModelMessagesO
 
         for (const block of message.content) {
           if (block.type === 'text') {
-            parts.push({ type: 'text', text: block.text })
+            if (block.text) parts.push({ type: 'text', text: block.text })
           } else if (block.type === 'tool_use') {
             parts.push({
               type: 'tool-call',

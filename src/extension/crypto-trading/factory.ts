@@ -5,12 +5,14 @@
  */
 
 import type { ICryptoTradingEngine } from './interfaces.js';
+import { CRYPTO_ALLOWED_SYMBOLS } from './interfaces.js';
 import type { Config } from '../../core/config.js';
 import { CcxtTradingEngine } from './providers/ccxt/index.js';
 import { FreqtradeTradingEngine } from './providers/freqtrade/index.js';
 
 export interface CryptoTradingEngineResult {
   engine: ICryptoTradingEngine;
+  directExchangeEngine?: ICryptoTradingEngine; // CCXT direct — for stoploss/conditional orders
   close: () => Promise<void>;
 }
 
@@ -73,9 +75,36 @@ export async function createCryptoTradingEngine(
 
       console.log(`crypto trading engine: connected to freqtrade at ${providerConfig.url}`);
 
+      // Try to create direct exchange engine for stoploss/conditional orders
+      let directEngine: ICryptoTradingEngine | undefined;
+      const apiKey = process.env.EXCHANGE_API_KEY;
+      const apiSecret = process.env.EXCHANGE_API_SECRET;
+      if (apiKey && apiSecret) {
+        try {
+          // Use Freqtrade-synced whitelist (already populated by engine.init() above)
+          const ccxt = new CcxtTradingEngine({
+            exchange: 'binance',
+            apiKey,
+            apiSecret,
+            sandbox: false,
+            defaultMarketType: 'swap',
+            allowedSymbols: [...CRYPTO_ALLOWED_SYMBOLS],
+          });
+          await ccxt.init();
+          directEngine = ccxt;
+          console.log('crypto trading engine: binance direct engine ready (for stoploss/conditional orders)');
+        } catch (err) {
+          console.warn('crypto trading engine: failed to init direct exchange engine, stoploss orders will fall back to freqtrade:', err);
+        }
+      }
+
       return {
         engine,
-        close: () => engine.close(),
+        directExchangeEngine: directEngine,
+        close: async () => {
+          await engine.close();
+          if (directEngine) await (directEngine as CcxtTradingEngine).close();
+        },
       };
     }
 

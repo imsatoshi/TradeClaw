@@ -25,7 +25,7 @@ import type {
   FreqtradeBlacklistResponse,
   FreqtradeLockResponse,
 } from './types.js';
-import { CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols } from '../../interfaces.js';
+import { CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols, initCryptoDefaultLeverage, initCryptoMaxOpenTrades } from '../../interfaces.js';
 
 export interface FreqtradeEngineConfig {
   /** Freqtrade API URL (e.g., http://localhost:8080) */
@@ -104,6 +104,12 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     this.stakeCurrency = showConfig.stake_currency || 'USDT';
     this.tradingMode = showConfig.trading_mode || 'spot';
 
+    // Sync max open trades from Freqtrade config
+    if (showConfig.max_open_trades != null && showConfig.max_open_trades > 0) {
+      initCryptoMaxOpenTrades(showConfig.max_open_trades);
+      console.log(`freqtrade: max_open_trades=${showConfig.max_open_trades} (from config)`);
+    }
+
     // Fetch whitelist from Freqtrade and sync with OpenAlice
     // Normalize futures format: "ZEC/USDT:USDT" → "ZEC/USDT", then filter garbled entries
     const rawWhitelist = await this.fetchWhitelist();
@@ -113,6 +119,16 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       console.log(`freqtrade: synced ${whitelist.length} pairs from whitelist: ${whitelist.join(', ')}`);
     }
     this.whitelistLastSync = Date.now();
+
+    // Read default leverage from most recent trades
+    try {
+      const trades = await this.get<FreqtradeTrade[]>('/api/v1/status');
+      const leverageFromTrade = trades.find(t => t.leverage && t.leverage > 1)?.leverage;
+      if (leverageFromTrade) {
+        initCryptoDefaultLeverage(leverageFromTrade);
+        console.log(`freqtrade: default leverage=${leverageFromTrade}x (from open trades)`);
+      }
+    } catch { /* non-critical, keep default */ }
 
     this.initialized = true;
     console.log(`freqtrade trading engine: connected to ${this.config.url}`);
@@ -184,10 +200,14 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       return { success: false, error: 'price is required for limit orders' };
     }
 
+    // Map internal order types to Freqtrade types ('stoploss' → 'stop_loss')
+    const ftOrderType: FreqtradeOrderRequest['ordertype'] =
+      order.type === 'stoploss' ? 'stop_loss' : order.type;
+
     const payload: FreqtradeOrderRequest = {
       pair: freqtradeSymbol,
       side: ftSide,
-      ordertype: order.type,
+      ordertype: ftOrderType,
       stakeamount: stakeAmount,
     };
 
@@ -250,6 +270,12 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       }
     }
 
+    // Freqtrade forceexit only supports 'market' and 'limit' ordertype.
+    // Stoploss must go through the direct exchange engine (CCXT) — reject here.
+    if (order.type === 'stoploss') {
+      return { success: false, error: 'Freqtrade does not support stoploss orders. Configure EXCHANGE_API_KEY/EXCHANGE_API_SECRET for direct exchange connection.' };
+    }
+
     const payload: Record<string, unknown> = {
       tradeid: trade.trade_id,
       ordertype: order.type,
@@ -260,7 +286,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       payload.amount = order.size;
     }
 
-    // Limit price (take-profit / stop-loss)
+    // Limit price (take-profit)
     if (order.type === 'limit' && order.price) {
       payload.price = order.price;
     }

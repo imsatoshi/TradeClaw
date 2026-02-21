@@ -4,7 +4,7 @@ import type { Sandbox } from '../sandbox/Sandbox';
 import { calculate } from '../tools/calculate.tool';
 import { calculateIndicator } from '../tools/calculate-indicator.tool';
 import { globNews, grepNews, readNews } from '../tools/news.tool';
-import { CRYPTO_ALLOWED_SYMBOLS } from '../../crypto-trading/interfaces.js';
+import { CRYPTO_ALLOWED_SYMBOLS, CRYPTO_DEFAULT_LEVERAGE } from '../../crypto-trading/interfaces.js';
 import { runStrategyScan } from '../tools/strategy-scanner/index.js';
 import { fetchFundingRates } from '../data/FundingRateClient.js';
 import { readSignalLog, computeSignalStats, syncOutcomesFromTrades } from '../tools/strategy-scanner/signal-log.js';
@@ -666,7 +666,9 @@ Given your account equity, risk tolerance, and stop-loss distance, computes:
 - stakeAmount: margin required (positionValue / leverage)
 - size: coin quantity (positionValue / entryPrice)
 
-Example: $500 equity, 2% risk, entry $8.50, stop $8.00, leverage 3x
+Leverage is auto-detected from Freqtrade open trades. No leverage parameter needed.
+
+Example: $500 equity, 2% risk, entry $8.50, stop $8.00
 → riskAmount=$10, positionValue=$170, stakeAmount=$56.7, size=20 coins
       `.trim(),
       inputSchema: z.object({
@@ -674,9 +676,9 @@ Example: $500 equity, 2% risk, entry $8.50, stop $8.00, leverage 3x
         riskPercent: z.number().positive().max(10).describe('Max risk per trade as % of equity (e.g. 2 for 2%)'),
         entryPrice: z.number().positive().describe('Planned entry price'),
         stopLossPrice: z.number().positive().describe('Stop-loss price'),
-        leverage: z.number().positive().optional().describe('Leverage multiplier (default 1 for spot, use Freqtrade strategy leverage for futures)'),
       }),
-      execute: ({ accountEquity, riskPercent, entryPrice, stopLossPrice, leverage = 1 }) => {
+      execute: ({ accountEquity, riskPercent, entryPrice, stopLossPrice }) => {
+        const leverage = CRYPTO_DEFAULT_LEVERAGE; // auto-detected from Freqtrade trades at startup
         const riskAmount = accountEquity * (riskPercent / 100);
         const priceRiskPercent = Math.abs(entryPrice - stopLossPrice) / entryPrice;
 
