@@ -171,6 +171,29 @@ export function emaSeries(data: number[], period: number): number[] {
 }
 
 /**
+ * Average True Range series.
+ * Returns array of ATR values computed as EMA of True Range.
+ * Length = emaSeries(TR, period).length where TR has length (highs.length - 1).
+ */
+export function atrSeries(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period: number,
+): number[] {
+  if (highs.length < 2) return []
+  const tr: number[] = []
+  for (let i = 1; i < highs.length; i++) {
+    tr.push(Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1]),
+    ))
+  }
+  return emaSeries(tr, period)
+}
+
+/**
  * Simple Moving Average over the last `period` values of an array.
  * Utility for inline use (avoids importing from statistics.ts).
  */

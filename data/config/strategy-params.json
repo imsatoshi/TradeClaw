@@ -35,8 +35,8 @@
     "fundingVeryLow": -0.001,
     "overboughtThreshold": 70,
     "oversoldThreshold": 30,
-    "slMultiplier": 2,
-    "tpMultiplier": 3,
+    "slMultiplier": 2.0,
+    "tpMultiplier": 3.0,
     "strongConfidence": 75,
     "moderateConfidence": 60
   },
