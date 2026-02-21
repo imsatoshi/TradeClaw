@@ -15,6 +15,7 @@ import { scanRsiDivergence } from './strategies/rsi-divergence.js'
 import { scanBollingerSqueeze } from './strategies/bollinger-squeeze.js'
 import { scanFundingFade } from './strategies/funding-fade.js'
 import { appendSignalLog } from './signal-log.js'
+import { getStrategyParams } from './config.js'
 import { createLogger } from '../../../../core/logger.js'
 
 const log = createLogger('scanner')
@@ -32,7 +33,7 @@ interface CacheEntry {
 }
 
 const ohlcvCache = new Map<string, CacheEntry>()
-const CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes
+let CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes (overridden by config)
 
 function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
   return `${[...symbols].sort().join(',')}|${timeframe}|${limit}`
@@ -79,12 +80,20 @@ function get1HTrend(bars1h: MarketData[]): Trend1H {
 
 /**
  * Apply 1H trend to 4H signals:
- * - Aligned:    confidence +5 (max 100), details note added
- * - Conflicting: confidence -15, may downgrade strength to 'weak'
+ * - Aligned:    confidence +boost (max 100), details note added
+ * - Conflicting: confidence +penalty, may downgrade strength to 'weak'
  * - Neutral:    no change
  */
-function applyMtfFilter(signals: StrategySignal[], trend1H: Trend1H): StrategySignal[] {
+function applyMtfFilter(
+  signals: StrategySignal[],
+  trend1H: Trend1H,
+  scannerParams: Record<string, number>,
+): StrategySignal[] {
   if (trend1H === 'neutral') return signals
+
+  const boost = scannerParams.mtfAlignedBoost ?? 5
+  const penalty = scannerParams.mtfConflictPenalty ?? -15
+  const weakThreshold = scannerParams.weakThreshold ?? 55
 
   return signals.map((signal) => {
     const aligned =
@@ -94,16 +103,16 @@ function applyMtfFilter(signals: StrategySignal[], trend1H: Trend1H): StrategySi
     if (aligned) {
       return {
         ...signal,
-        confidence: Math.min(100, signal.confidence + 5),
-        details: { ...signal.details, mtf_1h: `aligned (${trend1H}) +5` },
+        confidence: Math.min(100, signal.confidence + boost),
+        details: { ...signal.details, mtf_1h: `aligned (${trend1H}) +${boost}` },
       }
     } else {
-      const newConf = Math.max(0, signal.confidence - 15)
+      const newConf = Math.max(0, signal.confidence + penalty)
       return {
         ...signal,
         confidence: newConf,
-        strength: newConf < 55 ? 'weak' : signal.strength,
-        details: { ...signal.details, mtf_1h: `conflicts (${trend1H}) -15` },
+        strength: newConf < weakThreshold ? 'weak' : signal.strength,
+        details: { ...signal.details, mtf_1h: `conflicts (${trend1H}) ${penalty}` },
       }
     }
   })
@@ -152,6 +161,14 @@ export async function runStrategyScan(
   const errors: string[] = []
   const allSignals: StrategySignal[] = []
 
+  // Load scanner config (cached, re-reads from disk at most once per minute)
+  const config = await getStrategyParams()
+  const scannerParams = config.scanner ?? {}
+
+  // Apply configurable cache TTL
+  const cacheTtlMinutes = scannerParams.cacheTtlMinutes ?? 25
+  CACHE_TTL_MS = cacheTtlMinutes * 60 * 1000
+
   log.info('scan started', { symbols: symbols.length })
 
   // Fetch 4H, 1H, and funding rates concurrently (4H and 1H both use cache)
@@ -180,13 +197,13 @@ export async function runStrategyScan(
     const symbolSignals: StrategySignal[] = []
 
     try {
-      symbolSignals.push(...scanRsiDivergence(symbol, bars4h))
+      symbolSignals.push(...await scanRsiDivergence(symbol, bars4h))
     } catch (err) {
       errors.push(`${symbol} RSI divergence error: ${String(err)}`)
     }
 
     try {
-      symbolSignals.push(...scanBollingerSqueeze(symbol, bars4h))
+      symbolSignals.push(...await scanBollingerSqueeze(symbol, bars4h))
     } catch (err) {
       errors.push(`${symbol} Bollinger squeeze error: ${String(err)}`)
     }
@@ -194,7 +211,7 @@ export async function runStrategyScan(
     const funding = rates[symbol]
     if (funding) {
       try {
-        symbolSignals.push(...scanFundingFade(symbol, bars4h, funding))
+        symbolSignals.push(...await scanFundingFade(symbol, bars4h, funding))
       } catch (err) {
         errors.push(`${symbol} funding fade error: ${String(err)}`)
       }
@@ -205,7 +222,7 @@ export async function runStrategyScan(
       const bars1h = ohlcv1h[symbol]
       if (bars1h && bars1h.length >= 20) {
         const trend1H = get1HTrend(bars1h)
-        allSignals.push(...applyMtfFilter(symbolSignals, trend1H))
+        allSignals.push(...applyMtfFilter(symbolSignals, trend1H, scannerParams))
       } else {
         allSignals.push(...symbolSignals)
       }

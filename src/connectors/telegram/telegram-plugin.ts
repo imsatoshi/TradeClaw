@@ -12,6 +12,7 @@ import { readAIConfig, writeAIConfig, type AIProvider } from '../../core/ai-conf
 import { registerConnector, touchInteraction } from '../../core/connector-registry.js'
 import { initTelegramBotApi } from './telegram-api.js'
 import { takePendingProposal } from '../../core/pending-actions.js'
+import { formatForTelegram } from './format.js'
 
 const MAX_MESSAGE_LENGTH = 4096
 
@@ -86,9 +87,10 @@ export class TelegramPlugin implements Plugin {
         channel: 'telegram',
         to: String(deliveryChatId),
         deliver: async (text: string) => {
-          const chunks = splitMessage(text, MAX_MESSAGE_LENGTH)
+          const formatted = formatForTelegram(text)
+          const chunks = splitMessage(formatted, MAX_MESSAGE_LENGTH)
           for (const chunk of chunks) {
-            await client.sendMessage({ chatId: deliveryChatId, text: chunk })
+            await client.sendMessage({ chatId: deliveryChatId, text: chunk, parseMode: 'HTML' })
           }
         },
       })
@@ -405,9 +407,10 @@ export class TelegramPlugin implements Plugin {
 
     // Then send text
     if (text) {
-      const chunks = splitMessage(text, MAX_MESSAGE_LENGTH)
+      const formatted = formatForTelegram(text)
+      const chunks = splitMessage(formatted, MAX_MESSAGE_LENGTH)
       for (const chunk of chunks) {
-        await client.sendMessage({ chatId, text: chunk })
+        await client.sendMessage({ chatId, text: chunk, parseMode: 'HTML' })
       }
     }
   }

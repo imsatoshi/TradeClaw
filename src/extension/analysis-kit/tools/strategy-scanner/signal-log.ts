@@ -113,6 +113,51 @@ export async function markSignalOutcome(
   }
 }
 
+// ==================== Outcome Sync ====================
+
+export interface ClosedTradeInput {
+  symbol: string          // "ICP/USDT"
+  direction: 'long' | 'short'
+  openDate: string        // ISO
+  closeDate: string       // ISO
+  closeRate: number
+  profitRatio: number     // positive = profit, negative = loss
+}
+
+/** Normalize symbol for comparison: strip ":USDT", convert to uppercase, remove spaces. */
+function normalizeSymbol(s: string): string {
+  return s.replace(/:USDT$/i, '').replace(/\s/g, '').toUpperCase()
+}
+
+/**
+ * Match closed Freqtrade trades against unresolved signal log entries.
+ * Matching criteria: same symbol + same direction + signal within 4h of trade open time.
+ */
+export async function syncOutcomesFromTrades(
+  closedTrades: ClosedTradeInput[],
+): Promise<{ matched: number; alreadyResolved: number }> {
+  const entries = await loadLog()
+  let matched = 0
+  let alreadyResolved = 0
+
+  for (const entry of entries) {
+    if (entry.outcome) { alreadyResolved++; continue }
+
+    const trade = closedTrades.find(t =>
+      normalizeSymbol(t.symbol) === normalizeSymbol(entry.signal.symbol) &&
+      t.direction === entry.signal.direction &&
+      Math.abs(new Date(entry.timestamp).getTime() - new Date(t.openDate).getTime()) < 4 * 3600_000
+    )
+    if (!trade) continue
+
+    const outcome = trade.profitRatio >= 0 ? 'win' : 'loss'
+    await markSignalOutcome(entry.id, outcome, trade.closeRate)
+    matched++
+  }
+
+  return { matched, alreadyResolved }
+}
+
 /**
  * Compute win-rate statistics per strategy from the log.
  */

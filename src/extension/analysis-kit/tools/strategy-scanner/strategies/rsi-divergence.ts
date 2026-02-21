@@ -10,12 +10,23 @@ import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
 import { ATR } from '../../indicators/functions/technical.js'
 import { rsiSeries, findSwingLows, findSwingHighs } from '../helpers.js'
+import { getStrategyParams } from '../config.js'
 
-const RSI_PERIOD = 14
-const ATR_PERIOD = 14
-const SWING_WINDOW = 2
+export async function scanRsiDivergence(symbol: string, bars: MarketData[]): Promise<StrategySignal[]> {
+  const config = await getStrategyParams()
+  const p = config.rsi_divergence ?? {}
 
-export function scanRsiDivergence(symbol: string, bars: MarketData[]): StrategySignal[] {
+  const RSI_PERIOD = p.rsiPeriod ?? 14
+  const ATR_PERIOD = p.atrPeriod ?? 14
+  const SWING_WINDOW = p.swingWindow ?? 2
+  const OVERSOLD = p.oversoldThreshold ?? 35
+  const OVERBOUGHT = p.overboughtThreshold ?? 65
+  const VOL_EXHAUSTION_RATIO = p.volumeExhaustionRatio ?? 0.5
+  const SL_MULT = p.slMultiplier ?? 1.5
+  const TP_MULT = p.tpMultiplier ?? 2.5
+  const STRONG_CONF = p.strongConfidence ?? 78
+  const MOD_CONF = p.moderateConfidence ?? 62
+
   if (bars.length < RSI_PERIOD + SWING_WINDOW * 2 + 10) return []
 
   const closes = bars.map(b => b.close)
@@ -53,16 +64,16 @@ export function scanRsiDivergence(symbol: string, bars: MarketData[]): StrategyS
     // Price lower low + RSI higher low = bullish divergence
     const priceLowerLow = latest.price <= prev.price
     const rsiHigherLow = latest.rsi > prev.rsi
-    const oversold = latest.rsi < 35
-    const volumeExhaustion = latest.volume < prev.volume * 0.5
+    const oversold = latest.rsi < OVERSOLD
+    const volumeExhaustion = latest.volume < prev.volume * VOL_EXHAUSTION_RATIO
 
     if (priceLowerLow && rsiHigherLow && oversold) {
-      const sl = currentClose - 1.5 * atr
-      const tp = currentClose + 2.5 * atr
+      const sl = currentClose - SL_MULT * atr
+      const tp = currentClose + TP_MULT * atr
       const rr = (tp - currentClose) / (currentClose - sl)
 
       const strength = volumeExhaustion ? 'strong' : 'moderate'
-      const confidence = volumeExhaustion ? 78 : 62
+      const confidence = volumeExhaustion ? STRONG_CONF : MOD_CONF
 
       signals.push({
         strategy: 'rsi_divergence',
@@ -97,16 +108,16 @@ export function scanRsiDivergence(symbol: string, bars: MarketData[]): StrategyS
     // Price higher high + RSI lower high = bearish divergence
     const priceHigherHigh = latest.price >= prev.price
     const rsiLowerHigh = latest.rsi < prev.rsi
-    const overbought = latest.rsi > 65
-    const volumeExhaustion = latest.volume < prev.volume * 0.5
+    const overbought = latest.rsi > OVERBOUGHT
+    const volumeExhaustion = latest.volume < prev.volume * VOL_EXHAUSTION_RATIO
 
     if (priceHigherHigh && rsiLowerHigh && overbought) {
-      const sl = currentClose + 1.5 * atr
-      const tp = currentClose - 2.5 * atr
+      const sl = currentClose + SL_MULT * atr
+      const tp = currentClose - TP_MULT * atr
       const rr = (currentClose - tp) / (sl - currentClose)
 
       const strength = volumeExhaustion ? 'strong' : 'moderate'
-      const confidence = volumeExhaustion ? 78 : 62
+      const confidence = volumeExhaustion ? STRONG_CONF : MOD_CONF
 
       signals.push({
         strategy: 'rsi_divergence',

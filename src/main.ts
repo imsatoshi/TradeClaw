@@ -540,6 +540,20 @@ async function main() {
   // Start cron engine (loads jobs from disk, arms timers)
   if (cronEngine) {
     await cronEngine.start()
+
+    // Auto-create daily-pnl cron job if it doesn't exist
+    const existingJobs = await cronEngine.list()
+    const hasDailyPnl = existingJobs.some(j => j.name === 'daily-pnl')
+    if (!hasDailyPnl) {
+      await cronEngine.add({
+        name: 'daily-pnl',
+        schedule: { kind: 'cron', cron: '0 0 * * *' },  // UTC 00:00 daily
+        payload: 'Run the daily P&L report now. Call cryptoGetAccount, cryptoGetPositions, and getSignalHistory(statsOnly=true). Also call cryptoGetOrders to get closed trades and run syncSignalOutcomes. Summarize all data and send to user.',
+        sessionTarget: 'main',
+        enabled: true,
+      })
+      console.log('scheduler: auto-created daily-pnl cron job (UTC 00:00)')
+    }
   }
 
   // Recover any pending deliveries from previous runs (fire-and-forget)
