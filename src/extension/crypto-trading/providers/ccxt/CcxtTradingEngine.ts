@@ -114,12 +114,21 @@ export class CcxtTradingEngine implements ICryptoTradingEngine {
       const params: Record<string, unknown> = {};
       if (order.reduceOnly) params.reduceOnly = true;
 
+      // Map stoploss → CCXT stopLimit order with stopPrice
+      let ccxtOrderType: string = order.type;
+      let ccxtPrice: number | undefined = order.type === 'limit' ? order.price : undefined;
+      if (order.type === 'stoploss' && order.price) {
+        ccxtOrderType = 'STOP_MARKET';
+        ccxtPrice = undefined;
+        params.stopPrice = order.price;
+      }
+
       const ccxtOrder = await this.exchange.createOrder(
         ccxtSymbol,
-        order.type,
+        ccxtOrderType,
         order.side,
         size,
-        order.type === 'limit' ? order.price : undefined,
+        ccxtPrice,
         params,
       );
 

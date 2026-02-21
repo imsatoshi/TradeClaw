@@ -12,7 +12,10 @@ export type {
   CryptoAllowedSymbol,
   SymbolPrecision,
 } from './interfaces';
-export { CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols } from './interfaces';
+export {
+  CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols,
+  CRYPTO_MAX_OPEN_TRADES, MAX_STAKE_PERCENT_OF_EQUITY, MIN_AVAILABLE_BALANCE_RATIO,
+} from './interfaces';
 
 // Wallet domain
 export { Wallet } from './wallet/Wallet';

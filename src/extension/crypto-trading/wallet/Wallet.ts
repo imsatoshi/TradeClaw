@@ -682,7 +682,7 @@ export class Wallet implements IWallet {
         ? 'pending'
         : 'filled';
 
-    return {
+    const result: OperationResult = {
       action: op.action,
       success: true,
       orderId,
@@ -691,5 +691,22 @@ export class Wallet implements IWallet {
       filledSize,
       raw,
     };
+
+    // Slippage tracking: compare filled price vs expected (limit) price
+    if (op.action === 'placeOrder' && status === 'filled' && filledPrice) {
+      const expectedPrice = op.params.price as number | undefined;
+      if (expectedPrice && expectedPrice > 0) {
+        const side = op.params.side as string;
+        // Buy: filled > expected = unfavorable (positive). Sell: filled < expected = unfavorable (positive).
+        const rawSlippage = ((filledPrice - expectedPrice) / expectedPrice) * 100;
+        result.slippage = side === 'buy' ? rawSlippage : -rawSlippage;
+
+        if (Math.abs(result.slippage) > 0.1) {
+          console.log(`slippage: ${op.params.symbol} ${side} ${result.slippage > 0 ? '+' : ''}${result.slippage.toFixed(3)}% (expected $${expectedPrice}, filled $${filledPrice})`);
+        }
+      }
+    }
+
+    return result;
   }
 }

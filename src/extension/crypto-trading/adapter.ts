@@ -21,6 +21,7 @@ export function createCryptoTradingTools(
   tradingEngine: ICryptoTradingEngine,
   wallet: IWallet,
   getWalletState?: () => Promise<WalletState>,
+  directExchangeEngine?: ICryptoTradingEngine,
 ) {
   return {
     // ==================== Wallet operations ====================
@@ -92,6 +93,11 @@ BEFORE placing orders, you SHOULD:
 2. Check cryptoGetPositions to see current holdings
 3. Verify this trade aligns with your stated strategy
 
+ORDER TYPE RULES:
+- ALWAYS use limit orders for opening positions (type='limit' + price=current price). This avoids slippage.
+- Only use market orders when the user explicitly says "市价买" / "market order" / "立即成交".
+- For limit orders, set price to the current market price (from latest OHLCV or ticker).
+
 Supports two modes:
 - size-based: Specify coin amount (e.g. 0.5 BTC)
 - usd_size-based: Specify USD value (e.g. 1000 USDT)
@@ -135,7 +141,7 @@ NOTE: This stages the operation. Call cryptoWalletCommit + cryptoWalletPush to e
           .min(1)
           .max(20)
           .optional()
-          .describe('Leverage (1-20, default 1)'),
+          .describe('Leverage (1-20). DO NOT set this — leverage is managed by Freqtrade strategy (currently 3x). Only use for CCXT direct engine.'),
         reduceOnly: z
           .boolean()
           .optional()
@@ -338,14 +344,31 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
         symbol: z.string().optional().describe('Trading pair symbol to filter (e.g. "BTC/USDT"), or omit for all open orders'),
       }),
       execute: async ({ symbol }) => {
-        if (!('getOpenOrders' in tradingEngine)) {
-          return { orders: [], message: 'Open orders query not supported by this trading engine.' };
+        const allOrders: any[] = [];
+
+        // Query main engine (Freqtrade)
+        if ('getOpenOrders' in tradingEngine) {
+          const orders = await (tradingEngine as any).getOpenOrders(symbol);
+          allOrders.push(...orders);
         }
-        const orders = await (tradingEngine as any).getOpenOrders(symbol);
-        if (orders.length === 0) {
+
+        // Query direct exchange engine (CCXT) for stop/conditional orders
+        if (directExchangeEngine) {
+          try {
+            const directOrders = await directExchangeEngine.getOrders();
+            const openDirectOrders = directOrders.filter(o =>
+              o.status === 'pending' && (!symbol || o.symbol === symbol)
+            );
+            allOrders.push(...openDirectOrders);
+          } catch {
+            // Direct engine query failed, continue with main engine results only
+          }
+        }
+
+        if (allOrders.length === 0) {
           return { orders: [], message: symbol ? `No open orders for ${symbol}.` : 'No open orders.' };
         }
-        return orders;
+        return allOrders;
       },
     }),
 

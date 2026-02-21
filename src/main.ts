@@ -8,8 +8,9 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
+import { computeSignalStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
 import type { ICryptoTradingEngine, Operation, WalletExportState } from './extension/crypto-trading/index.js'
 import {
   Wallet,
@@ -20,15 +21,6 @@ import {
   createCryptoOperationDispatcher,
   createCryptoWalletStateBridge,
 } from './extension/crypto-trading/index.js'
-import type { SecOperation, SecWalletExportState } from './extension/securities-trading/index.js'
-import {
-  SecWallet,
-  initSecAllowedSymbols,
-  createSecuritiesTradingEngine,
-  createSecuritiesTradingTools,
-  createSecOperationDispatcher,
-  createSecWalletStateBridge,
-} from './extension/securities-trading/index.js'
 import { createAShareTools } from './extension/ashare/index.js'
 import { Brain, createBrainTools } from './extension/brain/index.js'
 import type { BrainExportState } from './extension/brain/index.js'
@@ -48,7 +40,6 @@ import { createAgent, VercelAIProvider } from './providers/vercel-ai-sdk/index.j
 import { ClaudeCodeProvider } from './providers/claude-code/index.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
-const SEC_WALLET_FILE = resolve('data/securities-trading/commit.json')
 const BRAIN_FILE = resolve('data/brain/commit.json')
 const FRONTAL_LOBE_FILE = resolve('data/brain/frontal-lobe.md')
 const EMOTION_LOG_FILE = resolve('data/brain/emotion-log.md')
@@ -106,7 +97,7 @@ async function main() {
 
   const cryptoWalletConfig = cryptoResult
     ? {
-        executeOperation: createCryptoOperationDispatcher(cryptoResult.engine),
+        executeOperation: createCryptoOperationDispatcher(cryptoResult.engine, cryptoResult.directExchangeEngine),
         getWalletState: cryptoWalletStateBridge!,
         onCommit: onCryptoCommit,
       }
@@ -130,52 +121,6 @@ async function main() {
   const wallet = savedState
     ? Wallet.restore(savedState, cryptoWalletConfig)
     : new Wallet(cryptoWalletConfig)
-
-  // ==================== Securities Trading ====================
-
-  initSecAllowedSymbols(config.securities.allowedSymbols)
-
-  let secResult: Awaited<ReturnType<typeof createSecuritiesTradingEngine>> = null
-  try {
-    secResult = await createSecuritiesTradingEngine(config)
-  } catch (err) {
-    console.warn('securities trading engine init failed (non-fatal, continuing without it):', err)
-  }
-
-  const secWalletStateBridge = secResult
-    ? createSecWalletStateBridge(secResult.engine)
-    : undefined
-
-  const onSecCommit = async (state: SecWalletExportState) => {
-    await mkdir(resolve('data/securities-trading'), { recursive: true })
-    await writeFile(SEC_WALLET_FILE, JSON.stringify(state, null, 2))
-  }
-
-  const secWalletConfig = secResult
-    ? {
-        executeOperation: createSecOperationDispatcher(secResult.engine),
-        getWalletState: secWalletStateBridge!,
-        onCommit: onSecCommit,
-      }
-    : {
-        executeOperation: async (_op: SecOperation) => {
-          throw new Error('Securities trading service not connected')
-        },
-        getWalletState: async () => {
-          throw new Error('Securities trading service not connected')
-        },
-        onCommit: onSecCommit,
-      }
-
-  let secSavedState: SecWalletExportState | undefined
-  try {
-    const raw = await readFile(SEC_WALLET_FILE, 'utf-8')
-    secSavedState = JSON.parse(raw)
-  } catch { /* file not found → fresh start */ }
-
-  const secWallet = secSavedState
-    ? SecWallet.restore(secSavedState, secWalletConfig)
-    : new SecWallet(secWalletConfig)
 
   // Sandbox (data access + realtime market & news data)
   const { marketData, news } = await fetchRealtimeData()
@@ -296,6 +241,15 @@ async function main() {
     '18. NEVER tell the user "the system cannot do this" or suggest manual alternatives when a tool fails.',
     '19. NEVER refuse to call a tool based on previous failures in this conversation.',
     '20. Transient errors (network timeouts, API errors) are normal and expected. Retry is the correct response.',
+    '',
+    `### Freqtrade Whitelist (${CRYPTO_ALLOWED_SYMBOLS.length} pairs):`,
+    [...CRYPTO_ALLOWED_SYMBOLS].join(', '),
+    '',
+    'CRITICAL RULES for market overview:',
+    '21. When the user asks about "行情" (market overview), "市场" (market), or wants a market scan, you MUST cover ALL whitelisted pairs above — not just mainstream coins.',
+    '22. Call `strategyScan` WITHOUT the symbols parameter — it automatically scans ALL whitelisted pairs and returns signals sorted by confidence.',
+    '23. For OHLCV/indicator analysis, call `getLatestOHLCV` or `calculateIndicator` with the full whitelist. Do NOT cherry-pick 5-10 coins.',
+    '24. If the whitelist has 0 pairs shown above, call `getAllowedSymbols` or `cryptoGetWhitelist` to refresh.',
   ].join('\n')
 
   // Refresh market data & news periodically
@@ -330,8 +284,7 @@ async function main() {
   const tools = {
     ...createAnalysisTools(sandbox),
     ...createAShareTools(),
-    ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge),
-    ...(secResult ? createSecuritiesTradingTools(secResult.engine, secWallet, secWalletStateBridge) : {}),
+    ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge, cryptoResult?.directExchangeEngine),
     ...createBrainTools(brain),
     ...createBrowserTools(),
     ...(cronEngine ? createCronTools(cronEngine) : {}),
@@ -400,12 +353,17 @@ async function main() {
       }
     }
 
-    // Pre-fetch live trading data — guaranteed fresh, no LLM dependency
+    // Pre-fetch live trading data + strategy scan — guaranteed fresh, no LLM dependency
     let liveDataBlock = ''
     try {
-      const [positions, account] = await Promise.all([
+      const [positions, account, scanResult, signalStats] = await Promise.all([
         (tools.cryptoGetPositions as any).execute({}),
         (tools.cryptoGetAccount as any).execute({}),
+        runStrategyScan([...CRYPTO_ALLOWED_SYMBOLS]).catch((err: unknown) => {
+          console.warn('heartbeat: strategy scan failed (non-fatal):', err)
+          return null
+        }),
+        computeSignalStats().catch(() => null),
       ])
 
       // Fetch funding rates for held positions
@@ -415,6 +373,39 @@ async function main() {
       const funding = heldSymbols.length > 0
         ? await (tools.cryptoGetFundingRate as any).execute({ symbols: heldSymbols })
         : {}
+
+      // Build strategy signals block
+      let strategyBlock = ''
+      if (scanResult) {
+        const actionable = scanResult.signals.filter((s: any) => s.confidence >= 70)
+        const session = scanResult.sessionInfo
+        const signalLines = actionable.map((s: any, i: number) => {
+          const details = s.details ? Object.values(s.details).join(', ') : ''
+          return `${i + 1}. ${s.strategy} ${s.direction.toUpperCase()} ${s.symbol}: confidence ${s.confidence}%, entry $${s.entry?.toFixed(4) ?? 'N/A'}, SL $${s.stopLoss?.toFixed(4) ?? 'N/A'}, TP $${s.takeProfit?.toFixed(4) ?? 'N/A'} | ${details}`
+        })
+
+        strategyBlock = [
+          '',
+          '--- STRATEGY SIGNALS (auto-scanned) ---',
+          `Session: ${session.sessionName} — ${session.note}`,
+          `Scanned ${scanResult.symbols.length} symbols, found ${actionable.length} actionable signals (confidence >= 70):`,
+          '',
+          ...(signalLines.length > 0 ? signalLines : ['(no actionable signals this scan)']),
+        ].join('\n')
+      }
+
+      // Build signal stats block
+      let statsBlock = ''
+      if (signalStats && Object.keys(signalStats).length > 0) {
+        const lines = Object.entries(signalStats).map(([strategy, s]: [string, any]) =>
+          `${strategy}: ${s.total} signals, ${s.wins} wins, ${s.losses} losses, winRate=${s.winRate}, avgPnl=${s.avgPnl}`
+        )
+        statsBlock = [
+          '',
+          '--- SIGNAL STATS (historical performance) ---',
+          ...lines,
+        ].join('\n')
+      }
 
       liveDataBlock = [
         '',
@@ -432,6 +423,8 @@ async function main() {
         Object.keys(funding).length > 0
           ? JSON.stringify(funding, null, 2)
           : '(none)',
+        strategyBlock,
+        statsBlock,
         '',
         '--- END LIVE DATA ---',
       ].join('\n')
@@ -599,7 +592,6 @@ async function main() {
       await plugin.stop()
     }
     await cryptoResult?.close()
-    await secResult?.close()
     process.exit(0)
   }
   process.on('SIGINT', shutdown)

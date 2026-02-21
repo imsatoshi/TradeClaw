@@ -11,16 +11,17 @@
 - Note any significant price movements (>3% in either direction since last check)
 
 ## Strategy Scan
-- Call strategyScan to check for trading signals on all whitelisted pairs
+- Strategy signals are AUTO-SCANNED and injected into the LIVE DATA section above every heartbeat
+- Do NOT call strategyScan again — the data is already fresh
 - Only act on signals with confidence >= 70 and strength "strong" or "moderate"
-- If a strong signal is found during an optimal session, report with full details (entry, SL, TP, R:R)
-- Do NOT auto-execute trades unless user explicitly authorized
+- Use SIGNAL STATS to prioritize high win-rate strategies
+- If a strong signal is found during an optimal session, use proposeTradeWithButtons to propose the trade
 
 ## Session Awareness (UTC)
 - 00:00-08:00 Asian: funding fade signals most relevant
-- 08:00-12:00 London: Bollinger Squeeze breakouts
+- 08:00-12:00 London: good for breakout and trend signals
 - 12:00-16:00 NY overlap: best liquidity, all strategies valid
-- 16:00-21:00 NY: RSI divergence primary
+- 16:00-21:00 NY: RSI divergence primary, trend continuation
 - 21:00-00:00 Late: only strong signals (confidence >= 80)
 
 ## Funding Rate Check
@@ -30,13 +31,12 @@
 - Short position + negative funding = paying (bad)
 - Funding rate history is auto-saved on each cryptoGetFundingRate call. Use getFundingRateHistory to review trends.
 
-## Risk Rules for Strategy Signals
-- Max 2 concurrent positions from strategy signals
-- Use calculatePositionSize to compute stake before every new trade (2% equity risk max)
-- No new strategy trades if unrealized loss > 5% of equity
-- No new strategy trades if available balance < 50% of equity
-- ALWAYS use proposeTradeWithButtons instead of cryptoPlaceOrder for strategy signals
-  (only use cryptoPlaceOrder directly if user has explicitly said "execute now")
+## Risk Rules (ENFORCED IN CODE — cannot be bypassed)
+- Max concurrent positions = Freqtrade max_open_trades (hard limit in operation-dispatcher)
+- Max 40% of equity per single trade stake (hard limit)
+- No new trades if available balance < 30% of equity (hard limit)
+- Use calculatePositionSize for every new trade (2% equity risk max)
+- ALWAYS use proposeTradeWithButtons for strategy signals (limit order, not market)
 
 ## Signal Outcome Sync
 - Call cryptoGetOrders and filter for closed trades (is_open=false, has close_date)

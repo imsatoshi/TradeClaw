@@ -22,6 +22,24 @@ export function initCryptoAllowedSymbols(symbols: string[]): void {
   CRYPTO_ALLOWED_SYMBOLS = Object.freeze([...symbols]);
 }
 
+// ==================== Default leverage ====================
+
+/** Strategy-configured leverage, set during engine init. Defaults to 1 (spot). */
+export let CRYPTO_DEFAULT_LEVERAGE = 1;
+
+export function initCryptoDefaultLeverage(leverage: number): void {
+  CRYPTO_DEFAULT_LEVERAGE = leverage;
+}
+
+// ==================== Max open trades ====================
+
+/** Max concurrent open trades, set during engine init from Freqtrade show_config. Defaults to 5. */
+export let CRYPTO_MAX_OPEN_TRADES = 5;
+
+export function initCryptoMaxOpenTrades(max: number): void {
+  CRYPTO_MAX_OPEN_TRADES = max;
+}
+
 export type CryptoAllowedSymbol = string;
 
 // ==================== Core interfaces ====================
@@ -40,7 +58,7 @@ export interface ICryptoTradingEngine {
 export interface CryptoPlaceOrderRequest {
   symbol: string;
   side: 'buy' | 'sell';
-  type: 'market' | 'limit';
+  type: 'market' | 'limit' | 'stoploss';
   size?: number;
   usd_size?: number;
   price?: number;
@@ -111,3 +129,11 @@ export interface SymbolPrecision {
   price: number;
   size: number;
 }
+
+// ==================== Risk management defaults ====================
+
+/** Max single trade stake as % of equity (hard limit, enforced in operation-dispatcher) */
+export const MAX_STAKE_PERCENT_OF_EQUITY = 40;
+
+/** Stop opening new positions if available balance < this ratio of equity (hard limit) */
+export const MIN_AVAILABLE_BALANCE_RATIO = 0.3;

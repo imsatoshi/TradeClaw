@@ -41,6 +41,8 @@ export interface OperationResult {
   // Fill information (when filled)
   filledPrice?: number;
   filledSize?: number;
+  // Slippage tracking (positive = unfavorable slippage)
+  slippage?: number;
   // Error information (when rejected)
   error?: string;
   // Raw response (preserves complete information)
