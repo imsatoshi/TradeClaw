@@ -10,6 +10,8 @@ import { SessionStore } from '../../core/session.js'
 import { forceCompact, type CompactionConfig } from '../../core/compaction.js'
 import { readAIConfig, writeAIConfig, type AIProvider } from '../../core/ai-config.js'
 import { registerConnector, touchInteraction } from '../../core/connector-registry.js'
+import { initTelegramBotApi } from './telegram-api.js'
+import { takePendingProposal } from '../../core/pending-actions.js'
 
 const MAX_MESSAGE_LENGTH = 4096
 
@@ -72,6 +74,11 @@ export class TelegramPlugin implements Plugin {
     this.botUsername = me.username
     console.log(`telegram plugin: connected as @${me.username} (provider: ${this.currentProvider})`)
 
+    // Initialize the direct Telegram API singleton (used by proposeTradeWithButtons tool)
+    if (this.config.allowedChatIds.length > 0) {
+      initTelegramBotApi(this.config.token, this.config.allowedChatIds[0])
+    }
+
     // Register connector for outbound delivery (heartbeat / cron responses)
     if (this.config.allowedChatIds.length > 0) {
       const deliveryChatId = this.config.allowedChatIds[0]
@@ -112,7 +119,7 @@ export class TelegramPlugin implements Plugin {
           const cq = parseCallbackQuery(update)
           if (cq) {
             if (this.config.allowedChatIds.length > 0 && !this.config.allowedChatIds.includes(cq.chatId)) continue
-            this.handleCallbackQuery(client, cq.chatId, cq.messageId, cq.callbackQueryId, cq.data)
+            this.handleCallbackQuery(ctx, client, cq.chatId, cq.messageId, cq.callbackQueryId, cq.data, cq.from.id)
             continue
           }
 
@@ -157,15 +164,23 @@ export class TelegramPlugin implements Plugin {
     return session
   }
 
-  private async handleCallbackQuery(client: TelegramClient, chatId: number, messageId: number, callbackQueryId: string, data: string) {
+  private async handleCallbackQuery(
+    ctx: EngineContext,
+    client: TelegramClient,
+    chatId: number,
+    messageId: number,
+    callbackQueryId: string,
+    data: string,
+    userId: number,
+  ) {
     try {
+      // ── Provider switch ──────────────────────────────────────────────────────
       if (data.startsWith('provider:')) {
         const provider = data.slice('provider:'.length) as AIProvider
         this.currentProvider = provider
         await writeAIConfig(provider)
         await client.answerCallbackQuery(callbackQueryId, `Switched to ${PROVIDER_LABELS[provider]}`)
 
-        // Edit the original settings message in-place
         const ccLabel = provider === 'claude-code' ? '> Claude Code' : 'Claude Code'
         const aiLabel = provider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
         await client.editMessageText({
@@ -179,9 +194,45 @@ export class TelegramPlugin implements Plugin {
             ],
           },
         })
-      } else {
-        await client.answerCallbackQuery(callbackQueryId)
+        return
       }
+
+      // ── Trade proposal: confirm ──────────────────────────────────────────────
+      if (data.startsWith('trade:confirm:')) {
+        const proposalId = data.slice('trade:confirm:'.length)
+        const proposal = takePendingProposal(proposalId)
+
+        if (!proposal) {
+          await client.answerCallbackQuery(callbackQueryId, '⏰ Proposal expired or already handled')
+          await client.editMessageText({ chatId, messageId, text: '⏰ Trade proposal expired.' })
+          return
+        }
+
+        await client.answerCallbackQuery(callbackQueryId, '✅ Confirmed — executing trade...')
+        await client.editMessageText({ chatId, messageId, text: `${proposal.summary}\n\n⏳ Executing...` })
+
+        // Re-enter AI flow to execute the confirmed trade
+        try {
+          const session = await this.getSession(userId)
+          const result = await ctx.engine.askWithSession(proposal.confirmationPrompt, session)
+          await this.sendReply(client, chatId, result.text, result.media)
+        } catch (err) {
+          await client.sendMessage({ chatId, text: `❌ Trade execution failed: ${err instanceof Error ? err.message : String(err)}` })
+        }
+        return
+      }
+
+      // ── Trade proposal: cancel ───────────────────────────────────────────────
+      if (data.startsWith('trade:cancel:')) {
+        const proposalId = data.slice('trade:cancel:'.length)
+        takePendingProposal(proposalId)  // discard
+        await client.answerCallbackQuery(callbackQueryId, '❌ Trade cancelled')
+        await client.editMessageText({ chatId, messageId, text: '❌ Trade proposal cancelled by user.' })
+        return
+      }
+
+      // ── Unknown callback ─────────────────────────────────────────────────────
+      await client.answerCallbackQuery(callbackQueryId)
     } catch (err) {
       console.error('telegram callback query error:', err)
     }

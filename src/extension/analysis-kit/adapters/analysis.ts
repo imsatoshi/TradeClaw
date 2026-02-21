@@ -7,6 +7,9 @@ import { globNews, grepNews, readNews } from '../tools/news.tool';
 import { CRYPTO_ALLOWED_SYMBOLS } from '../../crypto-trading/interfaces.js';
 import { runStrategyScan } from '../tools/strategy-scanner/index.js';
 import { fetchFundingRates } from '../data/FundingRateClient.js';
+import { readSignalLog, computeSignalStats } from '../tools/strategy-scanner/signal-log.js';
+import { storePendingProposal, generateProposalId } from '../../../core/pending-actions.js';
+import { sendTelegramMessage } from '../../../connectors/telegram/telegram-api.js';
 
 /**
  * Create analysis-only AI tools from Sandbox
@@ -488,6 +491,141 @@ For full strategy scanning (including funding fade), use strategyScan instead.
       }),
       execute: async ({ symbols }) => {
         return await fetchFundingRates(symbols);
+      },
+    }),
+
+    // ==================== Signal history ====================
+
+    getSignalHistory: tool({
+      description: `
+View historical strategy signals detected by strategyScan, with win/loss outcomes.
+
+Use this to:
+- Review what signals have been detected recently
+- Check win-rate statistics per strategy (rsi_divergence, bollinger_squeeze, funding_fade)
+- See which symbols have been generating the most signals
+
+Outcomes are recorded when positions close (via markSignalOutcome).
+      `.trim(),
+      inputSchema: z.object({
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Max entries to return (default 30, max 100)'),
+        statsOnly: z
+          .boolean()
+          .optional()
+          .describe('If true, return only win-rate stats per strategy instead of individual entries'),
+      }),
+      execute: async ({ limit = 30, statsOnly = false }) => {
+        if (statsOnly) {
+          return await computeSignalStats();
+        }
+        return await readSignalLog(Math.min(limit, 100));
+      },
+    }),
+
+    // ==================== Trade proposal with confirmation buttons ====================
+
+    proposeTradeWithButtons: tool({
+      description: `
+Send a trade proposal to the user via Telegram with ✅ Confirm / ❌ Cancel inline buttons.
+
+Use this instead of directly calling cryptoPlaceOrder when you want user confirmation first.
+The user clicks a button in Telegram — no need to type a reply.
+
+When the user clicks ✅, the trade is automatically executed via another AI round.
+When the user clicks ❌, the proposal is discarded.
+
+Proposals expire after 10 minutes if not acted upon.
+
+Best practice: call this for ALL strategy-signal-based trades.
+Only call cryptoPlaceOrder directly when the user has ALREADY given explicit verbal authorization.
+      `.trim(),
+      inputSchema: z.object({
+        summary: z
+          .string()
+          .describe('Human-readable proposal summary, e.g. "RSI divergence LONG ICP/USDT | Entry 8.45 | SL 8.20 | TP 9.50 | R:R 2.5x | Confidence 78%"'),
+        orderInstruction: z
+          .string()
+          .describe('Exact instruction for the AI to execute when confirmed, e.g. "Place a market buy order for ICP/USDT with usd_size=50. Stop loss at 8.20, take profit at 9.50."'),
+      }),
+      execute: async ({ summary, orderInstruction }) => {
+        const id = generateProposalId();
+        const confirmationPrompt =
+          `The user just confirmed the following trade proposal. Execute it now by calling cryptoPlaceOrder.\n\n` +
+          `Proposal: ${summary}\n\n` +
+          `Instruction: ${orderInstruction}\n\n` +
+          `Proceed with the order immediately. Report the result (order ID, filled price, or any error).`;
+
+        storePendingProposal({ id, summary, confirmationPrompt });
+
+        const msgText =
+          `📊 Trade Proposal\n\n${summary}\n\n` +
+          `Expires in 10 minutes. Tap to confirm or cancel:`;
+
+        const messageId = await sendTelegramMessage(msgText, {
+          replyMarkup: {
+            inline_keyboard: [[
+              { text: '✅ Confirm', callback_data: `trade:confirm:${id}` },
+              { text: '❌ Cancel', callback_data: `trade:cancel:${id}` },
+            ]],
+          },
+        });
+
+        if (messageId === null) {
+          return { proposed: false, error: 'Failed to send Telegram message — check telegram-api initialization' };
+        }
+
+        return { proposed: true, proposalId: id, message: 'Trade proposal sent to Telegram. Waiting for user confirmation.' };
+      },
+    }),
+
+    // ==================== Position sizing calculator ====================
+
+    calculatePositionSize: tool({
+      description: `
+Calculate optimal position size based on fixed risk percentage.
+
+Given your account equity, risk tolerance, and stop-loss distance, computes:
+- riskAmount: dollars you're willing to lose if stop is hit
+- positionValue: total value of the position (before leverage)
+- stakeAmount: margin required (positionValue / leverage)
+- size: coin quantity (positionValue / entryPrice)
+
+Example: $500 equity, 2% risk, entry $8.50, stop $8.00, leverage 3x
+→ riskAmount=$10, positionValue=$170, stakeAmount=$56.7, size=20 coins
+      `.trim(),
+      inputSchema: z.object({
+        accountEquity: z.number().positive().describe('Total account equity in USDT'),
+        riskPercent: z.number().positive().max(10).describe('Max risk per trade as % of equity (e.g. 2 for 2%)'),
+        entryPrice: z.number().positive().describe('Planned entry price'),
+        stopLossPrice: z.number().positive().describe('Stop-loss price'),
+        leverage: z.number().positive().optional().describe('Leverage multiplier (default 1 for spot, use Freqtrade strategy leverage for futures)'),
+      }),
+      execute: ({ accountEquity, riskPercent, entryPrice, stopLossPrice, leverage = 1 }) => {
+        const riskAmount = accountEquity * (riskPercent / 100);
+        const priceRiskPercent = Math.abs(entryPrice - stopLossPrice) / entryPrice;
+
+        if (priceRiskPercent === 0) {
+          return { error: 'entryPrice and stopLossPrice cannot be equal' };
+        }
+
+        const positionValue = riskAmount / priceRiskPercent;
+        const stakeAmount = positionValue / leverage;
+        const size = positionValue / entryPrice;
+
+        return {
+          riskAmount: Math.round(riskAmount * 100) / 100,
+          positionValue: Math.round(positionValue * 100) / 100,
+          stakeAmount: Math.round(stakeAmount * 100) / 100,
+          size: Math.round(size * 10000) / 10000,
+          leverage,
+          priceRiskPercent: `${(priceRiskPercent * 100).toFixed(2)}%`,
+          note: `Risking ${riskPercent}% of equity ($${riskAmount.toFixed(2)}) with ${leverage}x leverage`,
+        };
       },
     }),
 
