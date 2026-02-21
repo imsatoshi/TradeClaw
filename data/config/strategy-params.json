@@ -1,0 +1,50 @@
+{
+  "$schema": "策略扫描参数配置 — 修改后下次扫描自动生效，无需重启",
+  "rsi_divergence": {
+    "rsiPeriod": 14,
+    "atrPeriod": 14,
+    "swingWindow": 2,
+    "oversoldThreshold": 35,
+    "overboughtThreshold": 65,
+    "volumeExhaustionRatio": 0.5,
+    "slMultiplier": 1.5,
+    "tpMultiplier": 2.5,
+    "strongConfidence": 78,
+    "moderateConfidence": 62
+  },
+  "bollinger_squeeze": {
+    "bbPeriod": 20,
+    "bbMultiplier": 2,
+    "macdFast": 12,
+    "macdSlow": 26,
+    "macdSignal": 9,
+    "atrPeriod": 14,
+    "volAvgPeriod": 20,
+    "volumeConfirmationRatio": 1.5,
+    "slMultiplier": 1.5,
+    "tpMultiplier": 2.5,
+    "strongConfidence": 72,
+    "moderateConfidence": 55
+  },
+  "funding_fade": {
+    "rsiPeriod": 14,
+    "atrPeriod": 14,
+    "fundingHigh": 0.001,
+    "fundingVeryHigh": 0.002,
+    "fundingLow": -0.0005,
+    "fundingVeryLow": -0.001,
+    "overboughtThreshold": 70,
+    "oversoldThreshold": 30,
+    "slMultiplier": 2,
+    "tpMultiplier": 3,
+    "strongConfidence": 75,
+    "moderateConfidence": 60
+  },
+  "scanner": {
+    "mtfAlignedBoost": 5,
+    "mtfConflictPenalty": -15,
+    "weakThreshold": 55,
+    "actionableThreshold": 70,
+    "cacheTtlMinutes": 25
+  }
+}

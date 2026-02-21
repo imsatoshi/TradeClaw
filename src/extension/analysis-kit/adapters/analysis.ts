@@ -7,7 +7,8 @@ import { globNews, grepNews, readNews } from '../tools/news.tool';
 import { CRYPTO_ALLOWED_SYMBOLS } from '../../crypto-trading/interfaces.js';
 import { runStrategyScan } from '../tools/strategy-scanner/index.js';
 import { fetchFundingRates } from '../data/FundingRateClient.js';
-import { readSignalLog, computeSignalStats } from '../tools/strategy-scanner/signal-log.js';
+import { readSignalLog, computeSignalStats, syncOutcomesFromTrades } from '../tools/strategy-scanner/signal-log.js';
+import { appendFundingRateLog, readFundingRateHistory, computeFundingRateStats } from '../data/funding-rate-log.js';
 import { storePendingProposal, generateProposalId } from '../../../core/pending-actions.js';
 import { sendTelegramMessage } from '../../../connectors/telegram/telegram-api.js';
 
@@ -490,7 +491,46 @@ For full strategy scanning (including funding fade), use strategyScan instead.
           ),
       }),
       execute: async ({ symbols }) => {
-        return await fetchFundingRates(symbols);
+        const rates = await fetchFundingRates(symbols);
+        appendFundingRateLog(rates).catch(() => {}); // fire-and-forget
+        return rates;
+      },
+    }),
+
+    // ==================== Funding rate history ====================
+
+    getFundingRateHistory: tool({
+      description: `
+View historical funding rate snapshots saved from previous cryptoGetFundingRate calls.
+
+Use this to:
+- Review funding rate trends for a symbol over time
+- Compute stats: average rate (24h/7d), extreme event counts, cumulative carry cost
+- Decide whether funding is systematically working for or against a position
+
+Data is auto-saved each time cryptoGetFundingRate is called.
+      `.trim(),
+      inputSchema: z.object({
+        symbol: z
+          .string()
+          .optional()
+          .describe('Filter by symbol, e.g. "BTC/USDT". Omit to see all symbols.'),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Max entries to return (default 50)'),
+        statsOnly: z
+          .boolean()
+          .optional()
+          .describe('If true, return statistical summary instead of raw snapshots. Requires symbol.'),
+      }),
+      execute: async ({ symbol, limit, statsOnly }) => {
+        if (statsOnly && symbol) {
+          return await computeFundingRateStats(symbol);
+        }
+        return await readFundingRateHistory({ symbol, limit });
       },
     }),
 
@@ -525,6 +565,36 @@ Outcomes are recorded when positions close (via markSignalOutcome).
         }
         return await readSignalLog(Math.min(limit, 100));
       },
+    }),
+
+    syncSignalOutcomes: tool({
+      description: `
+Sync strategy signal outcomes with closed Freqtrade trades.
+
+Call cryptoGetOrders first, filter trades where is_open=false and has close_date, then pass them here.
+Matches signals by symbol + direction + time proximity (signal within 4h of trade open time).
+
+For each closed trade, extract:
+- symbol: pair name (e.g. "ICP/USDT")
+- direction: is_short → 'short', else → 'long'
+- openDate: trade open_date ISO string
+- closeDate: trade close_date ISO string
+- closeRate: close_rate
+- profitRatio: profit_ratio (positive = profit)
+
+Run this during heartbeat or daily P&L report to keep win/loss stats up to date.
+      `.trim(),
+      inputSchema: z.object({
+        closedTrades: z.array(z.object({
+          symbol: z.string(),
+          direction: z.enum(['long', 'short']),
+          openDate: z.string(),
+          closeDate: z.string(),
+          closeRate: z.number(),
+          profitRatio: z.number(),
+        })),
+      }),
+      execute: async ({ closedTrades }) => await syncOutcomesFromTrades(closedTrades),
     }),
 
     // ==================== Trade proposal with confirmation buttons ====================

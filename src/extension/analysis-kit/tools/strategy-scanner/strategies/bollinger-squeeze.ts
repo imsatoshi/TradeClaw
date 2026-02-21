@@ -11,16 +11,25 @@ import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
 import { ATR } from '../../indicators/functions/technical.js'
 import { bandwidthSeries, macdHistogramSeries, sma } from '../helpers.js'
+import { getStrategyParams } from '../config.js'
 
-const BB_PERIOD = 20
-const BB_MULT = 2
-const MACD_FAST = 12
-const MACD_SLOW = 26
-const MACD_SIGNAL = 9
-const ATR_PERIOD = 14
-const VOL_AVG_PERIOD = 20
+export async function scanBollingerSqueeze(symbol: string, bars: MarketData[]): Promise<StrategySignal[]> {
+  const config = await getStrategyParams()
+  const p = config.bollinger_squeeze ?? {}
 
-export function scanBollingerSqueeze(symbol: string, bars: MarketData[]): StrategySignal[] {
+  const BB_PERIOD = p.bbPeriod ?? 20
+  const BB_MULT = p.bbMultiplier ?? 2
+  const MACD_FAST = p.macdFast ?? 12
+  const MACD_SLOW = p.macdSlow ?? 26
+  const MACD_SIGNAL = p.macdSignal ?? 9
+  const ATR_PERIOD = p.atrPeriod ?? 14
+  const VOL_AVG_PERIOD = p.volAvgPeriod ?? 20
+  const VOL_CONFIRM_RATIO = p.volumeConfirmationRatio ?? 1.5
+  const SL_MULT = p.slMultiplier ?? 1.5
+  const TP_MULT = p.tpMultiplier ?? 2.5
+  const STRONG_CONF = p.strongConfidence ?? 72
+  const MOD_CONF = p.moderateConfidence ?? 55
+
   if (bars.length < MACD_SLOW + MACD_SIGNAL + BB_PERIOD) return []
 
   const closes = bars.map(b => b.close)
@@ -55,24 +64,24 @@ export function scanBollingerSqueeze(symbol: string, bars: MarketData[]): Strate
   // --- Volume confirmation ---
   const avgVolume = sma(volumes, Math.min(VOL_AVG_PERIOD, volumes.length))
   const currentVolume = volumes[volumes.length - 1]
-  const volumeConfirm = currentVolume > avgVolume * 1.5
+  const volumeConfirm = currentVolume > avgVolume * VOL_CONFIRM_RATIO
 
   const currentClose = closes[closes.length - 1]
   const atr = ATR(highs, lows, closes, ATR_PERIOD)
   const direction = crossUp ? 'long' as const : 'short' as const
 
   const sl = direction === 'long'
-    ? currentClose - 1.5 * atr
-    : currentClose + 1.5 * atr
+    ? currentClose - SL_MULT * atr
+    : currentClose + SL_MULT * atr
   const tp = direction === 'long'
-    ? currentClose + 2.5 * atr
-    : currentClose - 2.5 * atr
+    ? currentClose + TP_MULT * atr
+    : currentClose - TP_MULT * atr
   const rr = direction === 'long'
     ? (tp - currentClose) / (currentClose - sl)
     : (currentClose - tp) / (sl - currentClose)
 
   const strength = volumeConfirm ? 'strong' : 'moderate'
-  const confidence = volumeConfirm ? 72 : 55
+  const confidence = volumeConfirm ? STRONG_CONF : MOD_CONF
 
   return [{
     strategy: 'bollinger_squeeze',

@@ -18,6 +18,7 @@
 
 你通过以下加密交易工具与 Freqtrade 通信：
 
+- `syncSignalOutcomes` — 将 Freqtrade 已平仓交易与策略信号匹配，更新胜率统计
 - `cryptoGetPositions` / `cryptoGetAccount` — 读取当前状态（持仓、余额、权益）
 - `cryptoPlaceOrder` — 开仓（路由到 Freqtrade 的 `/api/v1/forceenter`）
 - `cryptoClosePosition` — 平仓（路由到 Freqtrade 的 `/api/v1/forceexit`）

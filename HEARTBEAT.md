@@ -28,6 +28,7 @@
 - If funding > 0.05%/8h against position direction, alert user
 - Long position + positive funding = paying (bad)
 - Short position + negative funding = paying (bad)
+- Funding rate history is auto-saved on each cryptoGetFundingRate call. Use getFundingRateHistory to review trends.
 
 ## Risk Rules for Strategy Signals
 - Max 2 concurrent positions from strategy signals
@@ -36,6 +37,12 @@
 - No new strategy trades if available balance < 50% of equity
 - ALWAYS use proposeTradeWithButtons instead of cryptoPlaceOrder for strategy signals
   (only use cryptoPlaceOrder directly if user has explicitly said "execute now")
+
+## Signal Outcome Sync
+- Call cryptoGetOrders and filter for closed trades (is_open=false, has close_date)
+- For each closed trade, extract: symbol, direction (is_short→'short', else→'long'), openDate, closeDate, closeRate, profitRatio
+- Call syncSignalOutcomes with the closed trades to update signal win/loss stats
+- Run this once per heartbeat (or at minimum during daily P&L report)
 
 ## Daily P&L Report (every day at UTC 00:00 via cron)
 - Call cryptoGetAccount and cryptoGetPositions

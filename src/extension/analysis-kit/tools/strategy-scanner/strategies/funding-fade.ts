@@ -9,21 +9,29 @@
 import type { MarketData } from '../../../data/interfaces.js'
 import type { FundingRateInfo, StrategySignal } from '../types.js'
 import { RSI, ATR } from '../../indicators/functions/technical.js'
+import { getStrategyParams } from '../config.js'
 
-const RSI_PERIOD = 14
-const ATR_PERIOD = 14
-
-// Extreme funding thresholds (per 8h)
-const FUNDING_HIGH = 0.001     // 0.10%
-const FUNDING_VERY_HIGH = 0.002 // 0.20%
-const FUNDING_LOW = -0.0005    // -0.05%
-const FUNDING_VERY_LOW = -0.001 // -0.10%
-
-export function scanFundingFade(
+export async function scanFundingFade(
   symbol: string,
   bars: MarketData[],
   fundingRate: FundingRateInfo,
-): StrategySignal[] {
+): Promise<StrategySignal[]> {
+  const config = await getStrategyParams()
+  const p = config.funding_fade ?? {}
+
+  const RSI_PERIOD = p.rsiPeriod ?? 14
+  const ATR_PERIOD = p.atrPeriod ?? 14
+  const FUNDING_HIGH = p.fundingHigh ?? 0.001
+  const FUNDING_VERY_HIGH = p.fundingVeryHigh ?? 0.002
+  const FUNDING_LOW = p.fundingLow ?? -0.0005
+  const FUNDING_VERY_LOW = p.fundingVeryLow ?? -0.001
+  const OVERBOUGHT = p.overboughtThreshold ?? 70
+  const OVERSOLD = p.oversoldThreshold ?? 30
+  const SL_MULT = p.slMultiplier ?? 2
+  const TP_MULT = p.tpMultiplier ?? 3
+  const STRONG_CONF = p.strongConfidence ?? 75
+  const MOD_CONF = p.moderateConfidence ?? 60
+
   if (bars.length < RSI_PERIOD + ATR_PERIOD + 2) return []
 
   const closes = bars.map(b => b.close)
@@ -38,14 +46,14 @@ export function scanFundingFade(
   const signals: StrategySignal[] = []
 
   // --- Short: extreme positive funding + overbought RSI ---
-  if (rate > FUNDING_HIGH && rsi > 70) {
-    const sl = currentClose + 2 * atr
-    const tp = currentClose - 3 * atr
+  if (rate > FUNDING_HIGH && rsi > OVERBOUGHT) {
+    const sl = currentClose + SL_MULT * atr
+    const tp = currentClose - TP_MULT * atr
     const rr = (currentClose - tp) / (sl - currentClose)
 
     const isVeryExtreme = rate > FUNDING_VERY_HIGH
     const strength = isVeryExtreme ? 'strong' : 'moderate'
-    const confidence = isVeryExtreme ? 75 : 60
+    const confidence = isVeryExtreme ? STRONG_CONF : MOD_CONF
 
     signals.push({
       strategy: 'funding_fade',
@@ -71,14 +79,14 @@ export function scanFundingFade(
   }
 
   // --- Long: extreme negative funding + oversold RSI ---
-  if (rate < FUNDING_LOW && rsi < 30) {
-    const sl = currentClose - 2 * atr
-    const tp = currentClose + 3 * atr
+  if (rate < FUNDING_LOW && rsi < OVERSOLD) {
+    const sl = currentClose - SL_MULT * atr
+    const tp = currentClose + TP_MULT * atr
     const rr = (tp - currentClose) / (currentClose - sl)
 
     const isVeryExtreme = rate < FUNDING_VERY_LOW
     const strength = isVeryExtreme ? 'strong' : 'moderate'
-    const confidence = isVeryExtreme ? 75 : 60
+    const confidence = isVeryExtreme ? STRONG_CONF : MOD_CONF
 
     signals.push({
       strategy: 'funding_fade',
