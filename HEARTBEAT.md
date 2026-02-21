@@ -44,6 +44,22 @@
 - Call syncSignalOutcomes with the closed trades to update signal win/loss stats
 - Run this once per heartbeat (or at minimum during daily P&L report)
 
+## NFI Strategy Analysis
+- NFI entry tag performance and exit reason stats are AUTO-INJECTED in LIVE DATA above
+- Use entry tag winRate to evaluate which NFI signals are working
+- If a tag has winRate < 40% over 10+ trades, consider blacklisting pairs where it fires most
+- Compare NFI tag stats with custom scanner stats for high-confidence trade decisions
+- When both custom scanner AND NFI agree on direction, confidence is highest
+
+## Pending Orders
+- Pending limit orders (unfilled) are shown in LIVE DATA above
+- Check if stale orders should be cancelled (older than 4 hours and far from market price)
+
+## Position Risk Details
+- Each position now includes stopLossPrice, stopLossDistance, and fundingFees
+- If stoploss distance < 2%, alert user about tight stop
+- If funding fees are negative and growing, evaluate whether to close the position
+
 ## Daily P&L Report (every day at UTC 00:00 via cron)
 - Call cryptoGetAccount and cryptoGetPositions
 - Summarize: total equity, available balance, unrealized PnL, realized PnL today

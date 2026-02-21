@@ -110,6 +110,10 @@ export interface CryptoPosition {
   grindCount?: number;         // DCA/grinding count
   partialExitCount?: number;   // Partial take-profit count
   profitRatio?: number;        // Current profit ratio (decimal, e.g. 0.035 = 3.5%)
+  // Risk detail fields (from Freqtrade)
+  stopLossPrice?: number;      // Current stop-loss price (stop_loss_abs)
+  stopLossDistance?: number;    // Stop-loss distance ratio (e.g. -0.05 = 5%)
+  fundingFees?: number;        // Accumulated funding fees (positive=received, negative=paid)
 }
 
 // ==================== Account ====================
