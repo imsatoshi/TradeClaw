@@ -19,6 +19,13 @@ export interface AskOptions {
   systemPrompt?: string
   /** Max history entries to include. */
   maxHistoryEntries?: number
+  /**
+   * Data freshness TTL in milliseconds.
+   * Assistant responses older than this are truncated (data omitted) so the model
+   * cannot reuse stale trading data and is forced to call tools for fresh data.
+   * Tool result blocks older than this are replaced with "[expired]".
+   */
+  dataTTL?: number
 }
 
 export interface ProviderResult {

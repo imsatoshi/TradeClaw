@@ -241,18 +241,37 @@ export type SDKModelMessage = SDKUserMessage | SDKAssistantMessage | SDKToolMess
  *
  * Tool calls from Claude Code (Read, Edit, Bash...) are mapped as-is.
  * The Vercel AI SDK agent won't re-execute them — they serve as context.
+ *
+ * When `dataTTL` is provided, entries older than the TTL have their data-heavy
+ * content replaced with expiry notices. This forces the model to re-call tools
+ * for fresh data instead of reusing stale numbers from conversation history.
  */
-export function toModelMessages(entries: SessionEntry[]): SDKModelMessage[] {
+export interface ToModelMessagesOpts {
+  /**
+   * Data freshness TTL in milliseconds.
+   * - Assistant text responses older than TTL and longer than 200 chars → replaced with expiry notice
+   * - Assistant structured responses (tool_use) older than TTL → replaced with text summary
+   * - Tool result blocks older than TTL → skipped entirely (avoids orphaned tool-results)
+   * - User text messages → always kept (questions don't go stale)
+   */
+  dataTTL?: number
+}
+
+export function toModelMessages(entries: SessionEntry[], opts?: ToModelMessagesOpts): SDKModelMessage[] {
   const messages: SDKModelMessage[] = []
+  const now = Date.now()
+  const ttl = opts?.dataTTL
 
   for (const entry of entries) {
     // Skip compact boundary markers — they are metadata, not conversation
     if (entry.type === 'system' && entry.subtype === 'compact_boundary') continue
 
+    const isExpired = ttl != null && (now - new Date(entry.timestamp).getTime()) > ttl
     const { message } = entry
 
     if (message.role === 'user') {
       if (typeof message.content === 'string') {
+        // User text — always kept (questions don't go stale)
         messages.push({ role: 'user', content: message.content })
       } else {
         // Could be tool_result blocks from Claude Code
@@ -260,6 +279,10 @@ export function toModelMessages(entries: SessionEntry[]): SDKModelMessage[] {
           (b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result',
         )
         if (toolResults.length > 0) {
+          if (isExpired) {
+            // Skip expired tool results entirely — avoids orphaned tool-result without matching tool-call
+            continue
+          }
           messages.push({
             role: 'tool',
             content: toolResults.map((tr) => ({
@@ -270,7 +293,7 @@ export function toModelMessages(entries: SessionEntry[]): SDKModelMessage[] {
             })),
           })
         } else {
-          // Text blocks
+          // Text blocks — always kept
           const text = message.content
             .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
             .map((b) => b.text)
@@ -282,26 +305,44 @@ export function toModelMessages(entries: SessionEntry[]): SDKModelMessage[] {
       }
     } else if (message.role === 'assistant') {
       if (typeof message.content === 'string') {
-        messages.push({ role: 'assistant', content: message.content })
-      } else {
-        const parts: SDKAssistantMessage['content'] = []
-
-        for (const block of message.content) {
-          if (block.type === 'text') {
-            parts.push({ type: 'text', text: block.text })
-          } else if (block.type === 'tool_use') {
-            parts.push({
-              type: 'tool-call',
-              toolCallId: block.id,
-              toolName: block.name,
-              input: block.input,
-            })
-          }
-          // tool_result in assistant content is unusual, skip
+        if (isExpired && message.content.length > 200) {
+          // Expire long assistant responses — they likely contain trading data/numbers
+          const time = entry.timestamp.replace('T', ' ').slice(0, 19)
+          messages.push({
+            role: 'assistant',
+            content: `[AI responded at ${time} UTC — response data omitted as it is outdated. Call tools to re-fetch current data if needed.]`,
+          })
+        } else {
+          messages.push({ role: 'assistant', content: message.content })
         }
+      } else {
+        if (isExpired) {
+          // Expire structured responses (tool_use blocks) — replace with text summary
+          const time = entry.timestamp.replace('T', ' ').slice(0, 19)
+          messages.push({
+            role: 'assistant',
+            content: `[AI made tool calls at ${time} UTC — results omitted as data is outdated. Re-call tools for current data.]`,
+          })
+        } else {
+          const parts: SDKAssistantMessage['content'] = []
 
-        if (parts.length > 0) {
-          messages.push({ role: 'assistant', content: parts })
+          for (const block of message.content) {
+            if (block.type === 'text') {
+              parts.push({ type: 'text', text: block.text })
+            } else if (block.type === 'tool_use') {
+              parts.push({
+                type: 'tool-call',
+                toolCallId: block.id,
+                toolName: block.name,
+                input: block.input,
+              })
+            }
+            // tool_result in assistant content is unusual, skip
+          }
+
+          if (parts.length > 0) {
+            messages.push({ role: 'assistant', content: parts })
+          }
         }
       }
     }

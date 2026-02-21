@@ -54,7 +54,7 @@ export class VercelAIProvider implements AIProvider {
     const entries = (maxEntries != null && allEntries.length > maxEntries)
       ? allEntries.slice(-maxEntries)
       : allEntries
-    const messages = toModelMessages(entries)
+    const messages = toModelMessages(entries, { dataTTL: opts?.dataTTL })
 
     // Generate with conversation context — collect media from tool results
     const media: MediaAttachment[] = []
