@@ -1,19 +1,115 @@
 /**
  * Strategy scan orchestrator.
  *
- * Fetches 4H OHLCV data + funding rates, runs all three strategies,
- * and returns a structured ScanResult with session awareness.
+ * Enhancements over v1:
+ * - OHLCV cache (25-min TTL) — avoids redundant Binance fetches across heartbeats
+ * - Multi-timeframe confirmation (1H SMA20 trend) — adjusts signal confidence ±5/15
+ * - Signal history logging — persists all signals to data/signals/signal-log.json
  */
 
 import type { ScanResult, StrategySignal, FundingRateInfo } from './types.js'
+import type { MarketData } from '../../data/interfaces.js'
 import { fetchExchangeOHLCV } from '../../data/ExchangeClient.js'
 import { fetchFundingRates } from '../../data/FundingRateClient.js'
 import { scanRsiDivergence } from './strategies/rsi-divergence.js'
 import { scanBollingerSqueeze } from './strategies/bollinger-squeeze.js'
 import { scanFundingFade } from './strategies/funding-fade.js'
+import { appendSignalLog } from './signal-log.js'
+import { createLogger } from '../../../../core/logger.js'
 
-const TIMEFRAME = '4h'
-const CANDLE_LIMIT = 60  // 10 days of 4H data
+const log = createLogger('scanner')
+
+const TIMEFRAME_4H = '4h'
+const TIMEFRAME_1H = '1h'
+const CANDLE_LIMIT_4H = 60   // ~10 days of 4H data
+const CANDLE_LIMIT_1H = 40   // ~2 days, enough for SMA20 trend
+
+// ==================== OHLCV Cache ====================
+
+interface CacheEntry {
+  data: Record<string, MarketData[]>
+  fetchedAt: number
+}
+
+const ohlcvCache = new Map<string, CacheEntry>()
+const CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes
+
+function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
+  return `${[...symbols].sort().join(',')}|${timeframe}|${limit}`
+}
+
+async function fetchWithCache(
+  symbols: string[],
+  timeframe: string,
+  limit: number,
+): Promise<Record<string, MarketData[]>> {
+  const key = makeCacheKey(symbols, timeframe, limit)
+  const cached = ohlcvCache.get(key)
+
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    log.info('OHLCV cache hit', { timeframe, count: symbols.length, ageMs: Date.now() - cached.fetchedAt })
+    return cached.data
+  }
+
+  const data = await fetchExchangeOHLCV(symbols, timeframe, limit)
+  ohlcvCache.set(key, { data, fetchedAt: Date.now() })
+  log.info('OHLCV fetched from Binance', { timeframe, count: symbols.length })
+  return data
+}
+
+// ==================== Multi-timeframe Trend Filter ====================
+
+type Trend1H = 'bullish' | 'bearish' | 'neutral'
+
+/**
+ * Determine 1H trend direction using SMA20.
+ * - last close > SMA20 * 1.005 → bullish
+ * - last close < SMA20 * 0.995 → bearish
+ * - otherwise → neutral
+ */
+function get1HTrend(bars1h: MarketData[]): Trend1H {
+  if (bars1h.length < 20) return 'neutral'
+  const closes = bars1h.map((b) => b.close)
+  const last = closes[closes.length - 1]
+  const sma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20
+  if (last > sma20 * 1.005) return 'bullish'
+  if (last < sma20 * 0.995) return 'bearish'
+  return 'neutral'
+}
+
+/**
+ * Apply 1H trend to 4H signals:
+ * - Aligned:    confidence +5 (max 100), details note added
+ * - Conflicting: confidence -15, may downgrade strength to 'weak'
+ * - Neutral:    no change
+ */
+function applyMtfFilter(signals: StrategySignal[], trend1H: Trend1H): StrategySignal[] {
+  if (trend1H === 'neutral') return signals
+
+  return signals.map((signal) => {
+    const aligned =
+      (signal.direction === 'long' && trend1H === 'bullish') ||
+      (signal.direction === 'short' && trend1H === 'bearish')
+
+    if (aligned) {
+      return {
+        ...signal,
+        confidence: Math.min(100, signal.confidence + 5),
+        details: { ...signal.details, mtf_1h: `aligned (${trend1H}) +5` },
+      }
+    } else {
+      const newConf = Math.max(0, signal.confidence - 15)
+      return {
+        ...signal,
+        confidence: newConf,
+        strength: newConf < 55 ? 'weak' : signal.strength,
+        details: { ...signal.details, mtf_1h: `conflicts (${trend1H}) -15` },
+      }
+    }
+  })
+}
+
+// ==================== Session Info ====================
 
 type SessionName = 'asian' | 'london' | 'ny_overlap' | 'ny' | 'late'
 
@@ -28,42 +124,19 @@ function getSessionInfo(): SessionInfo {
   const hourUTC = new Date().getUTCHours()
 
   if (hourUTC >= 0 && hourUTC < 8) {
-    return {
-      currentHourUTC: hourUTC,
-      isOptimalSession: false,
-      sessionName: 'asian',
-      note: 'Asian session: low volume. Funding fade signals most relevant.',
-    }
+    return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'asian', note: 'Asian session: low volume. Funding fade signals most relevant.' }
   } else if (hourUTC >= 8 && hourUTC < 12) {
-    return {
-      currentHourUTC: hourUTC,
-      isOptimalSession: true,
-      sessionName: 'london',
-      note: 'London open: good for Bollinger Squeeze breakouts.',
-    }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'london', note: 'London open: good for Bollinger Squeeze breakouts.' }
   } else if (hourUTC >= 12 && hourUTC < 16) {
-    return {
-      currentHourUTC: hourUTC,
-      isOptimalSession: true,
-      sessionName: 'ny_overlap',
-      note: 'NY/London overlap: best liquidity, all strategies valid.',
-    }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny_overlap', note: 'NY/London overlap: best liquidity, all strategies valid.' }
   } else if (hourUTC >= 16 && hourUTC < 21) {
-    return {
-      currentHourUTC: hourUTC,
-      isOptimalSession: true,
-      sessionName: 'ny',
-      note: 'NY session: RSI divergence primary, trend continuation.',
-    }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny', note: 'NY session: RSI divergence primary, trend continuation.' }
   } else {
-    return {
-      currentHourUTC: hourUTC,
-      isOptimalSession: false,
-      sessionName: 'late',
-      note: 'Late/early session: only act on strong signals (confidence >= 80).',
-    }
+    return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'late', note: 'Late/early session: only act on strong signals (confidence >= 80).' }
   }
 }
+
+// ==================== Main Orchestrator ====================
 
 /**
  * Run all three strategies across all symbols in one call.
@@ -79,35 +152,41 @@ export async function runStrategyScan(
   const errors: string[] = []
   const allSignals: StrategySignal[] = []
 
-  // Fetch OHLCV and funding rates concurrently
-  const [ohlcvData, rates] = await Promise.all([
-    fetchExchangeOHLCV(symbols, TIMEFRAME, CANDLE_LIMIT).catch(err => {
-      errors.push(`OHLCV fetch failed: ${String(err)}`)
-      return {} as Record<string, import('../../data/interfaces.js').MarketData[]>
+  log.info('scan started', { symbols: symbols.length })
+
+  // Fetch 4H, 1H, and funding rates concurrently (4H and 1H both use cache)
+  const [ohlcv4h, ohlcv1h, rates] = await Promise.all([
+    fetchWithCache(symbols, TIMEFRAME_4H, CANDLE_LIMIT_4H).catch((err) => {
+      errors.push(`4H OHLCV fetch failed: ${String(err)}`)
+      return {} as Record<string, MarketData[]>
+    }),
+    fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
+      log.warn('1H OHLCV fetch failed — MTF filter disabled', { error: String(err) })
+      return {} as Record<string, MarketData[]>
     }),
     fundingRates !== undefined
       ? Promise.resolve(fundingRates)
       : fetchFundingRates(symbols).catch(() => ({} as Record<string, FundingRateInfo>)),
   ])
 
-  // Run all strategies for each symbol
+  // Run strategies per symbol
   for (const symbol of symbols) {
-    const bars = ohlcvData[symbol]
-    if (!bars || bars.length < 30) {
-      errors.push(`${symbol}: insufficient data (${bars?.length ?? 0} bars)`)
+    const bars4h = ohlcv4h[symbol]
+    if (!bars4h || bars4h.length < 30) {
+      errors.push(`${symbol}: insufficient 4H data (${bars4h?.length ?? 0} bars)`)
       continue
     }
 
+    const symbolSignals: StrategySignal[] = []
+
     try {
-      const rsiSignals = scanRsiDivergence(symbol, bars)
-      allSignals.push(...rsiSignals)
+      symbolSignals.push(...scanRsiDivergence(symbol, bars4h))
     } catch (err) {
       errors.push(`${symbol} RSI divergence error: ${String(err)}`)
     }
 
     try {
-      const bsSignals = scanBollingerSqueeze(symbol, bars)
-      allSignals.push(...bsSignals)
+      symbolSignals.push(...scanBollingerSqueeze(symbol, bars4h))
     } catch (err) {
       errors.push(`${symbol} Bollinger squeeze error: ${String(err)}`)
     }
@@ -115,10 +194,20 @@ export async function runStrategyScan(
     const funding = rates[symbol]
     if (funding) {
       try {
-        const ffSignals = scanFundingFade(symbol, bars, funding)
-        allSignals.push(...ffSignals)
+        symbolSignals.push(...scanFundingFade(symbol, bars4h, funding))
       } catch (err) {
         errors.push(`${symbol} funding fade error: ${String(err)}`)
+      }
+    }
+
+    // Apply 1H MTF filter to this symbol's signals
+    if (symbolSignals.length > 0) {
+      const bars1h = ohlcv1h[symbol]
+      if (bars1h && bars1h.length >= 20) {
+        const trend1H = get1HTrend(bars1h)
+        allSignals.push(...applyMtfFilter(symbolSignals, trend1H))
+      } else {
+        allSignals.push(...symbolSignals)
       }
     }
   }
@@ -126,10 +215,19 @@ export async function runStrategyScan(
   // Sort by confidence descending
   allSignals.sort((a, b) => b.confidence - a.confidence)
 
+  log.info('scan complete', {
+    signals: allSignals.length,
+    actionable: allSignals.filter((s) => s.confidence >= 70).length,
+    errors: errors.length,
+  })
+
+  // Persist all signals for history tracking (fire-and-forget)
+  appendSignalLog(allSignals).catch(() => { /* already logged inside */ })
+
   return {
     scannedAt,
     symbols,
-    timeframe: TIMEFRAME,
+    timeframe: TIMEFRAME_4H,
     signals: allSignals,
     errors,
     sessionInfo: getSessionInfo(),

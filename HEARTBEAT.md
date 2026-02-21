@@ -31,6 +31,15 @@
 
 ## Risk Rules for Strategy Signals
 - Max 2 concurrent positions from strategy signals
-- Max 2% of equity risk per trade
+- Use calculatePositionSize to compute stake before every new trade (2% equity risk max)
 - No new strategy trades if unrealized loss > 5% of equity
 - No new strategy trades if available balance < 50% of equity
+- ALWAYS use proposeTradeWithButtons instead of cryptoPlaceOrder for strategy signals
+  (only use cryptoPlaceOrder directly if user has explicitly said "execute now")
+
+## Daily P&L Report (every day at UTC 00:00 via cron)
+- Call cryptoGetAccount and cryptoGetPositions
+- Summarize: total equity, available balance, unrealized PnL, realized PnL today
+- List all open positions with entry price, current price, PnL%, funding rate
+- Call getSignalHistory with statsOnly=true and report strategy win rates
+- Send even if nothing has changed — this is a scheduled daily summary
