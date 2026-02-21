@@ -32,7 +32,7 @@ export class VercelAIProvider implements AIProvider {
     private compaction: CompactionConfig,
   ) {}
 
-  async askWithSession(prompt: string, session: SessionStore, _opts?: AskOptions): Promise<ProviderResult> {
+  async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
     // Append user message to session
     await session.appendUser(prompt, 'human')
 
@@ -47,7 +47,13 @@ export class VercelAIProvider implements AIProvider {
     )
 
     // Load active window and convert to model messages
-    const entries = compactionResult.activeEntries ?? await session.readActive()
+    const allEntries = compactionResult.activeEntries ?? await session.readActive()
+
+    // Limit history depth — prevents stale tool results from polluting context
+    const maxEntries = opts?.maxHistoryEntries
+    const entries = (maxEntries != null && allEntries.length > maxEntries)
+      ? allEntries.slice(-maxEntries)
+      : allEntries
     const messages = toModelMessages(entries)
 
     // Generate with conversation context — collect media from tool results
