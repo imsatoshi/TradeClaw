@@ -356,7 +356,12 @@ async function main() {
     // Pre-fetch live trading data + strategy scan — guaranteed fresh, no LLM dependency
     let liveDataBlock = ''
     try {
-      const [positions, account, scanResult, signalStats] = await Promise.all([
+      // Fetch Freqtrade heartbeat data in parallel (entry/exit stats, bot config, pending orders)
+      const ftDataPromise = 'getHeartbeatData' in cryptoEngine
+        ? (cryptoEngine as any).getHeartbeatData().catch(() => null)
+        : Promise.resolve(null)
+
+      const [positions, account, scanResult, signalStats, ftData] = await Promise.all([
         (tools.cryptoGetPositions as any).execute({}),
         (tools.cryptoGetAccount as any).execute({}),
         runStrategyScan([...CRYPTO_ALLOWED_SYMBOLS]).catch((err: unknown) => {
@@ -364,6 +369,7 @@ async function main() {
           return null
         }),
         computeSignalStats().catch(() => null),
+        ftDataPromise,
       ])
 
       // Fetch funding rates for held positions
@@ -407,6 +413,61 @@ async function main() {
         ].join('\n')
       }
 
+      // Build Freqtrade bot status + NFI stats block
+      let freqtradeBlock = ''
+      if (ftData) {
+        const parts: string[] = []
+
+        // Bot config summary
+        if (ftData.botConfig) {
+          const cfg = ftData.botConfig
+          const openCount = positions?.positions?.length ?? 0
+          parts.push(
+            '',
+            '--- FREQTRADE BOT STATUS ---',
+            `Strategy: ${cfg.strategy || 'unknown'} | Timeframe: ${cfg.timeframe || '?'} | Mode: ${cfg.trading_mode || 'spot'} | Stoploss: ${cfg.stoploss != null ? (cfg.stoploss * 100).toFixed(1) + '%' : '?'}`,
+            `Max Open Trades: ${cfg.max_open_trades ?? '?'} (current: ${openCount}) | State: ${cfg.state || 'running'} | Dry Run: ${cfg.dry_run}`,
+          )
+        }
+
+        // NFI entry tag performance
+        if (ftData.entryStats && Array.isArray(ftData.entryStats)) {
+          parts.push('', '--- NFI ENTRY SIGNAL PERFORMANCE ---')
+          for (const tag of ftData.entryStats) {
+            const winRate = tag.trades > 0 ? ((tag.wins / tag.trades) * 100).toFixed(0) : '0'
+            const flag = tag.trades >= 10 && (tag.wins / tag.trades) < 0.4 ? ' ← UNDERPERFORMING' : ''
+            parts.push(
+              `Tag "${tag.enter_tag}": ${tag.trades} trades, ${tag.wins} wins, winRate=${winRate}%, avgProfit=${tag.profit_mean != null ? (tag.profit_mean > 0 ? '+' : '') + (tag.profit_mean * 100).toFixed(1) + '%' : 'N/A'}${flag}`
+            )
+          }
+        }
+
+        // NFI exit reason distribution
+        if (ftData.exitStats && Array.isArray(ftData.exitStats)) {
+          const totalExits = ftData.exitStats.reduce((s: number, e: any) => s + (e.trades || 0), 0)
+          parts.push('', '--- NFI EXIT REASON DISTRIBUTION ---')
+          for (const reason of ftData.exitStats) {
+            const pct = totalExits > 0 ? ((reason.trades / totalExits) * 100).toFixed(0) : '0'
+            parts.push(
+              `${reason.exit_reason}: ${reason.trades} trades (${pct}%), avg profit=${reason.profit_mean != null ? (reason.profit_mean > 0 ? '+' : '') + (reason.profit_mean * 100).toFixed(1) + '%' : 'N/A'}`
+            )
+          }
+        }
+
+        // Pending orders
+        parts.push('', '--- PENDING ORDERS ---')
+        if (ftData.pendingOrders && ftData.pendingOrders.length > 0) {
+          for (const order of ftData.pendingOrders) {
+            const age = order.createdAt ? `(placed ${Math.round((Date.now() - new Date(order.createdAt).getTime()) / 60000)}m ago)` : ''
+            parts.push(`${order.symbol}: ${order.side} ${order.type} ${order.size} @ $${order.price ?? 'market'} ${age}`)
+          }
+        } else {
+          parts.push('(no pending orders)')
+        }
+
+        freqtradeBlock = parts.join('\n')
+      }
+
       liveDataBlock = [
         '',
         '--- LIVE TRADING DATA (pre-fetched, current as of this heartbeat) ---',
@@ -423,6 +484,7 @@ async function main() {
         Object.keys(funding).length > 0
           ? JSON.stringify(funding, null, 2)
           : '(none)',
+        freqtradeBlock,
         strategyBlock,
         statsBlock,
         '',

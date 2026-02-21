@@ -345,6 +345,9 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         grindCount: Math.max(0, (trade.filled_entry_orders ?? 1) - 1),  // first entry doesn't count as grind
         partialExitCount: trade.filled_exit_orders || 0,
         profitRatio: trade.profit_ratio,
+        stopLossPrice: trade.stop_loss_abs || undefined,
+        stopLossDistance: trade.stoploss_current_dist_ratio || undefined,
+        fundingFees: trade.funding_fees || undefined,
       });
     }
 
@@ -629,6 +632,27 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
 
   async deleteLock(lockId: number): Promise<void> {
     await this.delete(`/api/v1/locks/${lockId}`);
+  }
+
+  // ==================== Heartbeat Data ====================
+
+  /**
+   * Bundle Freqtrade-specific data for heartbeat injection.
+   * Returns entry/exit tag stats, bot config, and pending orders in one call.
+   */
+  async getHeartbeatData(): Promise<{
+    entryStats: any;
+    exitStats: any;
+    botConfig: FreqtradeShowConfigResponse;
+    pendingOrders: CryptoOrder[];
+  }> {
+    const [entryStats, exitStats, botConfig, pendingOrders] = await Promise.all([
+      this.getEntryStats().catch(() => null),
+      this.getExitStats().catch(() => null),
+      this.fetchShowConfig().catch(() => null),
+      this.getOpenOrders().catch(() => []),
+    ]);
+    return { entryStats, exitStats, botConfig: botConfig!, pendingOrders };
   }
 
   // ==================== Strategy Stats ====================
