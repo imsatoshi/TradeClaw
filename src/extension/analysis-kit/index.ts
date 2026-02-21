@@ -14,4 +14,6 @@ export { fetchRealtimeData } from './data/DotApiClient';
 export { fetchExchangeOHLCV } from './data/ExchangeClient';
 export { fetchFundingRates } from './data/FundingRateClient';
 export { runStrategyScan } from './tools/strategy-scanner/index';
+export { detectMarketRegime } from './tools/strategy-scanner/index';
+export type { MarketRegime } from './tools/strategy-scanner/index';
 export type { StrategySignal, ScanResult, FundingRateInfo } from './tools/strategy-scanner/index';
