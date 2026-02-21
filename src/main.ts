@@ -459,6 +459,17 @@ async function main() {
       if (ftData) {
         const parts: string[] = []
 
+        // Health status (ping + last process check)
+        if (ftData.health) {
+          const h = ftData.health
+          const icon = h.status === 'ok' ? '✅' : h.status === 'degraded' ? '⚠️' : '🔴'
+          parts.push(
+            '',
+            '--- FREQTRADE HEALTH ---',
+            `${icon} Status: ${h.status.toUpperCase()} — ${h.details}`,
+          )
+        }
+
         // Bot config summary
         if (ftData.botConfig) {
           const cfg = ftData.botConfig

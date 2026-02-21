@@ -61,6 +61,16 @@
 - Compare NFI tag stats with custom scanner stats for high-confidence trade decisions
 - When both custom scanner AND NFI agree on direction, confidence is highest
 
+## Freqtrade Health Monitor
+- Health status is AUTO-INJECTED in LIVE DATA above (ping + last process timestamp)
+- Status levels:
+  → ✅ OK: Freqtrade processing candles normally (< 5m ago)
+  → ⚠️ DEGRADED: Last candle processed > 5m ago, or health endpoint failed (possible Binance network issue)
+  → 🔴 DOWN: Freqtrade API unreachable (service crashed or network down)
+- If DEGRADED: alert user with details, suggest checking Freqtrade logs (`journalctl -u freqtrade -n 50`)
+- If DOWN: urgent alert — NFI cannot trade, positions are unmanaged
+- Do NOT attempt to restart Freqtrade — only alert the user for manual intervention
+
 ## Pending Orders
 - Pending limit orders (unfilled) are shown in LIVE DATA above
 - Check if stale orders should be cancelled (older than 4 hours and far from market price)
