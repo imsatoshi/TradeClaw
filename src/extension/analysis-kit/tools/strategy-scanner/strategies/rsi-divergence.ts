@@ -38,6 +38,8 @@ export function scanRsiDivergence(symbol: string, bars: MarketData[]): StrategyS
   const av = alignedVolumes.slice(0, len)
 
   const atr = ATR(highs, lows, closes, ATR_PERIOD)
+  if (!atr || atr <= 0) return []
+
   const currentClose = closes[closes.length - 1]
 
   const signals: StrategySignal[] = []

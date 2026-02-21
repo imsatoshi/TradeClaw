@@ -26,7 +26,10 @@ export async function fetchFundingRates(
 
       try {
         const res = await fetch(url)
-        if (!res.ok) return
+        if (!res.ok) {
+          console.warn(`FundingRateClient: HTTP ${res.status} for ${symbol}`)
+          return
+        }
 
         const data = await res.json() as {
           symbol: string
@@ -46,8 +49,8 @@ export async function fetchFundingRates(
           nextFundingTime: data.nextFundingTime,
           nextFundingTimeISO: new Date(data.nextFundingTime).toISOString(),
         }
-      } catch {
-        // Skip failed symbols silently
+      } catch (err) {
+        console.warn(`FundingRateClient: fetch failed for ${symbol}:`, err instanceof Error ? err.message : err)
       }
     })
 

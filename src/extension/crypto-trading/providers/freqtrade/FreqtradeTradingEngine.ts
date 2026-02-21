@@ -27,9 +27,6 @@ import type {
 } from './types.js';
 import { CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols } from '../../interfaces.js';
 
-// Store original proxy settings to restore later
-let originalNoProxy: string | undefined;
-
 export interface FreqtradeEngineConfig {
   /** Freqtrade API URL (e.g., http://localhost:8080) */
   url: string;
@@ -49,6 +46,14 @@ export interface FreqtradeEngineConfig {
 function normalizePair(pair: string): string {
   const colonIdx = pair.indexOf(':');
   return colonIdx > 0 ? pair.slice(0, colonIdx) : pair;
+}
+
+/**
+ * Validate that a pair is a proper tradeable symbol (ASCII base/quote only).
+ * Filters out garbled entries like "币安人生/USDT" that appear in some VolumePairList results.
+ */
+function isValidPair(pair: string): boolean {
+  return /^[A-Z0-9]+\/[A-Z0-9]+$/.test(pair);
 }
 
 
@@ -100,9 +105,9 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     this.tradingMode = showConfig.trading_mode || 'spot';
 
     // Fetch whitelist from Freqtrade and sync with OpenAlice
-    // Normalize futures format: "ZEC/USDT:USDT" → "ZEC/USDT"
+    // Normalize futures format: "ZEC/USDT:USDT" → "ZEC/USDT", then filter garbled entries
     const rawWhitelist = await this.fetchWhitelist();
-    const whitelist = rawWhitelist.map(normalizePair);
+    const whitelist = rawWhitelist.map(normalizePair).filter(isValidPair);
     if (whitelist.length > 0) {
       initCryptoAllowedSymbols(whitelist);
       console.log(`freqtrade: synced ${whitelist.length} pairs from whitelist: ${whitelist.join(', ')}`);
@@ -124,13 +129,19 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
   async placeOrder(order: CryptoPlaceOrderRequest, _currentTime?: Date): Promise<CryptoOrderResult> {
     this.ensureInit();
 
+    // Normalize input symbol (handles both "ICP/USDT" and "ICP/USDT:USDT" formats)
+    const normalizedSymbol = normalizePair(order.symbol);
+
     // Check if symbol is allowed (using Freqtrade's whitelist)
-    if (!CRYPTO_ALLOWED_SYMBOLS.includes(order.symbol)) {
+    if (!CRYPTO_ALLOWED_SYMBOLS.includes(normalizedSymbol)) {
       return {
         success: false,
         error: `Symbol ${order.symbol} is not in Freqtrade whitelist`,
       };
     }
+
+    // Use normalized symbol for all subsequent operations
+    order = { ...order, symbol: normalizedSymbol };
 
     // reduceOnly orders → route to forceexit (close/take-profit)
     if (order.reduceOnly) {
@@ -169,6 +180,10 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     // Map buy/sell → long/short for Freqtrade forceenter API
     const ftSide: 'long' | 'short' = order.side === 'buy' ? 'long' : 'short';
 
+    if (order.type === 'limit' && !order.price) {
+      return { success: false, error: 'price is required for limit orders' };
+    }
+
     const payload: FreqtradeOrderRequest = {
       pair: freqtradeSymbol,
       side: ftSide,
@@ -176,7 +191,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       stakeamount: stakeAmount,
     };
 
-    if (order.type === 'limit' && order.price) {
+    if (order.price) {
       payload.price = order.price;
     }
 
@@ -301,7 +316,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         unrealizedPnL: trade.profit_abs,
         positionValue: trade.amount * currentPrice,
         enterTag: trade.enter_tag,
-        grindCount: (trade.filled_entry_orders || 1) - 1,  // first entry doesn't count as grind
+        grindCount: Math.max(0, (trade.filled_entry_orders ?? 1) - 1),  // first entry doesn't count as grind
         partialExitCount: trade.filled_exit_orders || 0,
         profitRatio: trade.profit_ratio,
       });
@@ -372,8 +387,8 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     try {
       const profit = await this.get<{ profit_closed_coin: number }>('/api/v1/profit');
       realizedPnL = profit.profit_closed_coin;
-    } catch {
-      // Profit endpoint might not be available
+    } catch (err) {
+      console.warn('freqtrade: profit endpoint unavailable:', err instanceof Error ? err.message : err);
     }
 
     return {
@@ -466,7 +481,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     this.whitelistRefreshing = true;
     this.fetchWhitelist()
       .then((raw) => {
-        const whitelist = raw.map(normalizePair);
+        const whitelist = raw.map(normalizePair).filter(isValidPair);
         if (whitelist.length > 0) {
           const prev = [...CRYPTO_ALLOWED_SYMBOLS];
           initCryptoAllowedSymbols(whitelist);
@@ -635,16 +650,21 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     }
   }
 
-  private disableProxy(): void {
-    originalNoProxy = process.env.NO_PROXY;
+  /**
+   * Execute fn with NO_PROXY=* to bypass any system proxy for localhost requests.
+   * Uses a local saved value so concurrent in-flight requests don't corrupt each other.
+   */
+  private async withProxyDisabled<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.NO_PROXY;
     process.env.NO_PROXY = '*';
-  }
-
-  private restoreProxy(): void {
-    if (originalNoProxy !== undefined) {
-      process.env.NO_PROXY = originalNoProxy;
-    } else {
-      delete process.env.NO_PROXY;
+    try {
+      return await fn();
+    } finally {
+      if (saved !== undefined) {
+        process.env.NO_PROXY = saved;
+      } else {
+        delete process.env.NO_PROXY;
+      }
     }
   }
 
@@ -662,36 +682,28 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
   }
 
   private async get<T>(path: string): Promise<T> {
-    return this.withRetry(async () => {
-      const url = `${this.config.url}${path}`;
-      this.disableProxy();
-      try {
-        const response = await fetch(url, {
+    return this.withRetry(() =>
+      this.withProxyDisabled(async () => {
+        const response = await fetch(`${this.config.url}${path}`, {
           method: 'GET',
           headers: {
             'Authorization': this.authHeader,
             'Content-Type': 'application/json',
           },
         });
-
         if (!response.ok) {
           const text = await response.text();
           throw new Error(`Freqtrade API error ${response.status}: ${text}`);
         }
-
         return response.json() as Promise<T>;
-      } finally {
-        this.restoreProxy();
-      }
-    });
+      })
+    );
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    return this.withRetry(async () => {
-      const url = `${this.config.url}${path}`;
-      this.disableProxy();
-      try {
-        const response = await fetch(url, {
+    return this.withRetry(() =>
+      this.withProxyDisabled(async () => {
+        const response = await fetch(`${this.config.url}${path}`, {
           method: 'POST',
           headers: {
             'Authorization': this.authHeader,
@@ -699,25 +711,19 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
           },
           body: JSON.stringify(body),
         });
-
         if (!response.ok) {
           const text = await response.text();
           throw new Error(`Freqtrade API error ${response.status}: ${text}`);
         }
-
         return response.json() as Promise<T>;
-      } finally {
-        this.restoreProxy();
-      }
-    });
+      })
+    );
   }
 
   private async deleteWithBody<T>(path: string, body: unknown): Promise<T> {
-    return this.withRetry(async () => {
-      const url = `${this.config.url}${path}`;
-      this.disableProxy();
-      try {
-        const response = await fetch(url, {
+    return this.withRetry(() =>
+      this.withProxyDisabled(async () => {
+        const response = await fetch(`${this.config.url}${path}`, {
           method: 'DELETE',
           headers: {
             'Authorization': this.authHeader,
@@ -725,39 +731,30 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
           },
           body: JSON.stringify(body),
         });
-
         if (!response.ok) {
           const text = await response.text();
           throw new Error(`Freqtrade API error ${response.status}: ${text}`);
         }
-
         return response.json() as Promise<T>;
-      } finally {
-        this.restoreProxy();
-      }
-    });
+      })
+    );
   }
 
   private async delete(path: string): Promise<void> {
-    return this.withRetry(async () => {
-      const url = `${this.config.url}${path}`;
-      this.disableProxy();
-      try {
-        const response = await fetch(url, {
+    return this.withRetry(() =>
+      this.withProxyDisabled(async () => {
+        const response = await fetch(`${this.config.url}${path}`, {
           method: 'DELETE',
           headers: {
             'Authorization': this.authHeader,
             'Content-Type': 'application/json',
           },
         });
-
         if (!response.ok) {
           const text = await response.text();
           throw new Error(`Freqtrade API error ${response.status}: ${text}`);
         }
-      } finally {
-        this.restoreProxy();
-      }
-    });
+      })
+    );
   }
 }

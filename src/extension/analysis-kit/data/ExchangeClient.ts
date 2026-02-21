@@ -40,7 +40,10 @@ export async function fetchExchangeOHLCV(
 
       try {
         const res = await fetch(url)
-        if (!res.ok) return
+        if (!res.ok) {
+          console.warn(`ExchangeClient: HTTP ${res.status} for ${symbol} (${timeframe})`)
+          return
+        }
 
         const klines = (await res.json()) as number[][]
         result[symbol] = klines.map((k) => ({
@@ -52,8 +55,8 @@ export async function fetchExchangeOHLCV(
           close: Number(k[4]),
           volume: Number(k[5]),
         }))
-      } catch {
-        // Skip failed symbols silently
+      } catch (err) {
+        console.warn(`ExchangeClient: fetch failed for ${symbol}:`, err instanceof Error ? err.message : err)
       }
     })
 
