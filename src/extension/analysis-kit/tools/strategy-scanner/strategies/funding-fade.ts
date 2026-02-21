@@ -1,9 +1,10 @@
 /**
  * Funding Rate Fade (contrarian) strategy
  *
- * Contrarian strategy — trade against extreme funding rates confirmed by RSI:
- * - High positive funding (> 0.10%/8h) + RSI > 70 → short signal
- * - Very negative funding (< -0.05%) + RSI < 30 → long signal
+ * Contrarian strategy — trade against extreme funding rates:
+ * - High positive funding (> 0.08%/8h) → short signal
+ * - Very negative funding (< -0.04%/8h) → long signal
+ * - RSI is used as a bonus/upgrade factor, not a hard requirement
  */
 
 import type { MarketData } from '../../../data/interfaces.js'
@@ -21,16 +22,16 @@ export async function scanFundingFade(
 
   const RSI_PERIOD = p.rsiPeriod ?? 14
   const ATR_PERIOD = p.atrPeriod ?? 14
-  const FUNDING_HIGH = p.fundingHigh ?? 0.001
-  const FUNDING_VERY_HIGH = p.fundingVeryHigh ?? 0.002
-  const FUNDING_LOW = p.fundingLow ?? -0.0005
-  const FUNDING_VERY_LOW = p.fundingVeryLow ?? -0.001
+  const FUNDING_HIGH = p.fundingHigh ?? 0.0008        // 0.08%/8h (relaxed from 0.10%)
+  const FUNDING_VERY_HIGH = p.fundingVeryHigh ?? 0.0015 // 0.15%/8h
+  const FUNDING_LOW = p.fundingLow ?? -0.0004          // -0.04%/8h (relaxed from -0.05%)
+  const FUNDING_VERY_LOW = p.fundingVeryLow ?? -0.0008  // -0.08%/8h
   const OVERBOUGHT = p.overboughtThreshold ?? 70
   const OVERSOLD = p.oversoldThreshold ?? 30
   const SL_MULT = p.slMultiplier ?? 2
   const TP_MULT = p.tpMultiplier ?? 3
   const STRONG_CONF = p.strongConfidence ?? 75
-  const MOD_CONF = p.moderateConfidence ?? 60
+  const MOD_CONF = p.moderateConfidence ?? 55
 
   if (bars.length < RSI_PERIOD + ATR_PERIOD + 2) return []
 
@@ -45,15 +46,17 @@ export async function scanFundingFade(
 
   const signals: StrategySignal[] = []
 
-  // --- Short: extreme positive funding + overbought RSI ---
-  if (rate > FUNDING_HIGH && rsi > OVERBOUGHT) {
+  // --- Short: extreme positive funding (RSI no longer required, used as upgrade) ---
+  if (rate > FUNDING_HIGH) {
     const sl = currentClose + SL_MULT * atr
     const tp = currentClose - TP_MULT * atr
     const rr = (currentClose - tp) / (sl - currentClose)
 
     const isVeryExtreme = rate > FUNDING_VERY_HIGH
-    const strength = isVeryExtreme ? 'strong' : 'moderate'
-    const confidence = isVeryExtreme ? STRONG_CONF : MOD_CONF
+    const rsiConfirms = rsi > OVERBOUGHT
+    const isStrong = isVeryExtreme || rsiConfirms
+    const strength = isStrong ? 'strong' : 'moderate'
+    const confidence = isStrong ? STRONG_CONF : MOD_CONF
 
     signals.push({
       strategy: 'funding_fade',
@@ -70,23 +73,26 @@ export async function scanFundingFade(
         fundingRate: rate,
         fundingRatePercent: fundingRate.fundingRatePercent,
         rsi: Math.round(rsi * 100) / 100,
+        rsiConfirms: rsiConfirms ? 'yes' : 'no',
         atr: Math.round(atr * 100) / 100,
         markPrice: fundingRate.markPrice,
         nextFunding: fundingRate.nextFundingTimeISO,
       },
-      reason: `Funding fade SHORT: extreme positive funding ${fundingRate.fundingRatePercent}/8h with RSI ${rsi.toFixed(1)} (overbought). Crowd over-leveraged long.`,
+      reason: `Funding fade SHORT: extreme positive funding ${fundingRate.fundingRatePercent}/8h${rsiConfirms ? ` + RSI ${rsi.toFixed(1)} overbought` : `, RSI ${rsi.toFixed(1)}`}. Crowd over-leveraged long.`,
     })
   }
 
-  // --- Long: extreme negative funding + oversold RSI ---
-  if (rate < FUNDING_LOW && rsi < OVERSOLD) {
+  // --- Long: extreme negative funding (RSI no longer required, used as upgrade) ---
+  if (rate < FUNDING_LOW) {
     const sl = currentClose - SL_MULT * atr
     const tp = currentClose + TP_MULT * atr
     const rr = (tp - currentClose) / (currentClose - sl)
 
     const isVeryExtreme = rate < FUNDING_VERY_LOW
-    const strength = isVeryExtreme ? 'strong' : 'moderate'
-    const confidence = isVeryExtreme ? STRONG_CONF : MOD_CONF
+    const rsiConfirms = rsi < OVERSOLD
+    const isStrong = isVeryExtreme || rsiConfirms
+    const strength = isStrong ? 'strong' : 'moderate'
+    const confidence = isStrong ? STRONG_CONF : MOD_CONF
 
     signals.push({
       strategy: 'funding_fade',
@@ -103,11 +109,12 @@ export async function scanFundingFade(
         fundingRate: rate,
         fundingRatePercent: fundingRate.fundingRatePercent,
         rsi: Math.round(rsi * 100) / 100,
+        rsiConfirms: rsiConfirms ? 'yes' : 'no',
         atr: Math.round(atr * 100) / 100,
         markPrice: fundingRate.markPrice,
         nextFunding: fundingRate.nextFundingTimeISO,
       },
-      reason: `Funding fade LONG: extreme negative funding ${fundingRate.fundingRatePercent}/8h with RSI ${rsi.toFixed(1)} (oversold). Crowd over-leveraged short.`,
+      reason: `Funding fade LONG: extreme negative funding ${fundingRate.fundingRatePercent}/8h${rsiConfirms ? ` + RSI ${rsi.toFixed(1)} oversold` : `, RSI ${rsi.toFixed(1)}`}. Crowd over-leveraged short.`,
     })
   }
 

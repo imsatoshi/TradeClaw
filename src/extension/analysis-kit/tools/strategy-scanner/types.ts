@@ -1,6 +1,6 @@
 export type SignalDirection = 'long' | 'short'
 export type SignalStrength = 'strong' | 'moderate' | 'weak'
-export type StrategyName = 'rsi_divergence' | 'bollinger_squeeze' | 'funding_fade'
+export type StrategyName = 'rsi_divergence' | 'ema_trend' | 'breakout_volume' | 'funding_fade'
 
 export interface StrategySignal {
   strategy: StrategyName

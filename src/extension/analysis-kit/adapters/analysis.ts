@@ -436,10 +436,11 @@ Example use cases:
       description: `
 Scan all whitelisted trading pairs for active strategy signals in one call.
 
-Runs three strategies on 4H candlestick data fetched automatically from Binance:
+Runs four strategies on 4H candlestick data fetched automatically from Binance:
 1. RSI Divergence + Volume Exhaustion (mean-reversion, ~60-65% win rate)
-2. Bollinger Band Squeeze + MACD Crossover (breakout, ~55% win rate)
-3. Funding Rate Fade + RSI Confirmation (contrarian, uses funding rate extremes)
+2. EMA Trend Momentum (trend-following, EMA9/21/55 alignment + RSI filter)
+3. N-Period Breakout + Volume Confirmation (breakout, price exceeds N-bar high/low)
+4. Funding Rate Fade (contrarian, extreme funding rates)
 
 Returns structured signals sorted by confidence (highest first), plus session info.
 

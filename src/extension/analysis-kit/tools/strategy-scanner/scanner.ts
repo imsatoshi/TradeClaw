@@ -12,7 +12,8 @@ import type { MarketData } from '../../data/interfaces.js'
 import { fetchExchangeOHLCV } from '../../data/ExchangeClient.js'
 import { fetchFundingRates } from '../../data/FundingRateClient.js'
 import { scanRsiDivergence } from './strategies/rsi-divergence.js'
-import { scanBollingerSqueeze } from './strategies/bollinger-squeeze.js'
+import { scanEmaTrend } from './strategies/ema-trend.js'
+import { scanBreakoutVolume } from './strategies/breakout-volume.js'
 import { scanFundingFade } from './strategies/funding-fade.js'
 import { appendSignalLog } from './signal-log.js'
 import { getStrategyParams } from './config.js'
@@ -135,7 +136,7 @@ function getSessionInfo(): SessionInfo {
   if (hourUTC >= 0 && hourUTC < 8) {
     return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'asian', note: 'Asian session: low volume. Funding fade signals most relevant.' }
   } else if (hourUTC >= 8 && hourUTC < 12) {
-    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'london', note: 'London open: good for Bollinger Squeeze breakouts.' }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'london', note: 'London open: good for breakout and trend signals.' }
   } else if (hourUTC >= 12 && hourUTC < 16) {
     return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny_overlap', note: 'NY/London overlap: best liquidity, all strategies valid.' }
   } else if (hourUTC >= 16 && hourUTC < 21) {
@@ -203,9 +204,15 @@ export async function runStrategyScan(
     }
 
     try {
-      symbolSignals.push(...await scanBollingerSqueeze(symbol, bars4h))
+      symbolSignals.push(...await scanEmaTrend(symbol, bars4h))
     } catch (err) {
-      errors.push(`${symbol} Bollinger squeeze error: ${String(err)}`)
+      errors.push(`${symbol} EMA trend error: ${String(err)}`)
+    }
+
+    try {
+      symbolSignals.push(...await scanBreakoutVolume(symbol, bars4h))
+    } catch (err) {
+      errors.push(`${symbol} breakout volume error: ${String(err)}`)
     }
 
     const funding = rates[symbol]

@@ -152,9 +152,9 @@ export function macdHistogramSeries(
 }
 
 /**
- * Internal: compute EMA for every bar, returning series of length (data.length - period + 1).
+ * Compute EMA for every bar, returning series of length (data.length - period + 1).
  */
-function emaSeries(data: number[], period: number): number[] {
+export function emaSeries(data: number[], period: number): number[] {
   if (data.length < period) return []
 
   const result: number[] = []
