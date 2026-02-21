@@ -9,11 +9,11 @@
 
 import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
-import { RSI, ATR } from '../../indicators/functions/technical.js'
-import { emaSeries, sma } from '../helpers.js'
+import { RSI } from '../../indicators/functions/technical.js'
+import { emaSeries, sma, atrSeries } from '../helpers.js'
 import { getStrategyParams } from '../config.js'
 
-export async function scanEmaTrend(symbol: string, bars: MarketData[]): Promise<StrategySignal[]> {
+export async function scanEmaTrend(symbol: string, bars: MarketData[], bars15m?: MarketData[]): Promise<StrategySignal[]> {
   const config = await getStrategyParams()
   const p = config.ema_trend ?? {}
 
@@ -65,7 +65,14 @@ export async function scanEmaTrend(symbol: string, bars: MarketData[]): Promise<
   if (!bullishAlignment && !bearishAlignment) return []
 
   const rsi = RSI(closes, RSI_PERIOD)
-  const atr = ATR(highs, lows, closes, ATR_PERIOD)
+
+  // SL/TP uses 15m ATR when available (tighter, more appropriate for 15m execution)
+  const slTpBars = bars15m && bars15m.length >= ATR_PERIOD + 2 ? bars15m : bars
+  const slTpHighs = slTpBars.map(b => b.high)
+  const slTpLows = slTpBars.map(b => b.low)
+  const slTpCloses = slTpBars.map(b => b.close)
+  const atrArr = atrSeries(slTpHighs, slTpLows, slTpCloses, ATR_PERIOD)
+  const atr = atrArr[atrArr.length - 1]
   if (!atr || atr <= 0) return []
 
   const currentClose = closes[closes.length - 1]
@@ -136,6 +143,7 @@ export async function scanEmaTrend(symbol: string, bars: MarketData[]): Promise<
       rsi: Math.round(rsi * 100) / 100,
       volumeRatio: Math.round(volumeRatio * 100) / 100,
       atr: Math.round(atr * 100) / 100,
+      slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
     },
     reason: `EMA trend ${direction.toUpperCase()}: EMA${EMA_FAST}(${emaFastVal.toFixed(2)}) ${bullishAlignment ? '>' : '<'} EMA${EMA_MID}(${emaMidVal.toFixed(2)}) ${bullishAlignment ? '>' : '<'} EMA${EMA_SLOW}(${emaSlowVal.toFixed(2)}), RSI ${rsi.toFixed(1)}, vol ${volumeRatio.toFixed(1)}x avg`,
   }]

@@ -9,13 +9,15 @@
 
 import type { MarketData } from '../../../data/interfaces.js'
 import type { FundingRateInfo, StrategySignal } from '../types.js'
-import { RSI, ATR } from '../../indicators/functions/technical.js'
+import { RSI } from '../../indicators/functions/technical.js'
+import { atrSeries } from '../helpers.js'
 import { getStrategyParams } from '../config.js'
 
 export async function scanFundingFade(
   symbol: string,
   bars: MarketData[],
   fundingRate: FundingRateInfo,
+  bars15m?: MarketData[],
 ): Promise<StrategySignal[]> {
   const config = await getStrategyParams()
   const p = config.funding_fade ?? {}
@@ -40,7 +42,15 @@ export async function scanFundingFade(
   const lows = bars.map(b => b.low)
 
   const rsi = RSI(closes, RSI_PERIOD)
-  const atr = ATR(highs, lows, closes, ATR_PERIOD)
+
+  // SL/TP uses 15m ATR when available (tighter, more appropriate for 15m execution)
+  const slTpBars = bars15m && bars15m.length >= ATR_PERIOD + 2 ? bars15m : bars
+  const slTpHighs = slTpBars.map(b => b.high)
+  const slTpLows = slTpBars.map(b => b.low)
+  const slTpCloses = slTpBars.map(b => b.close)
+  const atrArr = atrSeries(slTpHighs, slTpLows, slTpCloses, ATR_PERIOD)
+  const atr = atrArr[atrArr.length - 1]
+
   const currentClose = closes[closes.length - 1]
   const rate = fundingRate.fundingRate
 
@@ -75,6 +85,7 @@ export async function scanFundingFade(
         rsi: Math.round(rsi * 100) / 100,
         rsiConfirms: rsiConfirms ? 'yes' : 'no',
         atr: Math.round(atr * 100) / 100,
+        slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
         markPrice: fundingRate.markPrice,
         nextFunding: fundingRate.nextFundingTimeISO,
       },
@@ -111,6 +122,7 @@ export async function scanFundingFade(
         rsi: Math.round(rsi * 100) / 100,
         rsiConfirms: rsiConfirms ? 'yes' : 'no',
         atr: Math.round(atr * 100) / 100,
+        slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
         markPrice: fundingRate.markPrice,
         nextFunding: fundingRate.nextFundingTimeISO,
       },

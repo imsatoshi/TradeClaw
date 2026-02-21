@@ -23,8 +23,10 @@ const log = createLogger('scanner')
 
 const TIMEFRAME_4H = '4h'
 const TIMEFRAME_1H = '1h'
+const TIMEFRAME_15M = '15m'
 const CANDLE_LIMIT_4H = 60   // ~10 days of 4H data
 const CANDLE_LIMIT_1H = 40   // ~2 days, enough for SMA20 trend
+const CANDLE_LIMIT_15M = 100 // ~25 hours of 15m data
 
 // ==================== OHLCV Cache ====================
 
@@ -172,14 +174,18 @@ export async function runStrategyScan(
 
   log.info('scan started', { symbols: symbols.length })
 
-  // Fetch 4H, 1H, and funding rates concurrently (4H and 1H both use cache)
-  const [ohlcv4h, ohlcv1h, rates] = await Promise.all([
+  // Fetch 4H, 1H, 15m, and funding rates concurrently (all use cache)
+  const [ohlcv4h, ohlcv1h, ohlcv15m, rates] = await Promise.all([
     fetchWithCache(symbols, TIMEFRAME_4H, CANDLE_LIMIT_4H).catch((err) => {
       errors.push(`4H OHLCV fetch failed: ${String(err)}`)
       return {} as Record<string, MarketData[]>
     }),
     fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
       log.warn('1H OHLCV fetch failed — MTF filter disabled', { error: String(err) })
+      return {} as Record<string, MarketData[]>
+    }),
+    fetchWithCache(symbols, TIMEFRAME_15M, CANDLE_LIMIT_15M).catch((err) => {
+      log.warn('15m OHLCV fetch failed — SL/TP will fall back to 4H ATR', { error: String(err) })
       return {} as Record<string, MarketData[]>
     }),
     fundingRates !== undefined
@@ -195,22 +201,23 @@ export async function runStrategyScan(
       continue
     }
 
+    const bars15m = ohlcv15m[symbol]
     const symbolSignals: StrategySignal[] = []
 
     try {
-      symbolSignals.push(...await scanRsiDivergence(symbol, bars4h))
+      symbolSignals.push(...await scanRsiDivergence(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} RSI divergence error: ${String(err)}`)
     }
 
     try {
-      symbolSignals.push(...await scanEmaTrend(symbol, bars4h))
+      symbolSignals.push(...await scanEmaTrend(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} EMA trend error: ${String(err)}`)
     }
 
     try {
-      symbolSignals.push(...await scanBreakoutVolume(symbol, bars4h))
+      symbolSignals.push(...await scanBreakoutVolume(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} breakout volume error: ${String(err)}`)
     }
@@ -218,7 +225,7 @@ export async function runStrategyScan(
     const funding = rates[symbol]
     if (funding) {
       try {
-        symbolSignals.push(...await scanFundingFade(symbol, bars4h, funding))
+        symbolSignals.push(...await scanFundingFade(symbol, bars4h, funding, bars15m))
       } catch (err) {
         errors.push(`${symbol} funding fade error: ${String(err)}`)
       }
@@ -251,7 +258,7 @@ export async function runStrategyScan(
   return {
     scannedAt,
     symbols,
-    timeframe: TIMEFRAME_4H,
+    timeframe: '4h+15m',
     signals: allSignals,
     errors,
     sessionInfo: getSessionInfo(),

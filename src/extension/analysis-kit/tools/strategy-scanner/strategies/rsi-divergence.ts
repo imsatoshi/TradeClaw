@@ -8,11 +8,10 @@
 
 import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
-import { ATR } from '../../indicators/functions/technical.js'
-import { rsiSeries, findSwingLows, findSwingHighs } from '../helpers.js'
+import { rsiSeries, findSwingLows, findSwingHighs, atrSeries } from '../helpers.js'
 import { getStrategyParams } from '../config.js'
 
-export async function scanRsiDivergence(symbol: string, bars: MarketData[]): Promise<StrategySignal[]> {
+export async function scanRsiDivergence(symbol: string, bars: MarketData[], bars15m?: MarketData[]): Promise<StrategySignal[]> {
   const config = await getStrategyParams()
   const p = config.rsi_divergence ?? {}
 
@@ -48,7 +47,13 @@ export async function scanRsiDivergence(symbol: string, bars: MarketData[]): Pro
   const rv = rsi.slice(0, len)
   const av = alignedVolumes.slice(0, len)
 
-  const atr = ATR(highs, lows, closes, ATR_PERIOD)
+  // SL/TP uses 15m ATR when available (tighter, more appropriate for 15m execution)
+  const slTpBars = bars15m && bars15m.length >= ATR_PERIOD + 2 ? bars15m : bars
+  const slTpHighs = slTpBars.map(b => b.high)
+  const slTpLows = slTpBars.map(b => b.low)
+  const slTpCloses = slTpBars.map(b => b.close)
+  const atrArr = atrSeries(slTpHighs, slTpLows, slTpCloses, ATR_PERIOD)
+  const atr = atrArr[atrArr.length - 1]
   if (!atr || atr <= 0) return []
 
   const currentClose = closes[closes.length - 1]
@@ -93,6 +98,7 @@ export async function scanRsiDivergence(symbol: string, bars: MarketData[]): Pro
           latestSwingRSI: Math.round(latest.rsi * 100) / 100,
           volumeRatio: Math.round((latest.volume / prev.volume) * 100) / 100,
           atr: Math.round(atr * 100) / 100,
+          slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
         },
         reason: `Bullish RSI divergence: price lower low (${latest.price.toFixed(2)} vs ${prev.price.toFixed(2)}) but RSI higher low (${latest.rsi.toFixed(1)} vs ${prev.rsi.toFixed(1)})${volumeExhaustion ? ' with volume exhaustion' : ''}`,
       })
@@ -137,6 +143,7 @@ export async function scanRsiDivergence(symbol: string, bars: MarketData[]): Pro
           latestSwingRSI: Math.round(latest.rsi * 100) / 100,
           volumeRatio: Math.round((latest.volume / prev.volume) * 100) / 100,
           atr: Math.round(atr * 100) / 100,
+          slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
         },
         reason: `Bearish RSI divergence: price higher high (${latest.price.toFixed(2)} vs ${prev.price.toFixed(2)}) but RSI lower high (${latest.rsi.toFixed(1)} vs ${prev.rsi.toFixed(1)})${volumeExhaustion ? ' with volume exhaustion' : ''}`,
       })

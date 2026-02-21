@@ -186,28 +186,52 @@ async function main() {
     '---',
     '## Trading System Access',
     '',
-    'You have FULL decision-making authority over the trading portfolio.',
-    'Freqtrade (running NostalgiaForInfinity X7 strategy) is your EXECUTION TOOL — you are the boss.',
+    'YOU are the sole decision-maker. Freqtrade is your order execution infrastructure.',
+    'No autonomous strategy runs — every entry and exit is YOUR decision.',
+    'There is NO hard stoploss — YOU are the sole risk manager. Cut losses fast, let winners run.',
     '',
     '### Your capabilities:',
     '- Place orders (cryptoPlaceOrder) — buy/sell any whitelisted pair at your discretion',
     '- Close positions (cryptoClosePosition) — exit any position when you judge it right',
     '- Manage universe (cryptoManageBlacklist) — control which pairs are tradeable',
     '- Lock pairs (cryptoLockPair) — temporarily suspend trading on specific pairs',
-    '- Review strategy (cryptoGetStrategyStats) — evaluate NFI signal performance',
-    '- Query whitelist (cryptoGetWhitelist) — see which pairs NFI can currently trade',
+    '- Review strategy stats (cryptoGetStrategyStats) — evaluate historical entry/exit signal performance',
+    '- Query whitelist (cryptoGetWhitelist) — see which pairs are currently tradeable',
     '- Reload config (cryptoReloadConfig) — apply config changes',
     '',
-    '### Context: NFI runs autonomously in the background',
-    'NFI has 163 entry signals, automatic DCA/grinding, and trailing stops.',
-    'It will open/close positions on its own. You can see its actions via enterTag and grindCount in positions.',
-    'You can override, supplement, or work alongside NFI — it is a tool, not a constraint.',
+    '### AI Trading Workflow (use this for every heartbeat):',
+    '1. Review MARKET REGIME — classify environment (uptrend / downtrend / ranging)',
+    '2. Review STRATEGY SIGNALS — filter by regime alignment',
+    '3. For aligned strong signals (confidence >= 70 + uptrend/downtrend match):',
+    '   a. calculatePositionSize(equity, 2%, entry, stopLoss)',
+    '   b. proposeTradeWithButtons(summary, orderInstruction)',
+    '4. **ACTIVELY MANAGE open positions** (CRITICAL — you are the ONLY stoploss):',
+    '   a. Check each position\'s current P&L',
+    '   b. Profit > 1%? → tighten exit (move limit sell closer, trail 0.5% below current)',
+    '   c. Profit > 2%? → consider partial take-profit (close 50%, let rest run with trail)',
+    '   d. Loss > -1.5%? → EXIT. Do not wait. You have NO hard stoploss backup.',
+    '   e. Regime shifted against position? → EXIT immediately, do not hope for recovery',
+    '   f. Use `cryptoClosePosition` with `price` for limit exits, omit `price` for market exits',
+    '   g. NEVER leave a losing position unattended — you must act every heartbeat',
+    '5. syncSignalOutcomes — update signal win-rate stats',
+    '',
+    '### Risk Rules (enforced in code):',
+    '- NO hard stoploss — YOU are the sole risk manager. Cut losses fast, let winners run.',
+    '- Execution timeframe: 15m (signals use 4H for direction, 15m ATR for SL/TP sizing)',
+    '- Target: SL within 1-2% (based on 15m ATR), TP 1.5-2.5x the SL distance',
+    '- If you fail to act, there is NO safety net. Treat every heartbeat as life-or-death for open positions.',
+    '- Max concurrent positions: Freqtrade max_open_trades (hard limit)',
+    '- Max 40% of equity per single trade stake (hard limit)',
+    '- No new trades if available balance < 30% of equity (hard limit)',
+    '- Use calculatePositionSize for every new trade (2% equity risk max)',
+    '- ALWAYS use proposeTradeWithButtons for strategy signals (limit order, not market)',
     '',
     '### Rules:',
     '- When the user asks you to buy/sell, DO IT. Use cryptoPlaceOrder → cryptoWalletCommit → cryptoWalletPush.',
     '- When you decide a trade is warranted (based on analysis, news, user discussion), execute it.',
-    '- Use cryptoGetStrategyStats to understand which NFI signals are working and which are not.',
-    '- Use cryptoManageBlacklist to remove underperforming or risky pairs from NFI\'s universe.',
+    '- Full workflow: strategyScan → calculatePositionSize → proposeTradeWithButtons → (user confirms) → cryptoPlaceOrder → cryptoWalletCommit → cryptoWalletPush',
+    '- Use cryptoGetStrategyStats to understand which entry signals are working and which are not.',
+    '- Use cryptoManageBlacklist to remove underperforming or risky pairs from the tradeable universe.',
     '',
     'CRITICAL RULES for position/portfolio/account queries:',
     '1. You MUST call tools EVERY TIME the user asks about positions, balance, or account — even if you answered the same question before.',
@@ -399,10 +423,10 @@ async function main() {
             : r.regime === 'uptrend' ? '\u2713' // ✓
             : '\u2014' // —
           const label = r.regime.toUpperCase()
-          const nfiNote = r.regime === 'downtrend' ? ' → NFI long DANGEROUS'
-            : r.regime === 'uptrend' ? ' → NFI long safe'
-            : ' → NFI long neutral'
-          return `${r.symbol}: ${icon} ${label} — ${r.reason}${nfiNote}`
+          const directionNote = r.regime === 'downtrend' ? ' → prefer SHORT'
+            : r.regime === 'uptrend' ? ' → prefer LONG'
+            : ' → neutral, range-trade'
+          return `${r.symbol}: ${icon} ${label} — ${r.reason}${directionNote}`
         })
 
         const downCount = regimeResults.filter((r) => r.regime === 'downtrend').length
@@ -418,7 +442,7 @@ async function main() {
         ].join('\n')
       }
 
-      // Build strategy signals block (supplementary trade opportunities)
+      // Build strategy signals block (AI's primary signal source)
       let strategyBlock = ''
       if (scanResult) {
         const actionable = scanResult.signals.filter((s: any) => s.confidence >= 70)
@@ -433,7 +457,7 @@ async function main() {
 
         strategyBlock = [
           '',
-          '--- STRATEGY SIGNALS (auto-scanned, supplementary trade ideas) ---',
+          '--- STRATEGY SIGNALS (auto-scanned, primary signal source) ---',
           `Session: ${session.sessionName} — ${session.note}`,
           `Scanned ${scanResult.symbols.length} symbols, found ${actionable.length} actionable signals (confidence >= 70):`,
           '',
@@ -454,7 +478,7 @@ async function main() {
         ].join('\n')
       }
 
-      // Build Freqtrade bot status + NFI stats block
+      // Build Freqtrade bot status + entry/exit stats block
       let freqtradeBlock = ''
       if (ftData) {
         const parts: string[] = []
@@ -482,9 +506,9 @@ async function main() {
           )
         }
 
-        // NFI entry tag performance
+        // Entry tag performance
         if (ftData.entryStats && Array.isArray(ftData.entryStats)) {
-          parts.push('', '--- NFI ENTRY SIGNAL PERFORMANCE ---')
+          parts.push('', '--- ENTRY SIGNAL PERFORMANCE ---')
           for (const tag of ftData.entryStats) {
             const winRate = tag.trades > 0 ? ((tag.wins / tag.trades) * 100).toFixed(0) : '0'
             const flag = tag.trades >= 10 && (tag.wins / tag.trades) < 0.4 ? ' ← UNDERPERFORMING' : ''
@@ -494,10 +518,10 @@ async function main() {
           }
         }
 
-        // NFI exit reason distribution
+        // Exit reason distribution
         if (ftData.exitStats && Array.isArray(ftData.exitStats)) {
           const totalExits = ftData.exitStats.reduce((s: number, e: any) => s + (e.trades || 0), 0)
-          parts.push('', '--- NFI EXIT REASON DISTRIBUTION ---')
+          parts.push('', '--- EXIT REASON DISTRIBUTION ---')
           for (const reason of ftData.exitStats) {
             const pct = totalExits > 0 ? ((reason.trades / totalExits) * 100).toFixed(0) : '0'
             parts.push(
