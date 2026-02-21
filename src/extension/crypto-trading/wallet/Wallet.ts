@@ -10,6 +10,7 @@ import type {
   CommitHash,
   Operation,
   OperationResult,
+  OperationStatus,
   AddResult,
   CommitPrepareResult,
   PushResult,
@@ -641,13 +642,10 @@ export class Wallet implements IWallet {
   /**
    * Parse operation execution result
    *
-   * Converts the raw result returned by the engine into a standardized OperationResult
+   * Converts the raw CryptoOrderResult returned by the engine into a standardized OperationResult.
+   * CryptoOrderResult shape: { success, orderId?, message?, filledPrice?, filledSize?, error? }
    */
   private parseOperationResult(op: Operation, raw: unknown): OperationResult {
-    // raw is the result returned by TradingEngine, format similar to:
-    // { success: true, order: { id, status, filledPrice, ... } }
-    // or { success: false, error: '...' }
-
     const rawObj = raw as Record<string, unknown>;
 
     if (!rawObj || typeof rawObj !== 'object') {
@@ -660,10 +658,7 @@ export class Wallet implements IWallet {
       };
     }
 
-    const success = rawObj.success === true;
-    const order = rawObj.order as Record<string, unknown> | undefined;
-
-    if (!success) {
+    if (rawObj.success !== true) {
       return {
         action: op.action,
         success: false,
@@ -673,29 +668,27 @@ export class Wallet implements IWallet {
       };
     }
 
-    if (!order) {
-      // Some operations may not have an order (e.g. adjustLeverage)
-      return {
-        action: op.action,
-        success: true,
-        status: 'filled',
-        raw,
-      };
-    }
+    // CryptoOrderResult fields are top-level (no .order sub-object)
+    const orderId = rawObj.orderId as string | undefined;
+    const filledPrice = rawObj.filledPrice as number | undefined;
+    const filledSize = rawObj.filledSize as number | undefined;
 
-    const status = order.status as string;
-    const isFilled = status === 'filled';
-    const isPending = status === 'pending';
+    // If filledPrice is present the order was immediately filled (market order).
+    // If only orderId is present the order was accepted but not yet filled (limit order pending).
+    // If neither is present (e.g. closePosition / adjustLeverage void ops) treat as filled.
+    const status: OperationStatus = filledPrice !== undefined
+      ? 'filled'
+      : orderId !== undefined
+        ? 'pending'
+        : 'filled';
 
     return {
       action: op.action,
       success: true,
-      orderId: order.id as string | undefined,
-      status: isFilled ? 'filled' : isPending ? 'pending' : 'rejected',
-      filledPrice: isFilled ? (order.filledPrice as number) : undefined,
-      filledSize: isFilled
-        ? ((order.filledQuantity ?? order.size) as number)
-        : undefined,
+      orderId,
+      status,
+      filledPrice,
+      filledSize,
       raw,
     };
   }
