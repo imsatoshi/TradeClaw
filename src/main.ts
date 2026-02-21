@@ -43,7 +43,6 @@ import { createCronEngine, type CronEngine } from './core/cron.js'
 import { resolveDeliveryTarget } from './core/connector-registry.js'
 import { enqueue, ack, recoverPending } from './core/delivery.js'
 import { emit } from './core/agent-events.js'
-import { SessionStore } from './core/session.js'
 import { ProviderRouter } from './core/ai-provider.js'
 import { createAgent, VercelAIProvider } from './providers/vercel-ai-sdk/index.js'
 import { ClaudeCodeProvider } from './providers/claude-code/index.js'
@@ -375,14 +374,7 @@ async function main() {
 
   // ==================== Scheduling Subsystem ====================
 
-  // Dedicated session for heartbeat/cron conversations (separate from user chat sessions)
-  const heartbeatSession = new SessionStore('heartbeat')
-  await heartbeatSession.restore()
-  // Trim overly long heartbeat history on startup (prevent stale data accumulation)
-  // but keep last 6 entries for context continuity.
-  await heartbeatSession.trimToLastN(6)
-
-  // Heartbeat dedup — suppress identical messages within 24h
+  // Heartbeat dedup — suppress identical messages within window
   const heartbeatDedup = new HeartbeatDedup()
 
   // HEARTBEAT.md path (convention: workspace root)
@@ -408,10 +400,44 @@ async function main() {
       }
     }
 
-    // Capture session file size before heartbeat so we can prune no-op turns later.
-    // (openclaw-style transcript pruning: HEARTBEAT_OK rounds get truncated away,
-    // meaningful alerts stay in session for context continuity)
-    const preHeartbeatSize = await heartbeatSession.captureSize()
+    // Pre-fetch live trading data — guaranteed fresh, no LLM dependency
+    let liveDataBlock = ''
+    try {
+      const [positions, account] = await Promise.all([
+        (tools.cryptoGetPositions as any).execute({}),
+        (tools.cryptoGetAccount as any).execute({}),
+      ])
+
+      // Fetch funding rates for held positions
+      const heldSymbols = Array.isArray(positions?.positions)
+        ? positions.positions.map((p: any) => p.symbol)
+        : []
+      const funding = heldSymbols.length > 0
+        ? await (tools.cryptoGetFundingRate as any).execute({ symbols: heldSymbols })
+        : {}
+
+      liveDataBlock = [
+        '',
+        '--- LIVE TRADING DATA (pre-fetched, current as of this heartbeat) ---',
+        '',
+        '## Account',
+        JSON.stringify(account, null, 2),
+        '',
+        '## Open Positions',
+        positions?.positions?.length > 0
+          ? JSON.stringify(positions.positions, null, 2)
+          : '(no open positions)',
+        '',
+        '## Funding Rates (held positions)',
+        Object.keys(funding).length > 0
+          ? JSON.stringify(funding, null, 2)
+          : '(none)',
+        '',
+        '--- END LIVE DATA ---',
+      ].join('\n')
+    } catch (err) {
+      liveDataBlock = '\n(Live data pre-fetch failed — call tools manually)\n'
+    }
 
     // Read HEARTBEAT.md content upfront so we can inject it into the prompt
     // (the AI has no file-reading tool, so we must provide the content directly)
@@ -430,6 +456,7 @@ async function main() {
         'Do NOT reply with HEARTBEAT_OK — this is a cron event that must be delivered.',
         '',
         ...eventLines,
+        liveDataBlock,
       ].join('\n')
     } else if (systemEvents.length > 0) {
       // Other system events (exec, etc.): append to heartbeat prompt with file content
@@ -441,29 +468,27 @@ async function main() {
       for (const evt of systemEvents) {
         parts.push(`[${evt.source}] ${evt.text}`)
       }
+      parts.push(liveDataBlock)
       parts.push('', 'Check the above and act on anything that needs attention. Reply HEARTBEAT_OK if nothing to report.')
       fullPrompt = parts.join('\n')
     } else {
-      // Regular heartbeat: inject file content directly into prompt
+      // Regular heartbeat: inject file content + live data directly into prompt
       if (heartbeatContent) {
         fullPrompt = [
           'Here is the current HEARTBEAT.md content:',
           '',
           heartbeatContent,
+          liveDataBlock,
           '',
-          'Check if anything needs attention based on the above instructions. Use your trading tools (cryptoGetPositions, cryptoGetAccount, etc.) to gather the data requested. Reply HEARTBEAT_OK if nothing to report.',
+          'Check if anything needs attention based on the above instructions and live data. The trading data above is ALREADY FRESH — do NOT call cryptoGetPositions/cryptoGetAccount again unless you need to refresh mid-analysis. Reply HEARTBEAT_OK if nothing to report.',
         ].join('\n')
       } else {
-        fullPrompt = prompt
+        fullPrompt = prompt + liveDataBlock
       }
     }
 
-    // ProviderRouter automatically routes to the correct backend (Vercel AI SDK or Claude Code)
-    const result = await engine.askWithSession(fullPrompt, heartbeatSession, {
-      systemPrompt: instructions,
-      maxHistoryEntries: 30,
-      historyPreamble: 'The following is the recent heartbeat/cron conversation history. Use it as context if it references earlier events or decisions.',
-    })
+    // Stateless call — no session accumulation, fresh every time
+    const result = await engine.ask(fullPrompt)
 
     // Strip ack token to decide if the response should be delivered.
     // Cron events bypass the ack check — they must always be delivered.
@@ -474,21 +499,17 @@ async function main() {
     )
 
     if (shouldSkip && !hasCronEvents) {
-      // Prune no-op heartbeat turns from session to prevent stale data accumulation
-      await heartbeatSession.truncateTo(preHeartbeatSize)
       return { status: 'ok-ack', text }
     }
 
     if (!text.trim()) {
-      await heartbeatSession.truncateTo(preHeartbeatSize)
       return { status: 'ok-empty' }
     }
 
     // --- Guard 3: dedup ---
-    // Suppress identical alert text within 24h window
+    // Suppress identical alert text within window
     if (heartbeatDedup.isDuplicate(text)) {
       console.log('scheduler: duplicate heartbeat response suppressed')
-      await heartbeatSession.truncateTo(preHeartbeatSize)
       return { status: 'skipped', reason: 'duplicate' }
     }
 

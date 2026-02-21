@@ -250,7 +250,7 @@ export class HeartbeatDedup {
   private lastSentAt = 0
   private windowMs: number
 
-  constructor(windowMs = 24 * 60 * 60 * 1000) {
+  constructor(windowMs = 60 * 60 * 1000) {
     this.windowMs = windowMs
   }
 
