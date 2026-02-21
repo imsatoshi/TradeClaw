@@ -243,16 +243,17 @@ export type SDKModelMessage = SDKUserMessage | SDKAssistantMessage | SDKToolMess
  * The Vercel AI SDK agent won't re-execute them — they serve as context.
  *
  * When `dataTTL` is provided, entries older than the TTL have their data-heavy
- * content replaced with expiry notices. This forces the model to re-call tools
- * for fresh data instead of reusing stale numbers from conversation history.
+ * content silently dropped. This forces the model to re-call tools for fresh
+ * data instead of reusing stale numbers from conversation history.
  */
 export interface ToModelMessagesOpts {
   /**
    * Data freshness TTL in milliseconds.
-   * - Assistant text responses older than TTL and longer than 200 chars → replaced with expiry notice
-   * - Assistant structured responses (tool_use) older than TTL → replaced with text summary
-   * - Tool result blocks older than TTL → skipped entirely (avoids orphaned tool-results)
+   * - Assistant responses older than TTL and longer than 200 chars → DROPPED (not emitted)
+   * - Assistant structured responses (tool_use) older than TTL → DROPPED
+   * - Tool result blocks older than TTL → DROPPED
    * - User text messages → always kept (questions don't go stale)
+   * - Short assistant responses (≤200 chars, e.g. "OK", confirmations) → kept
    */
   dataTTL?: number
 }
@@ -306,43 +307,35 @@ export function toModelMessages(entries: SessionEntry[], opts?: ToModelMessagesO
     } else if (message.role === 'assistant') {
       if (typeof message.content === 'string') {
         if (isExpired && message.content.length > 200) {
-          // Expire long assistant responses — they likely contain trading data/numbers
-          const time = entry.timestamp.replace('T', ' ').slice(0, 19)
-          messages.push({
-            role: 'assistant',
-            content: `[AI responded at ${time} UTC — response data omitted as it is outdated. Call tools to re-fetch current data if needed.]`,
-          })
-        } else {
-          messages.push({ role: 'assistant', content: message.content })
+          // Drop long expired assistant responses — they contain stale trading data.
+          // Model won't see old numbers → forced to call tools for fresh data.
+          continue
         }
+        messages.push({ role: 'assistant', content: message.content })
       } else {
         if (isExpired) {
-          // Expire structured responses (tool_use blocks) — replace with text summary
-          const time = entry.timestamp.replace('T', ' ').slice(0, 19)
-          messages.push({
-            role: 'assistant',
-            content: `[AI made tool calls at ${time} UTC — results omitted as data is outdated. Re-call tools for current data.]`,
-          })
-        } else {
-          const parts: SDKAssistantMessage['content'] = []
+          // Drop expired structured responses (tool_use blocks) entirely
+          continue
+        }
 
-          for (const block of message.content) {
-            if (block.type === 'text') {
-              parts.push({ type: 'text', text: block.text })
-            } else if (block.type === 'tool_use') {
-              parts.push({
-                type: 'tool-call',
-                toolCallId: block.id,
-                toolName: block.name,
-                input: block.input,
-              })
-            }
-            // tool_result in assistant content is unusual, skip
-          }
+        const parts: SDKAssistantMessage['content'] = []
 
-          if (parts.length > 0) {
-            messages.push({ role: 'assistant', content: parts })
+        for (const block of message.content) {
+          if (block.type === 'text') {
+            parts.push({ type: 'text', text: block.text })
+          } else if (block.type === 'tool_use') {
+            parts.push({
+              type: 'tool-call',
+              toolCallId: block.id,
+              toolName: block.name,
+              input: block.input,
+            })
           }
+          // tool_result in assistant content is unusual, skip
+        }
+
+        if (parts.length > 0) {
+          messages.push({ role: 'assistant', content: parts })
         }
       }
     }
