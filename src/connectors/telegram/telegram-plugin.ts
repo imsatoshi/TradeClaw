@@ -216,7 +216,7 @@ export class TelegramPlugin implements Plugin {
         // Re-enter AI flow to execute the confirmed trade
         try {
           const session = await this.getSession(userId)
-          const result = await ctx.engine.askWithSession(proposal.confirmationPrompt, session, { maxHistoryEntries: 20 })
+          const result = await ctx.engine.askWithSession(proposal.confirmationPrompt, session, { maxHistoryEntries: 20, dataTTL: 2 * 60 * 1000 })
           await this.sendReply(client, chatId, result.text, result.media)
         } catch (err) {
           await client.sendMessage({ chatId, text: `❌ Trade execution failed: ${err instanceof Error ? err.message : String(err)}` })
@@ -271,7 +271,7 @@ export class TelegramPlugin implements Plugin {
         await this.handleClaudeCodeMessage(client, message, prompt)
       } else {
         const session = await this.getSession(userId)
-        const result = await ctx.engine.askWithSession(prompt, session, { maxHistoryEntries: 20 })
+        const result = await ctx.engine.askWithSession(prompt, session, { maxHistoryEntries: 20, dataTTL: 2 * 60 * 1000 })
         await this.sendReply(client, message.chatId, result.text, result.media)
       }
     } catch (err) {
