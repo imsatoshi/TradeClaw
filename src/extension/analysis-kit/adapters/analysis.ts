@@ -6,6 +6,7 @@ import { calculateIndicator } from '../tools/calculate-indicator.tool';
 import { globNews, grepNews, readNews } from '../tools/news.tool';
 import { CRYPTO_ALLOWED_SYMBOLS, CRYPTO_DEFAULT_LEVERAGE } from '../../crypto-trading/interfaces.js';
 import { runStrategyScan } from '../tools/strategy-scanner/index.js';
+import { runBacktest, optimizeParams, batchOptimize } from '../tools/strategy-scanner/index.js';
 import { fetchFundingRates } from '../data/FundingRateClient.js';
 import { readSignalLog, computeSignalStats, syncOutcomesFromTrades } from '../tools/strategy-scanner/signal-log.js';
 import { appendFundingRateLog, readFundingRateHistory, computeFundingRateStats } from '../data/funding-rate-log.js';
@@ -626,10 +627,10 @@ Only call cryptoPlaceOrder directly when the user has ALREADY given explicit ver
       execute: async ({ summary, orderInstruction }) => {
         const id = generateProposalId();
         const confirmationPrompt =
-          `The user just confirmed the following trade proposal. Execute it now by calling cryptoPlaceOrder.\n\n` +
+          `The user just confirmed the following trade proposal. Execute it now using MARKET order (not limit).\n\n` +
           `Proposal: ${summary}\n\n` +
           `Instruction: ${orderInstruction}\n\n` +
-          `Proceed with the order immediately. Report the result (order ID, filled price, or any error).`;
+          `Execute the order immediately. After cryptoWalletPush, report: order ID, filled price, filled size. If rejected, report the error.`;
 
         storePendingProposal({ id, summary, confirmationPrompt });
 
@@ -651,6 +652,100 @@ Only call cryptoPlaceOrder directly when the user has ALREADY given explicit ver
         }
 
         return { proposed: true, proposalId: id, message: 'Trade proposal sent to Telegram. Waiting for user confirmation.' };
+      },
+    }),
+
+    // ==================== Signal backtesting ====================
+
+    backtestSignals: tool({
+      description: `Run historical backtest on strategy signals for a single symbol.
+Fetches historical OHLCV from Binance, replays the strategy scanner on each 4H candle,
+then simulates whether each signal would have hit TP or SL using subsequent 15m candles.
+
+Returns per-strategy and per-regime win rates, average P&L, expectancy.
+Use this to validate SL/TP parameters before trading.
+
+Typical run: 14 days ≈ 84 scans, 30 days ≈ 180 scans. Max 90 days.
+May take 10-30 seconds depending on the period.`,
+      inputSchema: z.object({
+        symbol: z.string().describe('Symbol, e.g. "BTC/USDT"'),
+        days: z.number().int().optional().describe('Backtest period in days (default 30, max 90)'),
+        strategies: z.array(z.string()).optional().describe('Filter strategies, e.g. ["ema_trend", "rsi_divergence"]'),
+        confidenceMin: z.number().optional().describe('Min confidence filter (default 0)'),
+      }),
+      execute: async ({ symbol, days, strategies, confidenceMin }) => {
+        return runBacktest({
+          symbol,
+          days: Math.min(days ?? 30, 90),
+          strategies: strategies as import('../tools/strategy-scanner/types.js').StrategyName[] | undefined,
+          confidenceMin,
+        })
+      },
+    }),
+
+    // ==================== Parameter optimization ====================
+
+    optimizeStrategyParams: tool({
+      description: `Find optimal SL/TP multipliers for a symbol using grid-search over historical data.
+
+Runs strategy scanning ONCE, then replays exit simulation with every combination of
+slMultiplier × tpMultiplier to find the params that maximize expectancy (expected P&L per trade).
+
+Returns:
+- best: the globally optimal (slMultiplier, tpMultiplier) combo
+- top5: top 5 combos ranked by expectancy
+- perStrategy: best params for each individual strategy, compared to current config
+- recommendation: human-readable summary
+
+Set apply=true to automatically write the optimal params to strategy-params.json.
+
+IMPORTANT: After optimizing, report the results AND the recommendation to the user.
+If expectancy is positive, consider applying the params. If negative for all combos,
+the symbol may not be suitable for these strategies.`,
+      inputSchema: z.object({
+        symbol: z.string().describe('Symbol, e.g. "BTC/USDT"'),
+        days: z.number().int().optional().describe('Backtest period in days (default 30, max 90)'),
+        strategies: z.array(z.string()).optional().describe('Filter strategies'),
+        confidenceMin: z.number().optional().describe('Min confidence filter (default 0)'),
+        apply: z.boolean().optional().describe('Write best params to strategy-params.json (default false)'),
+      }),
+      execute: async ({ symbol, days, strategies, confidenceMin, apply }) => {
+        return optimizeParams({
+          symbol,
+          days: Math.min(days ?? 30, 90),
+          strategies: strategies as import('../tools/strategy-scanner/types.js').StrategyName[] | undefined,
+          confidenceMin,
+          apply,
+        })
+      },
+    }),
+
+    batchOptimizeParams: tool({
+      description: `Run SL/TP parameter optimization for ALL provided symbols in one call.
+
+Processes symbols concurrently (3 at a time) using grid-search. Each symbol gets
+its own optimal per-strategy SL/TP multipliers stored in symbolOverrides.
+
+Returns a ranked summary: which symbols have positive expectancy (tradeable)
+vs negative expectancy (avoid). Use this to calibrate the entire whitelist.
+
+Typical runtime: ~80 symbols ≈ 2-3 minutes.
+
+IMPORTANT: After completion, report the full summary to the user, especially:
+- Which symbols have positive expectancy (good to trade)
+- Which have negative expectancy (should avoid)
+- Overall stats (how many optimized, skipped, errored)`,
+      inputSchema: z.object({
+        symbols: z.array(z.string()).describe('Symbols to optimize, e.g. from getAllowedSymbols or cryptoGetWhitelist'),
+        days: z.number().int().optional().describe('Backtest period in days (default 30, max 90)'),
+        apply: z.boolean().optional().describe('Write optimal params to strategy-params.json (default false)'),
+      }),
+      execute: async ({ symbols, days, apply }) => {
+        return batchOptimize({
+          symbols,
+          days: Math.min(days ?? 30, 90),
+          apply,
+        })
       },
     }),
 

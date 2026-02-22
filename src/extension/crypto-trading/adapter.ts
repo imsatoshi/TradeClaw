@@ -94,9 +94,10 @@ BEFORE placing orders, you SHOULD:
 3. Verify this trade aligns with your stated strategy
 
 ORDER TYPE RULES:
-- ALWAYS use limit orders for opening positions (type='limit' + price=current price). This avoids slippage.
-- Only use market orders when the user explicitly says "市价买" / "market order" / "立即成交".
-- For limit orders, set price to the current market price (from latest OHLCV or ticker).
+- Use MARKET orders by default for all trades (immediate execution, avoids stale limit orders).
+- Only use LIMIT orders when the user explicitly specifies a price ("限价 0.50 买入" / "limit at 0.50").
+- For market orders, do NOT set price parameter.
+- For limit orders, set price to the user's specified price.
 
 Supports two modes:
 - size-based: Specify coin amount (e.g. 0.5 BTC)
@@ -301,7 +302,7 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
             capitalInvested: position.margin,
             leveragedNotionalValue: position.positionValue,
             enterTag: position.enterTag,
-            grindCount: position.grindCount,
+            dcaCount: position.dcaCount,
             profitRatio: position.profitRatio,
             percentageOfEquity: `${percentOfEquity.toFixed(1)}%`,
             percentageOfTotal: `${percentOfTotal.toFixed(1)}%`,
@@ -472,7 +473,7 @@ RISK CHECK: Before placing new orders, verify that percentageOfEquity doesn't ex
     }),
 
     cryptoGetStrategyStats: tool({
-      description: 'View strategy performance by entry signal and exit reason. Use this to evaluate which trading signals are profitable and which should be disabled via blacklist.',
+      description: 'View historical entry/exit signal performance. Use this to evaluate which entry tags are profitable and which should be disabled via blacklist.',
       inputSchema: z.object({
         type: z.enum(['entries', 'exits', 'mix_tags']).describe('entries: stats by entry signal, exits: stats by exit reason, mix_tags: combined entry+exit stats'),
         pair: z.string().optional().describe('Filter by trading pair (e.g. "BTC/USDT"). Omit for all pairs.'),

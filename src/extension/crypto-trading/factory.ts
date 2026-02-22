@@ -13,6 +13,7 @@ import { FreqtradeTradingEngine } from './providers/freqtrade/index.js';
 export interface CryptoTradingEngineResult {
   engine: ICryptoTradingEngine;
   directExchangeEngine?: ICryptoTradingEngine; // CCXT direct — for stoploss/conditional orders
+  isDryRun: boolean;
   close: () => Promise<void>;
 }
 
@@ -59,6 +60,7 @@ export async function createCryptoTradingEngine(
 
       return {
         engine,
+        isDryRun: providerConfig.sandbox || providerConfig.demoTrading || false,
         close: () => engine.close(),
       };
     }
@@ -101,6 +103,7 @@ export async function createCryptoTradingEngine(
       return {
         engine,
         directExchangeEngine: directEngine,
+        isDryRun: engine.isDryRun,
         close: async () => {
           await engine.close();
           if (directEngine) await (directEngine as CcxtTradingEngine).close();

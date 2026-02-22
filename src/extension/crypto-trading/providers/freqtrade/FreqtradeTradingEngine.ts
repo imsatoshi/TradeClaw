@@ -85,6 +85,9 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
   /** Trading mode, populated during init() from show_config */
   private tradingMode: 'spot' | 'margin' | 'futures' = 'spot';
 
+  /** Whether Freqtrade is running in dry-run (paper trading) mode */
+  private _isDryRun = true;
+
   /** Whitelist refresh: last sync time and in-flight guard */
   private whitelistLastSync = 0;
   private whitelistRefreshing = false;
@@ -103,6 +106,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     const showConfig = await this.fetchShowConfig();
     this.stakeCurrency = showConfig.stake_currency || 'USDT';
     this.tradingMode = showConfig.trading_mode || 'spot';
+    this._isDryRun = showConfig.dry_run ?? true;
 
     // Sync max open trades from Freqtrade config
     if (showConfig.max_open_trades != null && showConfig.max_open_trades > 0) {
@@ -133,6 +137,11 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     this.initialized = true;
     console.log(`freqtrade trading engine: connected to ${this.config.url}`);
     console.log(`freqtrade: strategy=${showConfig.strategy}, stake=${this.stakeCurrency}, dry_run=${showConfig.dry_run}, mode=${showConfig.trading_mode || 'spot'}`);
+  }
+
+  /** Whether Freqtrade is in dry-run (paper trading) mode */
+  get isDryRun(): boolean {
+    return this._isDryRun;
   }
 
   async close(): Promise<void> {
@@ -342,7 +351,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         unrealizedPnL: trade.profit_abs,
         positionValue: trade.amount * currentPrice,
         enterTag: trade.enter_tag,
-        grindCount: Math.max(0, (trade.filled_entry_orders ?? 1) - 1),  // first entry doesn't count as grind
+        dcaCount: Math.max(0, (trade.filled_entry_orders ?? 1) - 1),  // DCA layers (number of additional entry orders)
         partialExitCount: trade.filled_exit_orders || 0,
         profitRatio: trade.profit_ratio,
         stopLossPrice: trade.stop_loss_abs || undefined,
