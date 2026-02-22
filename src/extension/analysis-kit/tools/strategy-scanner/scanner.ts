@@ -174,24 +174,24 @@ export async function runStrategyScan(
 
   log.info('scan started', { symbols: symbols.length })
 
-  // Fetch 4H, 1H, 15m, and funding rates concurrently (all use cache)
-  const [ohlcv4h, ohlcv1h, ohlcv15m, rates] = await Promise.all([
-    fetchWithCache(symbols, TIMEFRAME_4H, CANDLE_LIMIT_4H).catch((err) => {
-      errors.push(`4H OHLCV fetch failed: ${String(err)}`)
-      return {} as Record<string, MarketData[]>
-    }),
-    fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
-      log.warn('1H OHLCV fetch failed — MTF filter disabled', { error: String(err) })
-      return {} as Record<string, MarketData[]>
-    }),
-    fetchWithCache(symbols, TIMEFRAME_15M, CANDLE_LIMIT_15M).catch((err) => {
-      log.warn('15m OHLCV fetch failed — SL/TP will fall back to 4H ATR', { error: String(err) })
-      return {} as Record<string, MarketData[]>
-    }),
-    fundingRates !== undefined
-      ? Promise.resolve(fundingRates)
-      : fetchFundingRates(symbols).catch(() => ({} as Record<string, FundingRateInfo>)),
-  ])
+  // Fetch timeframes sequentially to avoid Binance rate-limit bursts.
+  // Each fetchWithCache already batches symbols internally (5 concurrent + 500ms delay).
+  // Running all 3 timeframes in parallel triples the burst — sequential is safer.
+  const ohlcv4h = await fetchWithCache(symbols, TIMEFRAME_4H, CANDLE_LIMIT_4H).catch((err) => {
+    errors.push(`4H OHLCV fetch failed: ${String(err)}`)
+    return {} as Record<string, MarketData[]>
+  })
+  const ohlcv1h = await fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
+    log.warn('1H OHLCV fetch failed — MTF filter disabled', { error: String(err) })
+    return {} as Record<string, MarketData[]>
+  })
+  const ohlcv15m = await fetchWithCache(symbols, TIMEFRAME_15M, CANDLE_LIMIT_15M).catch((err) => {
+    log.warn('15m OHLCV fetch failed — SL/TP will fall back to 4H ATR', { error: String(err) })
+    return {} as Record<string, MarketData[]>
+  })
+  const rates = fundingRates !== undefined
+    ? fundingRates
+    : await fetchFundingRates(symbols).catch(() => ({} as Record<string, FundingRateInfo>))
 
   // Run strategies per symbol
   for (const symbol of symbols) {

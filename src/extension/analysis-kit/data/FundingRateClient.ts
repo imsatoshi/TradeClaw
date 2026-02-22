@@ -17,8 +17,10 @@ export async function fetchFundingRates(
 ): Promise<Record<string, FundingRateInfo>> {
   const result: Record<string, FundingRateInfo> = {}
 
-  const BATCH_SIZE = 10
+  const BATCH_SIZE = 5
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
   for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+    if (i > 0) await sleep(500)
     const batch = symbols.slice(i, i + BATCH_SIZE)
     const promises = batch.map(async (symbol) => {
       const binanceSymbol = symbol.replace('/', '')
