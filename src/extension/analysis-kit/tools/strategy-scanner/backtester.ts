@@ -609,7 +609,7 @@ export interface BatchOptimizeResult {
  * ~80 symbols × 3 concurrent ≈ 2-3 minutes.
  */
 export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchOptimizeResult> {
-  const { symbols, days = 30, apply = false, concurrency = 2 } = config
+  const { symbols, days = 30, apply = false, concurrency = 1 } = config
   const t0 = Date.now()
 
   log.info('batch optimize started', { symbols: symbols.length, days, concurrency })
@@ -618,8 +618,9 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
   const errors: Record<string, string> = {}
   let skippedCount = 0
 
-  // Process in chunks of `concurrency`
+  // Process in chunks of `concurrency` with inter-batch delay to avoid Binance 418
   for (let i = 0; i < symbols.length; i += concurrency) {
+    if (i > 0) await new Promise(r => setTimeout(r, 1000)) // 1s between batches
     const batch = symbols.slice(i, i + concurrency)
     const promises = batch.map(async (symbol) => {
       try {

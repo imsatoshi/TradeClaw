@@ -48,7 +48,8 @@ function saveCache(symbol: string, timeframe: string, bars: MarketData[]): void 
 
 // ==================== Rate Limiting ====================
 
-const RATE_DELAY_MS = 200  // 200ms between Binance API requests
+const RATE_DELAY_MS = 350  // 350ms between Binance API requests (pagination)
+const BATCH_DELAY_MS = 500 // 500ms between concurrent batches (real-time fetch)
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms))
@@ -175,9 +176,10 @@ export async function fetchExchangeOHLCV(
   const interval = INTERVAL_MAP[timeframe] ?? '1h'
   const result: Record<string, MarketData[]> = {}
 
-  // Fetch all symbols concurrently (with a concurrency cap)
-  const BATCH_SIZE = 10
+  // Fetch in small batches with inter-batch delays to avoid Binance rate limits
+  const BATCH_SIZE = 5
   for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+    if (i > 0) await sleep(BATCH_DELAY_MS)
     const batch = symbols.slice(i, i + BATCH_SIZE)
     const promises = batch.map(async (symbol) => {
       const binanceSymbol = symbol.replace('/', '')
