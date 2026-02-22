@@ -50,6 +50,11 @@ After staging operations and committing them, use this to:
 Returns execution results for each operation (filled/pending/rejected).
 
 IMPORTANT: You must call cryptoWalletCommit first before pushing.
+
+After push, ALWAYS report the result to the user:
+- For filled orders: "✅ [symbol] [side] filled at $X (size: Y)"
+- For pending orders: "⏳ [symbol] limit order pending at $X"
+- For rejected orders: "❌ [symbol] rejected: [reason]"
       `.trim(),
       inputSchema: z.object({}),
       execute: async () => {

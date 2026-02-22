@@ -8,7 +8,7 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime, batchOptimize } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
 import { computeSignalStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
 import type { ICryptoTradingEngine, Operation, WalletExportState } from './extension/crypto-trading/index.js'
@@ -33,6 +33,7 @@ import {
 } from './core/scheduler.js'
 import { createCronEngine, type CronEngine } from './core/cron.js'
 import { resolveDeliveryTarget } from './core/connector-registry.js'
+import { sendTelegramMessage } from './connectors/telegram/telegram-api.js'
 import { enqueue, ack, recoverPending } from './core/delivery.js'
 import { emit } from './core/agent-events.js'
 import { ProviderRouter } from './core/ai-provider.js'
@@ -174,6 +175,8 @@ async function main() {
 
   const frontalLobe = brain.getFrontalLobe()
   const emotion = brain.getEmotion().current
+  const isDryRun = cryptoResult?.isDryRun ?? true  // default assume dry-run
+
   const instructions = [
     persona,
     '---',
@@ -184,6 +187,9 @@ async function main() {
     `**Emotion:** ${emotion}`,
     '',
     '---',
+    `### Trading Mode: ${isDryRun ? '🧪 DRY-RUN (paper trading, no real money)' : '🔴 LIVE (real money)'}`,
+    isDryRun ? 'All trades are simulated. When reporting to user, prefix messages with [PAPER].' : '',
+    '',
     '## Trading System Access',
     '',
     'YOU are the sole decision-maker. Freqtrade is your order execution infrastructure.',
@@ -224,7 +230,7 @@ async function main() {
     '- Max 40% of equity per single trade stake (hard limit)',
     '- No new trades if available balance < 30% of equity (hard limit)',
     '- Use calculatePositionSize for every new trade (2% equity risk max)',
-    '- ALWAYS use proposeTradeWithButtons for strategy signals (limit order, not market)',
+    '- ALWAYS use proposeTradeWithButtons for strategy signals (market order for speed)',
     '',
     '### Rules:',
     '- When the user asks you to buy/sell, DO IT. Use cryptoPlaceOrder → cryptoWalletCommit → cryptoWalletPush.',
@@ -613,6 +619,8 @@ async function main() {
           liveDataBlock,
           '',
           'Check if anything needs attention based on the above instructions and live data. The trading data above is ALREADY FRESH — do NOT call cryptoGetPositions/cryptoGetAccount again unless you need to refresh mid-analysis. Reply HEARTBEAT_OK if nothing to report.',
+          '',
+          'IMPORTANT: Keep your response under 500 characters unless there is an urgent alert. Use the compact template from HEARTBEAT.md. If nothing needs attention, reply HEARTBEAT_OK.',
         ].join('\n')
       } else {
         fullPrompt = prompt + liveDataBlock
@@ -708,6 +716,70 @@ async function main() {
       console.log('scheduler: auto-created daily-pnl cron job (UTC 00:00)')
     }
   }
+
+  // Post-startup: batch optimize all whitelisted symbols (fire-and-forget)
+  // Runs in background, sends summary to Telegram when done.
+  ;(async () => {
+    try {
+      // Freqtrade VolumePairList is dynamic — whitelist is empty at boot, populated after first cycle.
+      // Poll the Freqtrade API directly until the whitelist is populated.
+      const ftUrl = config.crypto.provider.type === 'freqtrade' ? config.crypto.provider.url : null
+      const ftAuth = config.crypto.provider.type === 'freqtrade'
+        ? 'Basic ' + Buffer.from(`${config.crypto.provider.username}:${config.crypto.provider.password}`).toString('base64')
+        : null
+      if (!ftUrl || !ftAuth) return
+
+      // Helper: fetch current whitelist from Freqtrade
+      const fetchWhitelist = async (): Promise<string[]> => {
+        const res = await fetch(`${ftUrl}/api/v1/whitelist`, { headers: { Authorization: ftAuth! } })
+        if (!res.ok) return []
+        const data = await res.json() as { whitelist: string[] }
+        return data.whitelist
+          .map((s: string) => s.replace(/:.*$/, ''))
+          .filter((s: string) => /^[A-Z0-9]+\/USDT$/.test(s))
+      }
+
+      // Phase 1: Wait for whitelist to become non-empty
+      let symbols: string[] = []
+      for (let attempt = 0; attempt < 20; attempt++) {
+        try { symbols = await fetchWhitelist() } catch { /* retry */ }
+        if (symbols.length > 0) break
+        console.log(`post-startup: waiting for Freqtrade whitelist (attempt ${attempt + 1}/20)...`)
+        await new Promise(r => setTimeout(r, 15_000))
+      }
+
+      // Phase 2: Wait for whitelist to stabilize (VolumePairList loads incrementally after fresh restart)
+      if (symbols.length > 0) {
+        let stableCount = 0
+        for (let i = 0; i < 6; i++) {  // up to ~3 min extra
+          await new Promise(r => setTimeout(r, 30_000))
+          try {
+            const fresh = await fetchWhitelist()
+            if (fresh.length <= symbols.length) {
+              stableCount++
+              if (stableCount >= 2) break  // stable for 2 consecutive checks
+            } else {
+              console.log(`post-startup: whitelist growing ${symbols.length} → ${fresh.length}, waiting...`)
+              symbols = fresh
+              stableCount = 0
+            }
+          } catch { /* keep current */ }
+        }
+        console.log(`post-startup: whitelist stabilized at ${symbols.length} symbols`)
+      }
+
+      if (symbols.length === 0) {
+        console.log('post-startup: no USDT symbols after waiting, skipping optimization')
+        return
+      }
+      console.log(`post-startup: optimizing ${symbols.length} symbols (90d, apply=true)`)
+      const result = await batchOptimize({ symbols, days: 90, apply: true })
+      console.log(`post-startup: optimization done — ${result.successCount} optimized, ${result.skippedCount} skipped, ${result.errorCount} errors`)
+      await sendTelegramMessage(`🔧 Startup Optimization Complete\n\n${result.summary}`)
+    } catch (err) {
+      console.error('post-startup: batch optimize failed:', err instanceof Error ? err.message : err)
+    }
+  })()
 
   // Recover any pending deliveries from previous runs (fire-and-forget)
   recoverPending({
