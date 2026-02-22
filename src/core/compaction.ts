@@ -32,6 +32,54 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
   microcompactKeepRecent: 3,
 }
 
+// ==================== Model Context Windows ====================
+
+/**
+ * Known context window sizes (tokens) for common models.
+ * Used to auto-cap maxContextTokens so compaction triggers before the API rejects.
+ */
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  // DeepSeek
+  'deepseek-chat': 128_000,
+  'deepseek-reasoner': 128_000,
+  // OpenAI
+  'gpt-4o': 128_000,
+  'gpt-4o-mini': 128_000,
+  'gpt-4-turbo': 128_000,
+  'gpt-4': 8_192,
+  'o1': 200_000,
+  'o1-mini': 128_000,
+  'o3-mini': 200_000,
+  // Anthropic
+  'claude-sonnet-4-5-20250929': 200_000,
+  'claude-3-5-sonnet-20241022': 200_000,
+  'claude-3-haiku-20240307': 200_000,
+  // Qwen
+  'qwen-plus': 128_000,
+  'qwen-turbo': 128_000,
+  'qwen-max': 32_000,
+}
+
+/**
+ * Resolve compaction config by capping maxContextTokens to the model's known limit.
+ * If the model is unknown, falls back to the configured value as-is.
+ */
+export function resolveCompactionConfig(
+  config: CompactionConfig,
+  modelName: string,
+): CompactionConfig {
+  const modelMax = MODEL_CONTEXT_WINDOWS[modelName]
+  if (!modelMax) return config
+
+  // Cap maxContextTokens to model limit (leave room for output + buffer)
+  if (config.maxContextTokens > modelMax) {
+    const capped = { ...config, maxContextTokens: modelMax }
+    console.log(`compaction: capped maxContextTokens ${config.maxContextTokens} → ${modelMax} for model "${modelName}"`)
+    return capped
+  }
+  return config
+}
+
 // ==================== Token Estimation ====================
 
 /** Rough chars-per-token ratio for Claude models. */
