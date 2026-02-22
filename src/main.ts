@@ -39,6 +39,7 @@ import { emit } from './core/agent-events.js'
 import { ProviderRouter } from './core/ai-provider.js'
 import { createAgent, VercelAIProvider } from './providers/vercel-ai-sdk/index.js'
 import { ClaudeCodeProvider } from './providers/claude-code/index.js'
+import { resolveCompactionConfig } from './core/compaction.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const BRAIN_FILE = resolve('data/brain/commit.json')
@@ -323,8 +324,9 @@ async function main() {
   // ==================== Engine ====================
 
   const agent = createAgent(model, tools, instructions, config.agent.maxSteps)
-  const vercelProvider = new VercelAIProvider(agent, config.compaction)
-  const claudeCodeProvider = new ClaudeCodeProvider(config.agent.claudeCode, config.compaction)
+  const compaction = resolveCompactionConfig(config.compaction, config.model.model)
+  const vercelProvider = new VercelAIProvider(agent, compaction)
+  const claudeCodeProvider = new ClaudeCodeProvider(config.agent.claudeCode, compaction)
   const router = new ProviderRouter(vercelProvider, claudeCodeProvider)
   const engine = new Engine({ agent, tools, provider: router })
 
