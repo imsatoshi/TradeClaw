@@ -55,6 +55,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms))
 }
 
+// ==================== 418 Circuit Breaker ====================
+
+let blockedUntilMs = 0
+
+/** Check if Binance IP is currently blocked (418 received). */
+export function isBinanceBlocked(): boolean {
+  return Date.now() < blockedUntilMs
+}
+
+/**
+ * Mark Binance as blocked. Parses the ban expiry from the 418 response body
+ * if available, otherwise uses a conservative 10-minute backoff.
+ */
+function markBlocked(body?: string): void {
+  // Try to parse "banned until <epoch_ms>" from Binance error
+  const match = body?.match(/banned until (\d{13})/)
+  if (match) {
+    blockedUntilMs = Number(match[1])
+  } else {
+    blockedUntilMs = Date.now() + 10 * 60_000 // 10 min fallback
+  }
+  const remaining = Math.ceil((blockedUntilMs - Date.now()) / 60_000)
+  console.warn(`ExchangeClient: Binance 418 — circuit breaker open for ${remaining}m`)
+}
+
 // ==================== Historical OHLCV (with cache) ====================
 
 /**
@@ -95,15 +120,20 @@ export async function fetchHistoricalOHLCV(
 
   // Fetch new bars (if needed)
   const newBars: MarketData[] = []
-  if (fetchFrom < endTime) {
+  if (fetchFrom < endTime && !isBinanceBlocked()) {
     let cursor = fetchFrom
-    while (cursor < endTime) {
+    while (cursor < endTime && !isBinanceBlocked()) {
       const url =
         `https://fapi.binance.com/fapi/v1/klines` +
         `?symbol=${binanceSymbol}&interval=${interval}` +
         `&startTime=${cursor}&endTime=${endTime}&limit=${PAGE_LIMIT}`
 
       const res = await fetch(url)
+      if (res.status === 418) {
+        const body = await res.text().catch(() => '')
+        markBlocked(body)
+        break
+      }
       if (!res.ok) {
         console.warn(`ExchangeClient: HTTP ${res.status} for ${symbol} historical (${timeframe})`)
         break
@@ -176,17 +206,29 @@ export async function fetchExchangeOHLCV(
   const interval = INTERVAL_MAP[timeframe] ?? '1h'
   const result: Record<string, MarketData[]> = {}
 
+  // Circuit breaker: skip all fetches if Binance banned us
+  if (isBinanceBlocked()) return result
+
+  // Filter out non-Binance symbols (e.g. BTC/USD from Alpaca) — Binance Futures uses /USDT
+  const binanceSymbols = symbols.filter(s => s.endsWith('/USDT'))
+
   // Fetch in small batches with inter-batch delays to avoid Binance rate limits
   const BATCH_SIZE = 5
-  for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+  for (let i = 0; i < binanceSymbols.length; i += BATCH_SIZE) {
     if (i > 0) await sleep(BATCH_DELAY_MS)
-    const batch = symbols.slice(i, i + BATCH_SIZE)
+    if (isBinanceBlocked()) break // re-check after each batch
+    const batch = binanceSymbols.slice(i, i + BATCH_SIZE)
     const promises = batch.map(async (symbol) => {
       const binanceSymbol = symbol.replace('/', '')
       const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${binanceSymbol}&interval=${interval}&limit=${limit}`
 
       try {
         const res = await fetch(url)
+        if (res.status === 418) {
+          const body = await res.text().catch(() => '')
+          markBlocked(body)
+          return
+        }
         if (!res.ok) {
           console.warn(`ExchangeClient: HTTP ${res.status} for ${symbol} (${timeframe})`)
           return
