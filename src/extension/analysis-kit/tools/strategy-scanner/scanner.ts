@@ -262,5 +262,6 @@ export async function runStrategyScan(
     signals: allSignals,
     errors,
     sessionInfo: getSessionInfo(),
+    ohlcv4h,
   }
 }

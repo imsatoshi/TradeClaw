@@ -391,16 +391,9 @@ async function main() {
         ? (cryptoEngine as any).getHeartbeatData().catch(() => null)
         : Promise.resolve(null)
 
-      // Fetch 4H OHLCV once — shared by regime detection and strategy scan
-      const ohlcv4hPromise = fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], '4h', 60).catch((err: unknown) => {
-        console.warn('heartbeat: 4H OHLCV fetch failed (non-fatal):', err)
-        return {} as Record<string, import('./extension/analysis-kit/data/interfaces.js').MarketData[]>
-      })
-
-      const [positions, account, ohlcv4h, scanResult, signalStats, ftData] = await Promise.all([
+      const [positions, account, scanResult, signalStats, ftData] = await Promise.all([
         (tools.cryptoGetPositions as any).execute({}),
         (tools.cryptoGetAccount as any).execute({}),
-        ohlcv4hPromise,
         runStrategyScan([...CRYPTO_ALLOWED_SYMBOLS]).catch((err: unknown) => {
           console.warn('heartbeat: strategy scan failed (non-fatal):', err)
           return null
@@ -409,7 +402,8 @@ async function main() {
         ftDataPromise,
       ])
 
-      // Run regime detection on the pre-fetched 4H data (synchronous, no network)
+      // Reuse scanner's 4H data for regime detection (no extra Binance fetch)
+      const ohlcv4h = scanResult?.ohlcv4h ?? {}
       const whitelistSymbols = [...CRYPTO_ALLOWED_SYMBOLS]
       const regimeResults = detectMarketRegime(whitelistSymbols, ohlcv4h)
 

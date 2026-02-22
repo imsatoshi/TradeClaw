@@ -5,6 +5,7 @@
  */
 
 import type { FundingRateInfo } from '../tools/strategy-scanner/types.js'
+import { isBinanceBlocked } from './ExchangeClient.js'
 
 /**
  * Fetch current funding rates for multiple symbols.
@@ -17,11 +18,17 @@ export async function fetchFundingRates(
 ): Promise<Record<string, FundingRateInfo>> {
   const result: Record<string, FundingRateInfo> = {}
 
+  if (isBinanceBlocked()) return result
+
+  // Filter to Binance Futures symbols only
+  const binanceSymbols = symbols.filter(s => s.endsWith('/USDT'))
+
   const BATCH_SIZE = 5
   const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-  for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+  for (let i = 0; i < binanceSymbols.length; i += BATCH_SIZE) {
     if (i > 0) await sleep(500)
-    const batch = symbols.slice(i, i + BATCH_SIZE)
+    if (isBinanceBlocked()) break
+    const batch = binanceSymbols.slice(i, i + BATCH_SIZE)
     const promises = batch.map(async (symbol) => {
       const binanceSymbol = symbol.replace('/', '')
       const url = `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${binanceSymbol}`

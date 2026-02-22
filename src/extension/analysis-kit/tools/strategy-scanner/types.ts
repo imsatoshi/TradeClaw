@@ -29,6 +29,8 @@ export interface ScanResult {
     sessionName: string       // 'asian' | 'london' | 'ny_overlap' | 'ny' | 'late'
     note: string
   }
+  /** 4H OHLCV data used internally — exposed for regime detection reuse. */
+  ohlcv4h?: Record<string, import('../../data/interfaces.js').MarketData[]>
 }
 
 export interface FundingRateInfo {

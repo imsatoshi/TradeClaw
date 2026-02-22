@@ -48,8 +48,8 @@ const agentSchema = z.object({
 
 const cryptoSchema = z.object({
   allowedSymbols: z.array(z.string()).min(1).default([
-    'BTC/USD', 'ETH/USD', 'SOL/USD', 'BNB/USD', 'APT/USD',
-    'SUI/USD', 'HYPE/USD', 'DOGE/USD', 'XRP/USD',
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'APT/USDT',
+    'SUI/USDT', 'HYPE/USDT', 'DOGE/USDT', 'XRP/USDT',
   ]),
   provider: z.discriminatedUnion('type', [
     z.object({
