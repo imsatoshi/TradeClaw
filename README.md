@@ -15,9 +15,12 @@
 ## 功能
 
 - **双 AI 引擎** — 运行时通过 Telegram `/settings` 切换 Claude Code CLI 和 Vercel AI SDK（支持任意 OpenAI 兼容服务商）
-- **加密货币交易** — CCXT（直连交易所）或 [Freqtrade](https://www.freqtrade.io/) 策略机器人，AI 作为基金经理管理策略范围
+- **加密货币交易** — CCXT（直连交易所）或 [Freqtrade](https://www.freqtrade.io/) 订单执行层，AI 是唯一决策者
 - **证券交易** — Alpaca 美股集成，暂存→提交→推送三段式操作流
-- **策略自动扫描** — 一次调用扫描全仓位品种，内置 RSI 背离、布林带挤压、资金费率反转三套 4H 策略，心跳自动触发
+- **策略自动扫描** — 一次调用扫描全仓位品种，内置 RSI 背离、EMA 趋势、N 周期突破、资金费率反转四套 4H 策略 + 1H 多时间框架过滤，心跳自动触发
+- **市场状态检测** — 4H EMA9/21/55 三线排列自动识别趋势/震荡，作为信号上下文注入心跳
+- **Freqtrade 健康监控** — 心跳自动注入 Freqtrade 服务状态（ping + 最后处理时间），异常时告警
+- **风控硬限** — 最大并发仓位、单笔最大 40% 权益、可用余额 < 30% 禁止开仓，代码层面强制执行
 - **市场分析** — 技术指标（RSI、MACD、布林带、ATR 等）、新闻搜索、Binance 公开 API 行情
 - **A 股行情** — 东方财富免费 API，搜索、实时行情、K 线、技术指标（只分析，不交易）
 - **认知状态** — 持久化"大脑"：前额叶记忆、情绪追踪、提交历史
@@ -49,7 +52,7 @@ graph LR
 
   subgraph 工具层
     AK[Analysis Kit]
-    CT[Crypto Trading]
+    CT[Crypto Trading<br/>Freqtrade = Execution Layer]
     ST[Securities Trading]
     BR[Brain 大脑]
     BW[Browser 浏览器]
@@ -126,37 +129,79 @@ cp .env.example .env    # 然后填入你的 API 密钥
 cp data/config/crypto.binance.example.json data/config/crypto.json
 ```
 
-**Freqtrade（策略机器人）** — 通过 REST API 连接 [Freqtrade](https://www.freqtrade.io/) 实例。AI 作为**基金经理**管理策略：
+**Freqtrade（订单执行层）** — 通过 REST API 连接 [Freqtrade](https://www.freqtrade.io/) 实例。AI 是唯一决策者，Freqtrade 仅作为订单执行基础设施（forceentry/forceexit），不运行自主策略：
 
 ```bash
 cp data/config/crypto.freqtrade.example.json data/config/crypto.json
 ```
 
-Freqtrade 模式下，AI 不直接下单，而是管理宏观层面：
+**AI 自主交易工具：**
 
 | 工具 | 说明 |
 |------|------|
-| `cryptoManageBlacklist` | 黑名单管理 — 控制策略可以交易哪些币对 |
+| `cryptoPlaceOrder` | 下单 — AI 决定入场后通过 forceentry 执行 |
+| `cryptoClosePosition` | 平仓 — AI 决定退场后通过 forceexit 执行 |
+| `cryptoGetPositions` | 持仓监控 — 显示入场标签、DCA 层数、利润率 |
+| `cryptoGetOrders` | 订单查询 — 查看所有订单（含已关闭），用于信号结果同步 |
+
+**组合管理工具：**
+
+| 工具 | 说明 |
+|------|------|
+| `cryptoManageBlacklist` | 黑名单管理 — 控制哪些币对可以交易 |
 | `cryptoLockPair` | 临时锁定 — 短期暂停某个币对的交易 |
-| `cryptoGetStrategyStats` | 策略分析 — 按入场信号/退出原因查看胜率和收益 |
-| `cryptoReloadConfig` | 重载配置 — 黑名单/白名单修改后刷新策略 |
-| `cryptoGetPositions` | 持仓监控 — 显示 NFI 信号标签、DCA 次数、利润率 |
-| `cryptoClosePosition` | 紧急平仓 — 仅用于黑天鹅等系统性风险 |
-| `cryptoGetWhitelist` | 白名单查询 — 查看策略当前交易的币对列表 |
+| `cryptoGetStrategyStats` | 信号分析 — 按入场标签/退出原因查看胜率和收益 |
+| `cryptoReloadConfig` | 重载配置 — 黑名单/白名单修改后刷新 |
+| `cryptoGetWhitelist` | 白名单查询 — 查看当前可交易的币对列表 |
+
+**分析 & 信号工具：**
+
+| 工具 | 说明 |
+|------|------|
+| `strategyScan` | 一次性扫描所有白名单品种的四套策略信号 |
+| `proposeTradeWithButtons` | 向 Telegram 发送交易提案，用户通过按钮确认/拒绝 |
+| `calculatePositionSize` | 固定风险比例仓位计算（默认 2% 权益风险） |
+| `cryptoGetFundingRate` | 查询当前资金费率 |
+| `getFundingRateHistory` | 查看资金费率历史趋势 |
+| `getSignalHistory` | 查看信号历史和策略胜率统计 |
+| `syncSignalOutcomes` | 从 Freqtrade 已关闭交易同步信号结果（胜/负） |
 
 Freqtrade HTTP 请求内置自动重试（最多 2 次，间隔 1s），瞬态网络错误在引擎层消化，不暴露给 AI 模型。
 
 ### 策略自动扫描
 
-每次心跳，AI 调用 `strategyScan` 一次性扫描所有白名单品种，内置三套 4H 策略：
+每次心跳，AI 调用 `strategyScan` 一次性扫描所有白名单品种，内置四套 4H 策略 + 1H 多时间框架确认：
 
 | 策略 | 类型 | 触发条件 |
 |------|------|----------|
 | RSI 背离 + 成交量耗尽 | 均值回归 | 价格新低/高但 RSI 背离，成交量萎缩确认 |
-| 布林带挤压 + MACD 交叉 | 突破 | 带宽低于均值（挤压态），histogram 穿零 + 成交量放大 |
-| 资金费率反转 | 逆向 | 极端资金费率（>0.10% 或 <-0.05%）+ RSI 超买/超卖 |
+| EMA 趋势动量 | 趋势跟随 | EMA9/21/55 三线顺序排列 + RSI 过滤（多头 40-70，空头 30-60） |
+| N 周期突破 + 成交量 | 突破 | 收盘价突破 N 根 K 线高/低点 + 成交量 > 1.5x 均值 |
+| 资金费率反转 | 逆向 | 极端资金费率（>0.08%/8h 或 <-0.04%/8h），RSI 作为加分项而非硬条件 |
 
-信号检测由确定性代码完成，AI 负责结合持仓/时段/账户状态做最终决策。系统内置 UTC 交易时段感知（亚洲/伦敦/纽伦重叠/纽约/深夜），深夜时段只执行置信度 ≥ 80 的强信号。
+**增强机制：**
+
+- **多时间框架过滤** — 1H SMA20 趋势方向与 4H 信号对齐时加分（+5），冲突时惩罚（-15），严重冲突降级为 weak
+- **市场状态检测** — 4H EMA9/21/55 排列 + 价格位置自动分类：downtrend / uptrend / ranging，作为上下文注入心跳
+- **OHLCV 缓存** — 25 分钟 TTL，避免跨心跳重复请求 Binance
+- **信号历史** — 所有信号自动持久化到 `data/signals/`，支持按策略查看胜率
+
+信号检测由确定性代码完成，AI 负责结合持仓/时段/账户状态/市场状态做最终决策。系统内置 UTC 交易时段感知（亚洲/伦敦/纽伦重叠/纽约/深夜），深夜时段只执行置信度 ≥ 80 的强信号。
+
+### 心跳自主监控
+
+心跳由 Scheduler 定时触发，每次心跳自动注入以下实时数据：
+
+| 数据 | 说明 |
+|------|------|
+| 市场状态 | 每个币对的 4H 趋势分类（downtrend / uptrend / ranging） |
+| 策略信号 | 四套策略的扫描结果（AI 主要信号源），带状态对齐标签 |
+| 入场/退出统计 | 入场信号标签胜率、退出原因分析 |
+| Freqtrade 健康 | 服务 ping + 最后 K 线处理时间，三级状态（OK / DEGRADED / DOWN） |
+| 待处理订单 | 未成交限价单，超时自动提醒取消 |
+| 仓位风险详情 | 止损价格、止损距离、累计资金费 |
+
+AI 根据 HEARTBEAT.md 中的规则解读这些数据并自主决策（告警、提议交易、锁定币对等）。
 
 ### 证券交易
 
@@ -204,11 +249,14 @@ pnpm test       # 运行测试
 |------|------|
 | `engine.json` | 交易对、轮询间隔、HTTP/MCP 端口、时间框架 |
 | `model.json` | AI 模型服务商、模型名称、可选 base URL |
+| `ai-provider.json` | AI 引擎选择 — `vercel-ai-sdk` 或 `claude-code` |
 | `agent.json` | 最大代理步数、Claude Code 允许/禁止的工具 |
 | `crypto.json` | 加密交易 — CCXT（交易所、交易对）或 Freqtrade（URL、凭证） |
 | `securities.json` | 证券交易、Alpaca 账户、模拟盘开关 |
+| `strategy-params.json` | 策略扫描参数 — 各策略阈值、MTF 加分/惩罚、缓存 TTL，修改后下次扫描生效 |
 | `compaction.json` | 上下文窗口限制、自动压缩阈值 |
 | `scheduler.json` | 心跳间隔、定时任务开关、消息投递队列 |
+| `mcp.json` | MCP Server 配置 |
 | `persona.md` | 系统提示词人格（自由格式 Markdown） |
 
 ## 项目结构
@@ -240,20 +288,30 @@ src/
     agents/                  # Agent 沙盒、工具策略、Glob 模式匹配
     browser/                 # 完整浏览器引擎：Playwright/CDP、Chrome 配置文件、Extension Relay
     channels/                # 插件/频道注册表
+    cli/                     # CLI 工具
     gateway/                 # 认证、协议层、TypeBox schema 定义
     infra/                   # Tailscale 组网、设备认证、TLS、端口检测
     logging/                 # 结构化日志子系统
     media/                   # 图片处理（sharp）
     plugins/                 # 插件注册表和运行时
+    process/                 # 进程管理
+    routing/                 # 路由层
+    security/                # 安全工具
     sessions/                # 会话管理工具
     terminal/                # ANSI 终端 UI
 data/
-  config/                    # JSON 配置文件
+  config/                    # JSON 配置文件（含 strategy-params.json 热更新策略参数）
   sessions/                  # JSONL 对话历史
   brain/                     # 前额叶记忆、情绪日志
+  signals/                   # 信号历史和结果跟踪
+  cron/                      # 定时任务持久化（jobs.json）
+  delivery-queue/            # 出站消息持久化队列（指数退避重试）
   crypto-trading/            # 加密钱包提交历史
   securities-trading/        # 证券钱包提交历史
 HEARTBEAT.md                 # 自主心跳监控指令（AI 每次心跳读取并执行）
+freqtrade/
+  strategies/
+    TradeClaw.py             # 薄策略 — 不产生信号，AI 通过 forceentry/forceexit 控制
 ```
 
 ## 许可证

@@ -15,5 +15,8 @@ export { fetchExchangeOHLCV } from './data/ExchangeClient';
 export { fetchFundingRates } from './data/FundingRateClient';
 export { runStrategyScan } from './tools/strategy-scanner/index';
 export { detectMarketRegime } from './tools/strategy-scanner/index';
+export { runBacktest, optimizeParams, batchOptimize } from './tools/strategy-scanner/index';
 export type { MarketRegime } from './tools/strategy-scanner/index';
+export type { BacktestConfig, BacktestResult, OptimizeConfig, OptimizeResult } from './tools/strategy-scanner/index';
 export type { StrategySignal, ScanResult, FundingRateInfo } from './tools/strategy-scanner/index';
+export { fetchHistoricalOHLCV } from './data/ExchangeClient';

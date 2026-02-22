@@ -11,7 +11,7 @@ import type { MarketData } from '../../../data/interfaces.js'
 import type { FundingRateInfo, StrategySignal } from '../types.js'
 import { RSI } from '../../indicators/functions/technical.js'
 import { atrSeries } from '../helpers.js'
-import { getStrategyParams } from '../config.js'
+import { getStrategyParamsFor } from '../config.js'
 
 export async function scanFundingFade(
   symbol: string,
@@ -19,8 +19,7 @@ export async function scanFundingFade(
   fundingRate: FundingRateInfo,
   bars15m?: MarketData[],
 ): Promise<StrategySignal[]> {
-  const config = await getStrategyParams()
-  const p = config.funding_fade ?? {}
+  const p = await getStrategyParamsFor('funding_fade', symbol)
 
   const RSI_PERIOD = p.rsiPeriod ?? 14
   const ATR_PERIOD = p.atrPeriod ?? 14

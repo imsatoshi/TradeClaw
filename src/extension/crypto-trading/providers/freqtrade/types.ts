@@ -72,10 +72,10 @@ export interface FreqtradeTrade {
   stop_loss_abs?: number;
   /** Sub-orders for this trade (returned by /api/v1/status when orders are present) */
   orders?: FreqtradeTradeOrder[];
-  // NFI strategy state (from /api/v1/status)
-  enter_tag?: string;             // NFI entry signal tag (e.g. "1", "41", "120", "force_entry")
+  // Strategy state (from /api/v1/status)
+  enter_tag?: string;             // Entry signal tag (e.g. "1", "41", "120", "force_entry")
   exit_reason?: string;           // Exit reason
-  filled_entry_orders?: number;   // Filled entry order count (DCA/grinding count)
+  filled_entry_orders?: number;   // Filled entry order count (DCA layers)
   filled_exit_orders?: number;    // Filled exit order count (partial take-profit count)
 }
 

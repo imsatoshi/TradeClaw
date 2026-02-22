@@ -1,9 +1,9 @@
 /**
- * Market regime detection for NFI X7 protection.
+ * Market regime detection for AI trading context.
  *
  * Uses 4H EMA9/21/55 alignment + price position to classify each symbol
- * as downtrend / uptrend / ranging. The heartbeat uses this to lock pairs
- * in a sustained downtrend before NFI's grinding system gets trapped.
+ * as downtrend / uptrend / ranging. The heartbeat uses this as context
+ * for evaluating strategy signals and managing open positions.
  */
 
 import type { MarketData } from '../../data/interfaces.js'

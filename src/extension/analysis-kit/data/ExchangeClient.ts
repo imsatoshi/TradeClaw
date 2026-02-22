@@ -5,6 +5,8 @@
  * exchange data for whitelisted trading pairs.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { MarketData } from './interfaces.js'
 
 /** Map common timeframe strings to Binance interval codes */
@@ -13,6 +15,149 @@ const INTERVAL_MAP: Record<string, string> = {
   '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
   '1d': '1d', '3d': '3d', '1w': '1w', '1M': '1M',
 }
+
+// ==================== OHLCV Cache ====================
+
+/** Resolve project root (works in both src/ and dist/) */
+function resolveDataDir(): string {
+  const root = process.env.PROJECT_ROOT || process.cwd()
+  return join(root, 'data', 'cache', 'ohlcv')
+}
+
+function cacheKey(symbol: string, timeframe: string): string {
+  return `${symbol.replace('/', '')}_${timeframe}.json`
+}
+
+function loadCache(symbol: string, timeframe: string): MarketData[] {
+  const dir = resolveDataDir()
+  const file = join(dir, cacheKey(symbol, timeframe))
+  if (!existsSync(file)) return []
+  try {
+    return JSON.parse(readFileSync(file, 'utf-8')) as MarketData[]
+  } catch {
+    return []
+  }
+}
+
+function saveCache(symbol: string, timeframe: string, bars: MarketData[]): void {
+  const dir = resolveDataDir()
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const file = join(dir, cacheKey(symbol, timeframe))
+  writeFileSync(file, JSON.stringify(bars))
+}
+
+// ==================== Rate Limiting ====================
+
+const RATE_DELAY_MS = 200  // 200ms between Binance API requests
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms))
+}
+
+// ==================== Historical OHLCV (with cache) ====================
+
+/**
+ * Fetch historical OHLCV data for a single symbol within a time range.
+ *
+ * Uses disk cache for incremental updates:
+ * 1. Load cached bars from data/cache/ohlcv/
+ * 2. Only fetch bars newer than cache (or all if no cache)
+ * 3. Merge, deduplicate, save back to cache
+ * 4. Return only the requested [startTime, endTime] slice
+ *
+ * Rate-limited: 200ms delay between pagination requests to avoid Binance bans.
+ */
+export async function fetchHistoricalOHLCV(
+  symbol: string,
+  timeframe: string,
+  startTime: number,
+  endTime: number,
+): Promise<MarketData[]> {
+  const interval = INTERVAL_MAP[timeframe] ?? '1h'
+  const binanceSymbol = symbol.replace('/', '')
+  const PAGE_LIMIT = 1500
+
+  // Load cache and determine fetch start
+  const cached = loadCache(symbol, timeframe)
+  const startTimeSec = Math.floor(startTime / 1000)
+  const endTimeSec = Math.floor(endTime / 1000)
+
+  // Find the latest cached timestamp (seconds)
+  let fetchFrom = startTime
+  if (cached.length > 0) {
+    const lastCachedSec = cached[cached.length - 1].time
+    // Only fetch from after the last cached bar if cache covers our start
+    if (cached[0].time <= startTimeSec) {
+      fetchFrom = (lastCachedSec + 1) * 1000  // convert sec → ms, +1 to avoid overlap
+    }
+  }
+
+  // Fetch new bars (if needed)
+  const newBars: MarketData[] = []
+  if (fetchFrom < endTime) {
+    let cursor = fetchFrom
+    while (cursor < endTime) {
+      const url =
+        `https://fapi.binance.com/fapi/v1/klines` +
+        `?symbol=${binanceSymbol}&interval=${interval}` +
+        `&startTime=${cursor}&endTime=${endTime}&limit=${PAGE_LIMIT}`
+
+      const res = await fetch(url)
+      if (!res.ok) {
+        console.warn(`ExchangeClient: HTTP ${res.status} for ${symbol} historical (${timeframe})`)
+        break
+      }
+
+      const klines = (await res.json()) as number[][]
+      if (klines.length === 0) break
+
+      for (const k of klines) {
+        newBars.push({
+          symbol,
+          time: Math.floor(Number(k[0]) / 1000),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        })
+      }
+
+      const lastCloseTime = Number(klines[klines.length - 1][6])
+      cursor = lastCloseTime + 1
+
+      if (klines.length < PAGE_LIMIT) break
+
+      // Rate limit between pages
+      await sleep(RATE_DELAY_MS)
+    }
+  }
+
+  // Merge cached + new, deduplicate by time
+  const merged = [...cached, ...newBars]
+  const seen = new Set<number>()
+  const deduped: MarketData[] = []
+  for (const bar of merged) {
+    if (!seen.has(bar.time)) {
+      seen.add(bar.time)
+      deduped.push(bar)
+    }
+  }
+  deduped.sort((a, b) => a.time - b.time)
+
+  // Save full merged cache (keep up to 120 days of data to avoid unbounded growth)
+  const MAX_CACHE_SEC = 120 * 86_400
+  const cutoff = Math.floor(Date.now() / 1000) - MAX_CACHE_SEC
+  const toCache = deduped.filter(b => b.time >= cutoff)
+  if (newBars.length > 0 || cached.length === 0) {
+    saveCache(symbol, timeframe, toCache)
+  }
+
+  // Return only the requested range
+  return deduped.filter(b => b.time >= startTimeSec && b.time <= endTimeSec)
+}
+
+// ==================== Real-time OHLCV (no cache) ====================
 
 /**
  * Fetch OHLCV K-line data from Binance Futures for multiple symbols.

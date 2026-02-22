@@ -107,7 +107,7 @@ export interface CryptoPosition {
   positionValue: number;
   // Strategy context (optional, provider-specific)
   enterTag?: string;           // Strategy entry signal tag
-  grindCount?: number;         // DCA/grinding count
+  dcaCount?: number;            // DCA layers (number of additional entry orders)
   partialExitCount?: number;   // Partial take-profit count
   profitRatio?: number;        // Current profit ratio (decimal, e.g. 0.035 = 3.5%)
   // Risk detail fields (from Freqtrade)

@@ -65,14 +65,14 @@ export function formatToolResults(toolResults: any[]): string | null {
 
       let totalPnl = 0
       positions.forEach((p: any, i: number) => {
-        // NFI strategy context header
-        const nfiParts: string[] = []
-        if (p.enterTag) nfiParts.push(`signal: ${p.enterTag}`)
-        if (typeof p.grindCount === 'number' && p.grindCount > 0) nfiParts.push(`DCA: ${p.grindCount}x`)
-        if (typeof p.partialExitCount === 'number' && p.partialExitCount > 0) nfiParts.push(`partial exits: ${p.partialExitCount}`)
-        const nfiLabel = nfiParts.length > 0 ? ` [NFI ${nfiParts.join(', ')}]` : ''
+        // Strategy context header
+        const tagParts: string[] = []
+        if (p.enterTag) tagParts.push(`signal: ${p.enterTag}`)
+        if (typeof p.dcaCount === 'number' && p.dcaCount > 0) tagParts.push(`DCA: ${p.dcaCount}x`)
+        if (typeof p.partialExitCount === 'number' && p.partialExitCount > 0) tagParts.push(`partial exits: ${p.partialExitCount}`)
+        const tagLabel = tagParts.length > 0 ? ` [${tagParts.join(', ')}]` : ''
 
-        text += `**${i + 1}. ${p.symbol}**${nfiLabel}\n`
+        text += `**${i + 1}. ${p.symbol}**${tagLabel}\n`
         text += `- 方向: ${p.side === 'long' ? '做多 📈' : '做空 📉'}\n`
         text += `- 数量: ${p.size}\n`
         text += `- 开仓价: $${p.entryPrice}\n`
