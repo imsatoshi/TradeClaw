@@ -11,11 +11,10 @@ import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
 import { RSI } from '../../indicators/functions/technical.js'
 import { emaSeries, sma, atrSeries } from '../helpers.js'
-import { getStrategyParams } from '../config.js'
+import { getStrategyParamsFor } from '../config.js'
 
 export async function scanEmaTrend(symbol: string, bars: MarketData[], bars15m?: MarketData[]): Promise<StrategySignal[]> {
-  const config = await getStrategyParams()
-  const p = config.ema_trend ?? {}
+  const p = await getStrategyParamsFor('ema_trend', symbol)
 
   const EMA_FAST = p.emaFast ?? 9
   const EMA_MID = p.emaMid ?? 21

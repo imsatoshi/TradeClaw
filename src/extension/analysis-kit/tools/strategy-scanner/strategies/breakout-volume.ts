@@ -10,11 +10,10 @@
 import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
 import { sma, atrSeries } from '../helpers.js'
-import { getStrategyParams } from '../config.js'
+import { getStrategyParamsFor } from '../config.js'
 
 export async function scanBreakoutVolume(symbol: string, bars: MarketData[], bars15m?: MarketData[]): Promise<StrategySignal[]> {
-  const config = await getStrategyParams()
-  const p = config.breakout_volume ?? {}
+  const p = await getStrategyParamsFor('breakout_volume', symbol)
 
   const LOOKBACK = p.lookback ?? 20
   const ATR_PERIOD = p.atrPeriod ?? 14

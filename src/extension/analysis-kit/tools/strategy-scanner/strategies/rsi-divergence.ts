@@ -9,11 +9,10 @@
 import type { MarketData } from '../../../data/interfaces.js'
 import type { StrategySignal } from '../types.js'
 import { rsiSeries, findSwingLows, findSwingHighs, atrSeries } from '../helpers.js'
-import { getStrategyParams } from '../config.js'
+import { getStrategyParamsFor } from '../config.js'
 
 export async function scanRsiDivergence(symbol: string, bars: MarketData[], bars15m?: MarketData[]): Promise<StrategySignal[]> {
-  const config = await getStrategyParams()
-  const p = config.rsi_divergence ?? {}
+  const p = await getStrategyParamsFor('rsi_divergence', symbol)
 
   const RSI_PERIOD = p.rsiPeriod ?? 14
   const ATR_PERIOD = p.atrPeriod ?? 14
