@@ -538,6 +538,12 @@ export class TradeManager {
       return
     }
 
+    // Retry placing SL if it's still pending (may have failed on initial activation)
+    if (plan.stopLoss.status === 'pending') {
+      log.info(`${plan.symbol} SL still pending — retrying placement`)
+      await this.placeStopLoss(plan)
+    }
+
     // Check current placed TP
     const placedTp = plan.takeProfits.find(tp => tp.status === 'placed')
     if (!placedTp) return
@@ -675,16 +681,23 @@ export class TradeManager {
   private async checkTpFilled(plan: TradePlan, tp: TakeProfitLevel, trade: FreqtradeTrade): Promise<boolean> {
     // If trade has no open orders, the TP limit exit likely filled
     if (!trade.has_open_orders && tp.status === 'placed') {
-      // Double-check: look at filled_exit_orders count increase
-      const filledExitCount = trade.filled_exit_orders ?? 0
+      // Primary check: nr_of_successful_exits > our filled count
+      // (filled_exit_orders may not exist in API; nr_of_successful_exits is the correct field)
+      const exitCount = trade.nr_of_successful_exits ?? trade.filled_exit_orders ?? 0
       const ourFilledCount = plan.takeProfits.filter(t => t.status === 'filled').length
-      if (filledExitCount > ourFilledCount) {
+      if (exitCount > ourFilledCount) {
+        log.info(`${plan.symbol} TP${tp.level} fill detected — exits=${exitCount} > tracked=${ourFilledCount}`)
         return true
       }
-      // Also check if the trade's orders sub-array shows our order as closed
-      if (trade.orders) {
-        const ourOrder = trade.orders.find(o => o.order_id === tp.orderId)
-        if (ourOrder && ourOrder.status === 'closed') {
+      // Fallback: check if position size shrank (partial close happened)
+      if (trade.amount_requested && trade.amount < trade.amount_requested) {
+        const closedRatio = 1 - (trade.amount / trade.amount_requested)
+        const expectedRatio = plan.takeProfits
+          .filter(t => t.status === 'filled')
+          .reduce((sum, t) => sum + t.sizeRatio, 0)
+        // If more was closed than we've tracked, a TP (or manual close) happened
+        if (closedRatio > expectedRatio + 0.05) {
+          log.info(`${plan.symbol} TP${tp.level} fill detected via size — closed=${(closedRatio * 100).toFixed(1)}% > tracked=${(expectedRatio * 100).toFixed(1)}%`)
           return true
         }
       }

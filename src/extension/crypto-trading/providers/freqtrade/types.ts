@@ -77,6 +77,10 @@ export interface FreqtradeTrade {
   exit_reason?: string;           // Exit reason
   filled_entry_orders?: number;   // Filled entry order count (DCA layers)
   filled_exit_orders?: number;    // Filled exit order count (partial take-profit count)
+  nr_of_successful_entries?: number;
+  nr_of_successful_exits?: number;
+  amount_requested?: number;      // Original entry amount before partial exits
+  realized_profit?: number;       // Accumulated realized profit from partial exits
 }
 
 export interface FreqtradeTradeOrder {
