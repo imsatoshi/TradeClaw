@@ -110,8 +110,8 @@ export interface FreqtradeBalance {
   currency: string;
   free: number;
   used: number;
-  total: number;
-  est_btc?: number;
+  balance: number;
+  est_stake?: number;
 }
 
 export interface FreqtradeBalanceResponse {

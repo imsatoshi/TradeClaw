@@ -415,9 +415,10 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     const stakeCurrency = balance.stake || this.stakeCurrency;
 
     // Find stake currency balance
+    // NOTE: Freqtrade returns "balance" (not "total") for individual currency entries
     const stakeBal = balance.currencies.find(c => c.currency === stakeCurrency);
     const free = stakeBal?.free || 0;
-    const total = stakeBal?.total || 0;
+    const total = stakeBal?.balance || 0;
     const used = stakeBal?.used || 0;
 
     // Calculate unrealized PnL from open positions
