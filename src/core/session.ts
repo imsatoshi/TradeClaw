@@ -258,6 +258,13 @@ export interface ToModelMessagesOpts {
   dataTTL?: number
 }
 
+/** Truncate oversized tool results to prevent context overflow. */
+const MAX_TOOL_RESULT_CHARS = 8_000
+function truncateToolResult(content: string): string {
+  if (content.length <= MAX_TOOL_RESULT_CHARS) return content
+  return content.slice(0, MAX_TOOL_RESULT_CHARS) + '\n\n[...truncated, result too large. Call tool again if you need the full data.]'
+}
+
 export function toModelMessages(entries: SessionEntry[], opts?: ToModelMessagesOpts): SDKModelMessage[] {
   const messages: SDKModelMessage[] = []
   const now = Date.now()
@@ -290,7 +297,7 @@ export function toModelMessages(entries: SessionEntry[], opts?: ToModelMessagesO
               type: 'tool-result' as const,
               toolCallId: tr.tool_use_id,
               toolName: 'unknown', // Claude Code format doesn't store tool name in result
-              output: { type: 'text' as const, value: tr.content },
+              output: { type: 'text' as const, value: truncateToolResult(tr.content) },
             })),
           })
         } else {
