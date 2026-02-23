@@ -50,9 +50,9 @@ export async function scanEmaTrend(symbol: string, bars: MarketData[], bars15m?:
 
   if (emaSlowSeries.length === 0) return []
 
-  // Get latest EMA values (align to slowest series)
-  const emaFastVal = emaFastSeries[emaFastSeries.length - 1 - (EMA_SLOW - EMA_FAST)]
-  const emaMidVal = emaMidSeries[emaMidSeries.length - 1 - (EMA_SLOW - EMA_MID)]
+  // Get latest EMA values — all series end at the same latest bar
+  const emaFastVal = emaFastSeries[emaFastSeries.length - 1]
+  const emaMidVal = emaMidSeries[emaMidSeries.length - 1]
   const emaSlowVal = emaSlowSeries[emaSlowSeries.length - 1]
 
   if (emaFastVal === undefined || emaMidVal === undefined || emaSlowVal === undefined) return []

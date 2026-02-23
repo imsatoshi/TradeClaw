@@ -112,48 +112,57 @@ export function detectMarketRegime(
 // ==================== Regime-Strategy Filter ====================
 
 /**
- * Regime-strategy compatibility rules.
+ * Regime-strategy compatibility rules (soft filter).
  *
- * Mean-reversion strategies work in ranges; trend-following in trends.
- * `allowed: false` = hard filter (signal dropped).
- * `confidenceAdjust` = bonus/penalty applied to surviving signals.
+ * All strategies are ALLOWED in all regimes — the direction filter (line 172-173)
+ * is the safety net that blocks counter-trend signals (long in downtrend, short in uptrend).
+ *
+ * Strategy category determines a confidence ADJUSTMENT, not a hard block:
+ *   - Regime-aligned strategies get a bonus (+10)
+ *   - Regime-misaligned strategies get a penalty (-10)
+ *   - The MIN_COMPOSITE_SCORE (60) in confluence.ts naturally filters low-quality signals
+ *
+ * This allows cross-category confluence (e.g., breakout_volume + funding_fade LONG in uptrend)
+ * which was previously impossible due to hard blocking of mean-reversion in trends.
  */
 const REGIME_STRATEGY_RULES: Record<
   MarketRegime['regime'],
   Record<string, { allowed: boolean; confidenceAdjust: number }>
 > = {
   uptrend: {
-    ema_trend:        { allowed: true,  confidenceAdjust: +5 },
-    breakout_volume:  { allowed: true,  confidenceAdjust: +5 },
-    structure_break:  { allowed: true,  confidenceAdjust: +10 },
-    rsi_divergence:   { allowed: false, confidenceAdjust: -20 },
-    funding_fade:     { allowed: false, confidenceAdjust: -15 },
-    bb_mean_revert:   { allowed: false, confidenceAdjust: -20 },
+    ema_trend:        { allowed: true, confidenceAdjust: +10 },
+    breakout_volume:  { allowed: true, confidenceAdjust: +10 },
+    structure_break:  { allowed: true, confidenceAdjust: +10 },
+    rsi_divergence:   { allowed: true, confidenceAdjust: -10 },
+    funding_fade:     { allowed: true, confidenceAdjust: -10 },
+    bb_mean_revert:   { allowed: true, confidenceAdjust: -10 },
   },
   downtrend: {
-    ema_trend:        { allowed: true,  confidenceAdjust: +5 },
-    breakout_volume:  { allowed: true,  confidenceAdjust: +5 },
-    structure_break:  { allowed: true,  confidenceAdjust: +10 },
-    rsi_divergence:   { allowed: false, confidenceAdjust: -20 },
-    funding_fade:     { allowed: false, confidenceAdjust: -15 },
-    bb_mean_revert:   { allowed: false, confidenceAdjust: -20 },
+    ema_trend:        { allowed: true, confidenceAdjust: +10 },
+    breakout_volume:  { allowed: true, confidenceAdjust: +10 },
+    structure_break:  { allowed: true, confidenceAdjust: +10 },
+    rsi_divergence:   { allowed: true, confidenceAdjust: -10 },
+    funding_fade:     { allowed: true, confidenceAdjust: -10 },
+    bb_mean_revert:   { allowed: true, confidenceAdjust: -10 },
   },
   ranging: {
-    rsi_divergence:   { allowed: true,  confidenceAdjust: +5 },
-    funding_fade:     { allowed: true,  confidenceAdjust: +5 },
-    bb_mean_revert:   { allowed: true,  confidenceAdjust: +10 },
-    ema_trend:        { allowed: false, confidenceAdjust: -15 },
-    breakout_volume:  { allowed: false, confidenceAdjust: -15 },
-    structure_break:  { allowed: false, confidenceAdjust: -15 },
+    rsi_divergence:   { allowed: true, confidenceAdjust: +10 },
+    funding_fade:     { allowed: true, confidenceAdjust: +10 },
+    bb_mean_revert:   { allowed: true, confidenceAdjust: +10 },
+    ema_trend:        { allowed: true, confidenceAdjust: -10 },
+    breakout_volume:  { allowed: true, confidenceAdjust: -10 },
+    structure_break:  { allowed: true, confidenceAdjust: -10 },
   },
 }
 
 /**
  * Filter signals by regime compatibility.
  *
- * 1. Drop signals whose strategy is incompatible with current regime.
- * 2. Drop signals whose direction conflicts with trend (long in downtrend, short in uptrend).
- * 3. Adjust confidence for surviving signals.
+ * 1. Hard filter: block counter-trend DIRECTION (long in downtrend, short in uptrend).
+ *    This is the safety net — never fight the trend direction.
+ * 2. Soft filter: adjust confidence by strategy-regime alignment.
+ *    Regime-aligned strategies get a bonus, misaligned get a penalty.
+ *    No strategy is ever hard-blocked — confidence + MIN_COMPOSITE_SCORE handle quality.
  *
  * Mutates `confidence` and `details.regime` on surviving signals.
  */
@@ -162,18 +171,16 @@ export function applyRegimeFilter(
   regime: MarketRegime,
 ): StrategySignal[] {
   return signals.filter(signal => {
-    const rules = REGIME_STRATEGY_RULES[regime.regime]
-    const rule = rules[signal.strategy]
-    if (!rule) return true // unknown strategy, pass through
-
-    if (!rule.allowed) return false
-
-    // Direction alignment: block counter-trend signals
+    // Hard filter: block counter-trend direction (the primary safety net)
     if (regime.regime === 'uptrend' && signal.direction === 'short') return false
     if (regime.regime === 'downtrend' && signal.direction === 'long') return false
 
-    // Adjust confidence
-    signal.confidence = Math.min(100, Math.max(0, signal.confidence + rule.confidenceAdjust))
+    // Soft filter: adjust confidence by strategy-regime alignment
+    const rules = REGIME_STRATEGY_RULES[regime.regime]
+    const rule = rules[signal.strategy]
+    if (rule) {
+      signal.confidence = Math.min(100, Math.max(0, signal.confidence + rule.confidenceAdjust))
+    }
     signal.details = { ...signal.details, regime: regime.regime }
     return true
   })
