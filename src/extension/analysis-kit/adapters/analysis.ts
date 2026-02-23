@@ -466,7 +466,18 @@ Call this once per heartbeat cycle instead of manually calculating indicators.
         const targetSymbols = symbols && symbols.length > 0
           ? symbols
           : [...CRYPTO_ALLOWED_SYMBOLS];
-        return await runStrategyScan(targetSymbols);
+        const result = await runStrategyScan(targetSymbols);
+        // Return only actionable signals (no raw OHLCV — saves ~150K+ tokens)
+        const actionable = result.signals.filter(s => s.confidence >= 60);
+        return {
+          scannedAt: result.scannedAt,
+          symbolCount: result.symbols.length,
+          timeframe: result.timeframe,
+          signals: actionable,
+          signalCount: { total: result.signals.length, actionable: actionable.length },
+          errors: result.errors.length > 0 ? result.errors.slice(0, 5) : [],
+          sessionInfo: result.sessionInfo,
+        };
       },
     }),
 
