@@ -4,6 +4,7 @@ import { readFile, writeFile, appendFile, mkdir } from 'fs/promises'
 import { resolve } from 'path'
 import { Engine } from './core/engine.js'
 import { loadConfig } from './core/config.js'
+import { setTradingMode, getModeTag } from './core/logger.js'
 import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
@@ -95,6 +96,7 @@ async function main() {
     tradeManager = new TradeManager(
       cryptoResult.engine,
       cryptoResult.directExchangeEngine,
+      cryptoResult.isDryRun,
     )
     await tradeManager.start()
   }
@@ -189,6 +191,7 @@ async function main() {
   const frontalLobe = brain.getFrontalLobe()
   const emotion = brain.getEmotion().current
   const isDryRun = cryptoResult?.isDryRun ?? true  // default assume dry-run
+  setTradingMode(isDryRun)
 
   const instructions = [
     persona,
@@ -634,9 +637,10 @@ async function main() {
       // Build trade plans block
       const tradePlanBlock = tradeManager ? tradeManager.getSummaryForHeartbeat() : ''
 
+      const modeLabel = isDryRun ? '🧪 DRY-RUN (paper trading)' : '🔴 LIVE (real money)'
       liveDataBlock = [
         '',
-        '--- LIVE TRADING DATA (pre-fetched, current as of this heartbeat) ---',
+        `--- ${getModeTag()}LIVE TRADING DATA — ${modeLabel} ---`,
         '',
         '## Account',
         JSON.stringify(account, null, 2),

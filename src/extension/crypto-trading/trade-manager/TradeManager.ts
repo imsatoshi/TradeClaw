@@ -15,6 +15,9 @@ import type { ICryptoTradingEngine } from '../interfaces.js'
 import type { TradePlan, TakeProfitLevel, TradePlanPnL } from './types.js'
 import { TradePlanStore } from './store.js'
 import { emit, enqueueSystemEvent } from '../../../core/agent-events.js'
+import { createLogger, getModeTag } from '../../../core/logger.js'
+
+const log = createLogger('trade-manager')
 
 /** Normalize Freqtrade pair: "ZEC/USDT:USDT" → "ZEC/USDT" */
 function normalizePair(pair: string): string {
@@ -27,6 +30,7 @@ export class TradeManager {
   private store: TradePlanStore
   private engine: FreqtradeTradingEngine
   private directEngine?: ICryptoTradingEngine
+  private isDryRun: boolean
   private ticking = false
   /** Live P&L snapshots, refreshed each tick (plan.id → PnL) */
   private pnlCache = new Map<string, TradePlanPnL>()
@@ -34,9 +38,11 @@ export class TradeManager {
   constructor(
     engine: FreqtradeTradingEngine,
     directEngine?: ICryptoTradingEngine,
+    isDryRun = true,
   ) {
     this.engine = engine
     this.directEngine = directEngine
+    this.isDryRun = isDryRun
     this.store = new TradePlanStore()
   }
 
@@ -44,7 +50,8 @@ export class TradeManager {
   async start(intervalMs = 10_000): Promise<void> {
     await this.store.load()
     this.pollTimer = setInterval(() => this.safeTick(), intervalMs)
-    console.log(`trade-manager: started (poll every ${intervalMs}ms, ${this.store.getAll().length} active plans)`)
+    const mode = this.isDryRun ? 'DRY-RUN' : 'LIVE'
+    log.info(`started [${mode}] (poll every ${intervalMs}ms, ${this.store.getAll().length} active plans)`)
   }
 
   /** Stop polling. */
@@ -53,7 +60,7 @@ export class TradeManager {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
-    console.log('trade-manager: stopped')
+    log.info('stopped')
   }
 
   /** Create a new trade plan. Entry order should already be placed. */
@@ -90,7 +97,7 @@ export class TradeManager {
     }
 
     await this.store.save(plan)
-    console.log(`trade-manager: plan ${plan.id.slice(0, 8)} created for ${plan.symbol} ${plan.direction}`)
+    log.info(`plan ${plan.id.slice(0, 8)} created for ${plan.symbol} ${plan.direction}`)
     return plan
   }
 
@@ -119,7 +126,7 @@ export class TradeManager {
     plan.status = 'cancelled'
     await this.store.archive(plan)
     this.pnlCache.delete(planId)
-    console.log(`trade-manager: plan ${planId.slice(0, 8)} cancelled`)
+    log.info(`plan ${planId.slice(0, 8)} cancelled`)
     return { success: true }
   }
 
@@ -206,7 +213,7 @@ export class TradeManager {
     if (updates.trailingStop !== undefined) {
       changes.push(updates.trailingStop ? `trailing ${updates.trailingStop.type} ${updates.trailingStop.distance}` : 'trailing disabled')
     }
-    console.log(`trade-manager: plan ${planId.slice(0, 8)} updated — ${changes.join(', ')}`)
+    log.info(`plan ${planId.slice(0, 8)} updated — ${changes.join(', ')}`)
 
     this.emitEvent(plan, 'plan_updated', `${plan.symbol} plan updated: ${changes.join(', ')}`)
 
@@ -371,7 +378,7 @@ export class TradeManager {
     await this.placeStopLoss(plan)
     await this.store.save(plan)
 
-    console.log(`trade-manager: ${plan.symbol} auto-breakeven — SL moved $${oldSl} → $${plan.entryPrice}`)
+    log.info(`${plan.symbol} auto-breakeven — SL moved $${oldSl} → $${plan.entryPrice}`)
     this.emitEvent(plan, 'sl_moved', `${plan.symbol} SL auto-moved to breakeven $${plan.entryPrice} (was $${oldSl})`)
   }
 
@@ -415,7 +422,7 @@ export class TradeManager {
     await this.placeStopLoss(plan)
     await this.store.save(plan)
 
-    console.log(`trade-manager: ${plan.symbol} trailing stop — SL moved $${oldSl} → $${plan.stopLoss.price}`)
+    log.info(`${plan.symbol} trailing stop — SL moved $${oldSl} → $${plan.stopLoss.price}`)
     // Don't emit event for every trail tick — too noisy. Only log.
   }
 
@@ -427,7 +434,7 @@ export class TradeManager {
     try {
       await this.tick()
     } catch (err) {
-      console.error('trade-manager: tick error:', err)
+      log.error(`tick error: ${err}`)
     } finally {
       this.ticking = false
     }
@@ -442,7 +449,7 @@ export class TradeManager {
     try {
       trades = await this.engine.getRawTrades()
     } catch (err) {
-      console.warn('trade-manager: failed to fetch trades:', err)
+      log.warn(`failed to fetch trades: ${err}`)
       return
     }
 
@@ -450,7 +457,7 @@ export class TradeManager {
       try {
         await this.processPlan(plan, trades)
       } catch (err) {
-        console.error(`trade-manager: error processing plan ${plan.id.slice(0, 8)}:`, err)
+        log.error(`error processing plan ${plan.id.slice(0, 8)}: ${err}`)
         plan.status = 'error'
         plan.errorMessage = err instanceof Error ? err.message : String(err)
         await this.store.save(plan)
@@ -512,7 +519,7 @@ export class TradeManager {
     plan.status = 'active'
     await this.store.save(plan)
 
-    console.log(`trade-manager: plan ${plan.id.slice(0, 8)} activated — ${plan.symbol} entry at $${trade.open_rate}, size ${trade.amount}`)
+    log.info(`plan ${plan.id.slice(0, 8)} activated — ${plan.symbol} entry at $${trade.open_rate}, size ${trade.amount}`)
 
     // Place first TP order
     await this.placeNextTp(plan, trade)
@@ -555,7 +562,7 @@ export class TradeManager {
       const filledCount = plan.takeProfits.filter(tp => tp.status === 'filled').length
       const totalCount = plan.takeProfits.length
 
-      console.log(`trade-manager: plan ${plan.id.slice(0, 8)} TP${placedTp.level} filled at ~$${placedTp.filledPrice} (realized: $${(plan.realizedPnl ?? 0).toFixed(2)})`)
+      log.info(`plan ${plan.id.slice(0, 8)} TP${placedTp.level} filled at ~$${placedTp.filledPrice} (realized: $${(plan.realizedPnl ?? 0).toFixed(2)})`)
 
       if (filledCount === totalCount) {
         // All TPs filled — plan complete
@@ -596,7 +603,7 @@ export class TradeManager {
 
     const reason = trade?.exit_reason ?? 'trade closed'
     const totalPnl = (plan.realizedPnl ?? 0).toFixed(2)
-    console.log(`trade-manager: plan ${plan.id.slice(0, 8)} — trade closed (${reason}), total P&L: $${totalPnl}`)
+    log.info(`plan ${plan.id.slice(0, 8)} — trade closed (${reason}), total P&L: $${totalPnl}`)
     this.emitEvent(plan, 'sl_triggered', `${plan.symbol} stop-loss triggered (${reason}). Total P&L: $${totalPnl}`)
   }
 
@@ -623,19 +630,19 @@ export class TradeManager {
         nextTp.status = 'placed'
         nextTp.orderId = result.orderId
         await this.store.save(plan)
-        console.log(`trade-manager: placed TP${nextTp.level} for ${plan.symbol} — limit $${nextTp.price}, size ${exitSize.toFixed(4)}`)
+        log.info(`placed TP${nextTp.level} for ${plan.symbol} — limit $${nextTp.price}, size ${exitSize.toFixed(4)}`)
       } else {
-        console.warn(`trade-manager: failed to place TP${nextTp.level} for ${plan.symbol}: ${result.error}`)
+        log.warn(`failed to place TP${nextTp.level} for ${plan.symbol}: ${result.error}`)
       }
     } catch (err) {
-      console.error(`trade-manager: TP${nextTp.level} placement error:`, err)
+      log.error(`TP${nextTp.level} placement error: ${err}`)
     }
   }
 
   /** Place a STOP_MARKET order via the direct exchange engine (CCXT). */
   private async placeStopLoss(plan: TradePlan): Promise<void> {
     if (!this.directEngine) {
-      console.log(`trade-manager: no direct engine, SL for ${plan.symbol} managed by Freqtrade built-in stoploss`)
+      log.info(`no direct engine, SL for ${plan.symbol} managed by Freqtrade built-in stoploss`)
       return
     }
 
@@ -653,12 +660,12 @@ export class TradeManager {
         plan.stopLoss.status = 'placed'
         plan.stopLoss.orderId = result.orderId
         await this.store.save(plan)
-        console.log(`trade-manager: placed SL for ${plan.symbol} — STOP_MARKET $${plan.stopLoss.price}`)
+        log.info(`placed SL for ${plan.symbol} — STOP_MARKET $${plan.stopLoss.price}`)
       } else {
-        console.warn(`trade-manager: failed to place SL for ${plan.symbol}: ${result.error}`)
+        log.warn(`failed to place SL for ${plan.symbol}: ${result.error}`)
       }
     } catch (err) {
-      console.error(`trade-manager: SL placement error:`, err)
+      log.error(`SL placement error: ${err}`)
     }
   }
 
@@ -699,11 +706,12 @@ export class TradeManager {
   // ==================== Event Emission ====================
 
   private emitEvent(plan: TradePlan, type: string, text: string): void {
-    emit('trade', { type, planId: plan.id, symbol: plan.symbol })
+    const tag = getModeTag()
+    emit('trade', { type, planId: plan.id, symbol: plan.symbol, isDryRun: this.isDryRun })
     enqueueSystemEvent({
       id: `trade-${plan.id.slice(0, 8)}-${type}`,
       source: 'hook',
-      text,
+      text: `${tag}${text}`,
       contextKey: `trade-plan-${plan.id}`,
     })
   }

@@ -26,6 +26,9 @@ import type {
   FreqtradeLockResponse,
 } from './types.js';
 import { CRYPTO_ALLOWED_SYMBOLS, initCryptoAllowedSymbols, initCryptoDefaultLeverage, initCryptoMaxOpenTrades } from '../../interfaces.js';
+import { createLogger } from '../../../../core/logger.js';
+
+const log = createLogger('freqtrade');
 
 export interface FreqtradeEngineConfig {
   /** Freqtrade API URL (e.g., http://localhost:8080) */
@@ -111,7 +114,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     // Sync max open trades from Freqtrade config
     if (showConfig.max_open_trades != null && showConfig.max_open_trades > 0) {
       initCryptoMaxOpenTrades(showConfig.max_open_trades);
-      console.log(`freqtrade: max_open_trades=${showConfig.max_open_trades} (from config)`);
+      log.info(`max_open_trades=${showConfig.max_open_trades} (from config)`);
     }
 
     // Fetch whitelist from Freqtrade and sync with OpenAlice
@@ -120,7 +123,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     const whitelist = rawWhitelist.map(normalizePair).filter(isValidPair);
     if (whitelist.length > 0) {
       initCryptoAllowedSymbols(whitelist);
-      console.log(`freqtrade: synced ${whitelist.length} pairs from whitelist: ${whitelist.join(', ')}`);
+      log.info(`synced ${whitelist.length} pairs from whitelist: ${whitelist.join(', ')}`);
     }
     this.whitelistLastSync = Date.now();
 
@@ -130,13 +133,14 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       const leverageFromTrade = trades.find(t => t.leverage && t.leverage > 1)?.leverage;
       if (leverageFromTrade) {
         initCryptoDefaultLeverage(leverageFromTrade);
-        console.log(`freqtrade: default leverage=${leverageFromTrade}x (from open trades)`);
+        log.info(`default leverage=${leverageFromTrade}x (from open trades)`);
       }
     } catch { /* non-critical, keep default */ }
 
     this.initialized = true;
-    console.log(`freqtrade trading engine: connected to ${this.config.url}`);
-    console.log(`freqtrade: strategy=${showConfig.strategy}, stake=${this.stakeCurrency}, dry_run=${showConfig.dry_run}, mode=${showConfig.trading_mode || 'spot'}`);
+    const modeLabel = this._isDryRun ? 'DRY-RUN' : 'LIVE';
+    log.info(`connected to ${this.config.url} [${modeLabel}]`);
+    log.info(`strategy=${showConfig.strategy}, stake=${this.stakeCurrency}, dry_run=${showConfig.dry_run}, mode=${showConfig.trading_mode || 'spot'}`);
   }
 
   /** Whether Freqtrade is in dry-run (paper trading) mode */
@@ -273,7 +277,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         await this.delete(`/api/v1/trades/${trade.trade_id}/open-order`);
         // Wait for exchange to process the cancellation before placing new order
         await new Promise(resolve => setTimeout(resolve, 500));
-        console.log(`freqtrade: cancelled existing open order for trade ${trade.trade_id} (${order.symbol})`);
+        log.info(`cancelled existing open order for trade ${trade.trade_id} (${order.symbol})`);
       } catch (err) {
         return { success: false, error: `Failed to cancel existing order for trade ${trade.trade_id}: ${err}` };
       }
@@ -426,7 +430,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       const profit = await this.get<{ profit_closed_coin: number }>('/api/v1/profit');
       realizedPnL = profit.profit_closed_coin;
     } catch (err) {
-      console.warn('freqtrade: profit endpoint unavailable:', err instanceof Error ? err.message : err);
+      log.warn(`profit endpoint unavailable: ${err instanceof Error ? err.message : err}`);
     }
 
     return {
@@ -534,13 +538,13 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
           const added = whitelist.filter(s => !prev.includes(s));
           const removed = prev.filter(s => !whitelist.includes(s));
           if (added.length > 0 || removed.length > 0) {
-            console.log(`freqtrade: whitelist updated — added: [${added.join(', ')}], removed: [${removed.join(', ')}]`);
+            log.info(`whitelist updated — added: [${added.join(', ')}], removed: [${removed.join(', ')}]`);
           }
         }
         this.whitelistLastSync = Date.now();
       })
       .catch((err) => {
-        console.warn('freqtrade: background whitelist refresh failed:', err);
+        log.warn(`background whitelist refresh failed: ${err}`);
       })
       .finally(() => {
         this.whitelistRefreshing = false;
@@ -556,7 +560,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       return response.whitelist || [];
     } catch {
       // Fallback: try to extract from open trades if whitelist endpoint fails
-      console.warn('freqtrade: failed to fetch whitelist, using empty list');
+      log.warn('failed to fetch whitelist, using empty list');
       return [];
     }
   }
@@ -817,7 +821,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         return await fn();
       } catch (error) {
         if (i === retries) throw error;
-        console.warn(`freqtrade: request failed, retrying (${i + 1}/${retries})...`);
+        log.warn(`request failed, retrying (${i + 1}/${retries})...`);
         await new Promise(r => setTimeout(r, 1000));
       }
     }
