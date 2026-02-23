@@ -368,9 +368,13 @@ async function main() {
 
   // ==================== Engine ====================
 
-  const agent = createAgent(model, tools, instructions, config.agent.maxSteps)
+  const isAnthropic = config.model.provider === 'anthropic'
+
+  // Create agent without instructions — VercelAIProvider injects system prompt
+  // as a message to enable Anthropic prompt caching (cacheControl: ephemeral).
+  const agent = createAgent(model, tools, undefined, config.agent.maxSteps)
   const compaction = resolveCompactionConfig(config.compaction, config.model.model)
-  const vercelProvider = new VercelAIProvider(agent, compaction)
+  const vercelProvider = new VercelAIProvider(agent, compaction, instructions, isAnthropic)
   const claudeCodeProvider = new ClaudeCodeProvider(config.agent.claudeCode, compaction)
   const router = new ProviderRouter(vercelProvider, claudeCodeProvider)
   const engine = new Engine({ agent, tools, provider: router })
