@@ -435,24 +435,21 @@ Example use cases:
 
     strategyScan: tool({
       description: `
-Scan all whitelisted trading pairs for active strategy signals in one call.
+Scan all whitelisted trading pairs for strategy signals and confluence opportunities.
 
-Runs four strategies on 4H candlestick data fetched automatically from Binance:
-1. RSI Divergence + Volume Exhaustion (mean-reversion, ~60-65% win rate)
-2. EMA Trend Momentum (trend-following, EMA9/21/55 alignment + RSI filter)
-3. N-Period Breakout + Volume Confirmation (breakout, price exceeds N-bar high/low)
-4. Funding Rate Fade (contrarian, extreme funding rates)
+Runs 6 strategies on 4H + 15m candlestick data from Binance:
+1. RSI Divergence + Volume Exhaustion (mean-reversion)
+2. EMA Trend Momentum (trend-following)
+3. N-Period Breakout + Volume Confirmation (breakout)
+4. Funding Rate Fade (contrarian)
+5. Bollinger Band Mean Reversion (15m mean-reversion)
+6. Structure Break / BOS (15m breakout)
 
-Returns structured signals sorted by confidence (highest first), plus session info.
+Returns TWO tiers:
+- compositeSignals: CONFLUENCE signals where 2+ strategies agree (Grade A/B/C) — ONLY propose trades on these
+- signals: individual strategy signals for context only — NEVER trade on single signals alone
 
-Each signal includes:
-- direction: 'long' or 'short'
-- confidence: 0-100 (only act on >= 70)
-- strength: 'strong' | 'moderate' | 'weak'
-- entry, stopLoss, takeProfit, riskRewardRatio
-- reason: human-readable explanation
-
-Call this once per heartbeat cycle instead of manually calculating indicators.
+Call this when user asks about market opportunities or during heartbeat.
       `.trim(),
       inputSchema: z.object({
         symbols: z
@@ -467,12 +464,14 @@ Call this once per heartbeat cycle instead of manually calculating indicators.
           ? symbols
           : [...CRYPTO_ALLOWED_SYMBOLS];
         const result = await runStrategyScan(targetSymbols);
-        // Return only actionable signals (no raw OHLCV — saves ~150K+ tokens)
+        // Return confluence + actionable signals (no raw OHLCV — saves ~150K+ tokens)
         const actionable = result.signals.filter(s => s.confidence >= 60);
         return {
           scannedAt: result.scannedAt,
           symbolCount: result.symbols.length,
           timeframe: result.timeframe,
+          compositeSignals: result.compositeSignals,
+          confluenceCount: result.compositeSignals.length,
           signals: actionable,
           signalCount: { total: result.signals.length, actionable: actionable.length },
           errors: result.errors.length > 0 ? result.errors.slice(0, 5) : [],
