@@ -488,10 +488,10 @@ async function main() {
         ftDataPromise,
       ])
 
-      // Reuse scanner's 1H data for regime detection (no extra Binance fetch)
-      const ohlcv1h = scanResult?.ohlcv1h ?? {}
+      // Reuse scanner's 4H data for regime detection (no extra Binance fetch)
+      const ohlcv4h = scanResult?.ohlcv4h ?? {}
       const whitelistSymbols = [...CRYPTO_ALLOWED_SYMBOLS]
-      const regimeResults = detectMarketRegime(whitelistSymbols, ohlcv1h)
+      const regimeResults = detectMarketRegime(whitelistSymbols, ohlcv4h)
 
       // Fetch funding rates for held positions
       const heldSymbols = Array.isArray(positions?.positions)
@@ -521,7 +521,7 @@ async function main() {
 
         regimeBlock = [
           '',
-          '--- MARKET REGIME (1H EMA9/21/55 trend detection) ---',
+          '--- MARKET REGIME (4H EMA9/21/55 trend detection) ---',
           `Summary: ${downCount} downtrend, ${upCount} uptrend, ${rangingCount} ranging out of ${regimeResults.length} pairs`,
           '',
           ...regimeLines,

@@ -1,16 +1,16 @@
 /**
- * Signal backtester & parameter optimizer — 5m unified architecture.
+ * Signal backtester & parameter optimizer.
  *
- * - runBacktest:      replay strategy scanner on historical 5m data, simulate exits
+ * - runBacktest:      replay strategy scanner on historical data, simulate exits
  * - optimizeParams:   grid-search over SL/TP multipliers to find best expectancy
  *
- * All 6 strategies run on 5m candles. 1H data used for regime detection only.
  * Both share collectSignals() which fetches data and runs strategies once.
  * The optimizer then replays exits cheaply with different SL/TP multipliers.
  */
 
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import type { StrategySignal, StrategyName, FundingRateInfo } from './types.js'
+import { STRATEGY_TIMEFRAMES } from './types.js'
 import type { MarketRegime } from './regime.js'
 import { fetchHistoricalOHLCV } from '../../../archive-analysis/data/ExchangeClient.js'
 import { fetchFundingRates } from '../../../archive-analysis/data/FundingRateClient.js'
@@ -34,9 +34,9 @@ const log = createLogger('backtester')
 export interface BacktestConfig {
   symbol: string
   days: number                    // default 90
-  strategies?: StrategyName[]     // default all 6
+  strategies?: StrategyName[]     // default all 4
   confidenceMin?: number          // default 0
-  maxHoldBars?: number            // default 144 (12h of 5m bars)
+  maxHoldBars?: number            // default 48 (12h of 15m bars)
 }
 
 export interface BacktestTradeResult {
@@ -115,15 +115,15 @@ export interface OptimizeResult {
 
 export interface RawSignalEntry {
   signal: StrategySignal
-  atr: number                         // 5m ATR at signal time
+  atr: number                         // 15m ATR at signal time
   regime: string
-  simStartIdx: number                 // index into bars5m for exit simulation
+  simStartIdx: number                 // index into bars15m for exit simulation
   signalTimeMs: number                // epoch ms — used by WFO to filter by date
 }
 
 export interface CollectedSignals {
   rawSignals: RawSignalEntry[]
-  bars5m: MarketData[]
+  bars15m: MarketData[]
   scanStart: number                   // ms
   endTime: number                     // ms
 }
@@ -214,12 +214,12 @@ function simulateExit(
   direction: 'long' | 'short',
   stopLoss: number,
   takeProfit: number,
-  bars5m: MarketData[],
+  bars15m: MarketData[],
   startIdx: number,
   maxHoldBars: number,
 ): { exitPrice: number; exitReason: 'tp_hit' | 'sl_hit' | 'timeout'; holdBars: number } {
-  for (let i = startIdx; i < bars5m.length && (i - startIdx) < maxHoldBars; i++) {
-    const bar = bars5m[i]
+  for (let i = startIdx; i < bars15m.length && (i - startIdx) < maxHoldBars; i++) {
+    const bar = bars15m[i]
 
     if (direction === 'long') {
       const slHit = bar.low <= stopLoss
@@ -236,8 +236,8 @@ function simulateExit(
     }
   }
 
-  const lastIdx = Math.min(startIdx + maxHoldBars - 1, bars5m.length - 1)
-  return { exitPrice: bars5m[lastIdx].close, exitReason: 'timeout', holdBars: lastIdx - startIdx + 1 }
+  const lastIdx = Math.min(startIdx + maxHoldBars - 1, bars15m.length - 1)
+  return { exitPrice: bars15m[lastIdx].close, exitReason: 'timeout', holdBars: lastIdx - startIdx + 1 }
 }
 
 // ==================== Evaluate a single (SL, TP) combo against signals ====================
@@ -250,7 +250,7 @@ export function evaluateCombo(
   slMult: number,
   tpMult: number,
   signals: RawSignalEntry[],
-  bars5m: MarketData[],
+  bars15m: MarketData[],
   maxHoldBars: number,
 ): { combo: ParamComboResult; trades: BacktestTradeResult[] } {
   const trades: BacktestTradeResult[] = []
@@ -265,7 +265,7 @@ export function evaluateCombo(
       ? signal.entry + tpMult * atr
       : signal.entry - tpMult * atr
 
-    const exit = simulateExit(signal.direction, sl, tp, bars5m, simStartIdx, maxHoldBars)
+    const exit = simulateExit(signal.direction, sl, tp, bars15m, simStartIdx, maxHoldBars)
 
     const pnlPercent = signal.direction === 'long'
       ? ((exit.exitPrice - signal.entry) / signal.entry) * 100
@@ -314,17 +314,20 @@ export async function collectSignals(config: {
   const MS_PER_DAY = 86_400_000
 
   const endTime = now
-  const start5m = now - (days + 2) * MS_PER_DAY   // extra 2 days for lookback
-  const start1h = now - (days + 5) * MS_PER_DAY   // extra 5 days for regime EMA55
+  const start4h = now - (days + 15) * MS_PER_DAY
+  const start15m = now - (days + 2) * MS_PER_DAY
+  const start1h = now - (days + 3) * MS_PER_DAY
   const scanStart = now - days * MS_PER_DAY
 
-  // Sequential fetches to avoid Binance rate limit bursts
-  const bars5m = await fetchHistoricalOHLCV(symbol, '5m', start5m, endTime)
+  // Sequential fetches to avoid Binance rate limit bursts (cache makes repeats instant)
+  const bars4h = await fetchHistoricalOHLCV(symbol, '4h', start4h, endTime)
+  const bars15m = await fetchHistoricalOHLCV(symbol, '15m', start15m, endTime)
   const bars1h = await fetchHistoricalOHLCV(symbol, '1h', start1h, endTime)
 
-  log.info('historical data fetched', { bars5m: bars5m.length, bars1h: bars1h.length })
+  log.info('historical data fetched', { bars4h: bars4h.length, bars15m: bars15m.length, bars1h: bars1h.length })
 
-  if (bars5m.length < 300) throw new Error(`Insufficient 5m data for ${symbol}: ${bars5m.length} bars (need 300+)`)
+  if (bars4h.length < 60) throw new Error(`Insufficient 4H data for ${symbol}: ${bars4h.length} bars (need 60+)`)
+  if (bars15m.length < 100) throw new Error(`Insufficient 15m data for ${symbol}: ${bars15m.length} bars (need 100+)`)
 
   let fundingRates: Record<string, FundingRateInfo> = {}
   const runFunding = !strategies || strategies.includes('funding_fade')
@@ -336,13 +339,16 @@ export async function collectSignals(config: {
     strategies ?? ['rsi_divergence', 'ema_trend', 'breakout_volume', 'funding_fade', 'bb_mean_revert', 'structure_break'],
   )
 
-  // Binary search helper for 1H bar alignment (regime detection)
-  const bars1hTimes = bars1h.map(b => b.time)
-  function find1hIdx(timeSec: number): number {
-    let lo = 0, hi = bars1hTimes.length
+  // Separate 4H and 15m strategies
+  const enabled4h = [...enabledStrategies].filter(s => STRATEGY_TIMEFRAMES[s] === '4h')
+  const enabled15m = [...enabledStrategies].filter(s => STRATEGY_TIMEFRAMES[s] === '15m')
+
+  const bars15mTimes = bars15m.map(b => b.time)
+  function find15mIdx(timeSec: number): number {
+    let lo = 0, hi = bars15mTimes.length
     while (lo < hi) {
       const mid = (lo + hi) >>> 1
-      if (bars1hTimes[mid] < timeSec) lo = mid + 1
+      if (bars15mTimes[mid] < timeSec) lo = mid + 1
       else hi = mid
     }
     return lo
@@ -350,87 +356,137 @@ export async function collectSignals(config: {
 
   const rawSignals: RawSignalEntry[] = []
 
-  // ── Single 5m loop: all 6 strategies ──
-  const MIN_5M_LOOKBACK = 300
-  // Deduplication: prevent same strategy+direction within 12 bars (1 hour on 5m)
-  const DEDUP_COOLDOWN = 12
-  const lastSignalBar = new Map<string, number>()
+  // ── Loop 1: 4H strategies (iterate over 4H bars) ──
+  if (enabled4h.length > 0) {
+    for (let i = 60; i < bars4h.length; i++) {
+      const scanBar = bars4h[i]
+      const scanTimeSec = scanBar.time
 
-  for (let i = MIN_5M_LOOKBACK; i < bars5m.length; i++) {
-    const scanBar = bars5m[i]
-    const scanTimeSec = scanBar.time
+      if (scanTimeSec * 1000 < scanStart) continue
 
-    if (scanTimeSec * 1000 < scanStart) continue
+      const window4h = bars4h.slice(Math.max(0, i - 59), i + 1)
+      const endIdx15m = find15mIdx(scanTimeSec + 1)
+      const window15m = bars15m.slice(Math.max(0, endIdx15m - 100), endIdx15m)
 
-    // Slice 5m window for strategies
-    const window5m = bars5m.slice(Math.max(0, i - MIN_5M_LOOKBACK), i + 1)
-
-    // Find aligned 1H window for regime detection
-    const aligned1hIdx = find1hIdx(scanTimeSec + 1) - 1
-    let regime: MarketRegime = {
-      symbol, regime: 'ranging', emaFast: 0, emaMid: 0, emaSlow: 0,
-      price: scanBar.close, priceVsEma55: 0, rsi: 50, reason: 'insufficient 1H data',
-    }
-    if (aligned1hIdx >= 55) {
-      const window1h = bars1h.slice(Math.max(0, aligned1hIdx - 59), aligned1hIdx + 1)
-      const regimes = detectMarketRegime([symbol], { [symbol]: window1h })
-      if (regimes[0]) regime = regimes[0]
-    }
-
-    // Run all 6 strategies on 5m data
-    const signals: StrategySignal[] = []
-    if (enabledStrategies.has('rsi_divergence')) {
-      try { signals.push(...await scanRsiDivergence(symbol, window5m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('ema_trend')) {
-      try { signals.push(...await scanEmaTrend(symbol, window5m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('breakout_volume')) {
-      try { signals.push(...await scanBreakoutVolume(symbol, window5m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('funding_fade')) {
-      const funding = fundingRates[symbol]
-      if (funding) {
-        try { signals.push(...await scanFundingFade(symbol, window5m, funding)) } catch { /* skip */ }
+      // Detect regime
+      const regimes = detectMarketRegime([symbol], { [symbol]: window4h })
+      const regime: MarketRegime = regimes[0] ?? {
+        symbol, regime: 'ranging', emaFast: 0, emaMid: 0, emaSlow: 0,
+        price: scanBar.close, priceVsEma55: 0, rsi: 50, reason: 'unknown',
       }
-    }
-    if (enabledStrategies.has('bb_mean_revert')) {
-      try { signals.push(...await scanBBMeanRevert(symbol, window5m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('structure_break')) {
-      try { signals.push(...await scanStructureBreak(symbol, window5m)) } catch { /* skip */ }
-    }
 
-    const confFiltered = signals.filter(s => s.confidence >= confidenceMin)
-    const regimeFiltered = applyRegimeFilter(confFiltered, regime)
+      // Run 4H strategies
+      const signals: StrategySignal[] = []
+      if (enabledStrategies.has('rsi_divergence')) {
+        try { signals.push(...await scanRsiDivergence(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('ema_trend')) {
+        try { signals.push(...await scanEmaTrend(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('breakout_volume')) {
+        try { signals.push(...await scanBreakoutVolume(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('funding_fade')) {
+        const funding = fundingRates[symbol]
+        if (funding) {
+          try { signals.push(...await scanFundingFade(symbol, window4h, funding, window15m)) } catch { /* skip */ }
+        }
+      }
 
-    const simStartIdx = i + 1 // next 5m bar after signal
-    if (simStartIdx >= bars5m.length) continue
+      const confFiltered = signals.filter(s => s.confidence >= confidenceMin)
+      const regimeFiltered = applyRegimeFilter(confFiltered, regime)
+      const simStartIdx = find15mIdx(scanTimeSec)
+      if (simStartIdx >= bars15m.length) continue
 
-    for (const signal of regimeFiltered) {
-      // Dedup: skip if same strategy+direction fired within cooldown
-      const dedupKey = `${signal.strategy}:${signal.direction}`
-      const lastBar = lastSignalBar.get(dedupKey)
-      if (lastBar !== undefined && i - lastBar < DEDUP_COOLDOWN) continue
-      lastSignalBar.set(dedupKey, i)
-
-      const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
-      rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
+      for (const signal of regimeFiltered) {
+        const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
+        rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
+      }
     }
   }
 
-  // Already in chronological order (single ascending loop)
-  return { rawSignals, bars5m, scanStart, endTime }
+  // ── Loop 2: 15m strategies (iterate over 15m bars) ──
+  if (enabled15m.length > 0) {
+    const MIN_15M_LOOKBACK = 100
+    // Deduplication: prevent same strategy+direction within 4 bars (1 hour on 15m)
+    const DEDUP_COOLDOWN = 4
+    const lastSignalBar = new Map<string, number>()
+
+    // Pre-compute 4H bar index lookup for regime detection
+    const bars4hTimes = bars4h.map(b => b.time)
+    function find4hIdx(timeSec: number): number {
+      let lo = 0, hi = bars4hTimes.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (bars4hTimes[mid] < timeSec) lo = mid + 1
+        else hi = mid
+      }
+      return lo
+    }
+
+    for (let i = MIN_15M_LOOKBACK; i < bars15m.length; i++) {
+      const scanBar15m = bars15m[i]
+      const scanTimeSec = scanBar15m.time
+
+      if (scanTimeSec * 1000 < scanStart) continue
+
+      // Slice 15m window for strategies
+      const window15m = bars15m.slice(Math.max(0, i - MIN_15M_LOOKBACK), i + 1)
+
+      // Find aligned 4H window for regime detection
+      const aligned4hIdx = find4hIdx(scanTimeSec + 1) - 1
+      if (aligned4hIdx < 55) continue
+      const window4h = bars4h.slice(Math.max(0, aligned4hIdx - 59), aligned4hIdx + 1)
+
+      // Detect regime from 4H data
+      const regimes = detectMarketRegime([symbol], { [symbol]: window4h })
+      const regime: MarketRegime = regimes[0] ?? {
+        symbol, regime: 'ranging', emaFast: 0, emaMid: 0, emaSlow: 0,
+        price: scanBar15m.close, priceVsEma55: 0, rsi: 50, reason: 'unknown',
+      }
+
+      // Run 15m strategies
+      const signals: StrategySignal[] = []
+      if (enabledStrategies.has('bb_mean_revert')) {
+        try { signals.push(...await scanBBMeanRevert(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('structure_break')) {
+        try { signals.push(...await scanStructureBreak(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+
+      const confFiltered = signals.filter(s => s.confidence >= confidenceMin)
+      const regimeFiltered = applyRegimeFilter(confFiltered, regime)
+
+      const simStartIdx = i + 1 // next 15m bar after signal
+      if (simStartIdx >= bars15m.length) continue
+
+      for (const signal of regimeFiltered) {
+        // Dedup: skip if same strategy+direction fired within cooldown
+        const dedupKey = `${signal.strategy}:${signal.direction}`
+        const lastBar = lastSignalBar.get(dedupKey)
+        if (lastBar !== undefined && i - lastBar < DEDUP_COOLDOWN) continue
+        lastSignalBar.set(dedupKey, i)
+
+        const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
+        rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
+      }
+    }
+  }
+
+  // Sort all signals by time (4H + 15m merged)
+  rawSignals.sort((a, b) => a.signalTimeMs - b.signalTimeMs)
+
+  return { rawSignals, bars15m, scanStart, endTime }
 }
 
 // ==================== runBacktest ====================
 
 export async function runBacktest(config: BacktestConfig): Promise<BacktestResult> {
-  const { symbol, days = 90, strategies, confidenceMin = 0, maxHoldBars = 144 } = config
+  const { symbol, days = 90, strategies, confidenceMin = 0, maxHoldBars = 48 } = config
 
   log.info('backtest started', { symbol, days, strategies, confidenceMin })
 
-  const { rawSignals, bars5m, scanStart, endTime } = await collectSignals({
+  const { rawSignals, bars15m, scanStart, endTime } = await collectSignals({
     symbol, days, strategies, confidenceMin,
   })
 
@@ -439,7 +495,7 @@ export async function runBacktest(config: BacktestConfig): Promise<BacktestResul
   for (const { signal, regime, simStartIdx } of rawSignals) {
     const exit = simulateExit(
       signal.direction, signal.stopLoss, signal.takeProfit,
-      bars5m, simStartIdx, maxHoldBars,
+      bars15m, simStartIdx, maxHoldBars,
     )
 
     const pnlPercent = signal.direction === 'long'
@@ -503,7 +559,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
     days = 90,
     strategies,
     confidenceMin = 0,
-    maxHoldBars = 144,
+    maxHoldBars = 48,
     slRange = [0.75, 1.0, 1.25, 1.5, 2.0],
     tpRange = [1.5, 2.0, 2.5, 3.0, 3.5],
     apply = false,
@@ -511,7 +567,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
 
   log.info('optimize started', { symbol, days, slRange, tpRange, combos: slRange.length * tpRange.length })
 
-  const { rawSignals, bars5m, scanStart, endTime } = await collectSignals({
+  const { rawSignals, bars15m, scanStart, endTime } = await collectSignals({
     symbol, days, strategies, confidenceMin,
   })
 
@@ -523,7 +579,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
   const allCombos: ParamComboResult[] = []
   for (const sl of slRange) {
     for (const tp of tpRange) {
-      allCombos.push(evaluateCombo(sl, tp, rawSignals, bars5m, maxHoldBars).combo)
+      allCombos.push(evaluateCombo(sl, tp, rawSignals, bars15m, maxHoldBars).combo)
     }
   }
   allCombos.sort((a, b) => b.expectancy - a.expectancy)
@@ -539,7 +595,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
     const combos: ParamComboResult[] = []
     for (const sl of slRange) {
       for (const tp of tpRange) {
-        combos.push(evaluateCombo(sl, tp, stratSignals, bars5m, maxHoldBars).combo)
+        combos.push(evaluateCombo(sl, tp, stratSignals, bars15m, maxHoldBars).combo)
       }
     }
     combos.sort((a, b) => b.expectancy - a.expectancy)
@@ -548,7 +604,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
     const stratConfig = await getStrategyParamsFor(stratName, symbol)
     const curSl = stratConfig.slMultiplier ?? 1.5
     const curTp = stratConfig.tpMultiplier ?? 2.5
-    const current = evaluateCombo(curSl, curTp, stratSignals, bars5m, maxHoldBars).combo
+    const current = evaluateCombo(curSl, curTp, stratSignals, bars15m, maxHoldBars).combo
 
     perStrategy[stratName] = { best: combos[0], current }
   }

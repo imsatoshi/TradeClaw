@@ -8,7 +8,7 @@ This strategy:
 - NEVER generates entry/exit signals (all via AI forceentry/forceexit)
 - Provides rich technical indicators for AI decision-making
 - Uses custom_stoploss as a safety net (-20%) — actual SL managed by TradeManager
-- Calculates indicators on 5m timeframe (AI heartbeat cycle)
+- Calculates indicators on 15m timeframe (AI heartbeat cycle)
 """
 
 import talib.abstract as ta
@@ -29,8 +29,8 @@ class TradeClaw(IStrategy):
     # Short trading: enabled for futures mode
     can_short = True
 
-    # Execution timeframe — 5m aligns with AI heartbeat cycle
-    timeframe = "5m"
+    # Execution timeframe — 15m aligns with AI heartbeat cycle
+    timeframe = "15m"
 
     # Minimal ROI - disabled (AI manages exits via TradePlan)
     minimal_roi = {"0": 100}

@@ -437,13 +437,13 @@ Example use cases:
       description: `
 Scan all whitelisted trading pairs for strategy signals and confluence opportunities.
 
-Runs 6 strategies on 5m candlestick data from Binance (1H data for regime detection):
+Runs 6 strategies on 4H + 15m candlestick data from Binance:
 1. RSI Divergence + Volume Exhaustion (mean-reversion)
 2. EMA Trend Momentum (trend-following)
 3. N-Period Breakout + Volume Confirmation (breakout)
 4. Funding Rate Fade (contrarian)
-5. Bollinger Band Mean Reversion (mean-reversion)
-6. Structure Break / BOS (trend-following breakout)
+5. Bollinger Band Mean Reversion (15m mean-reversion)
+6. Structure Break / BOS (15m breakout)
 
 Returns TWO tiers:
 - compositeSignals: CONFLUENCE signals where 2+ strategies agree (Grade A/B/C) — ONLY propose trades on these
@@ -584,7 +584,7 @@ Outcomes are recorded when positions close (via markSignalOutcome).
 Sync strategy signal outcomes with closed Freqtrade trades.
 
 Call cryptoGetOrders first, filter trades where is_open=false and has close_date, then pass them here.
-Matches signals by symbol + direction + time proximity (signal within 1h of trade open time).
+Matches signals by symbol + direction + time proximity (signal within 4h of trade open time).
 
 For each closed trade, extract:
 - symbol: pair name (e.g. "ICP/USDT")
@@ -669,12 +669,13 @@ Only call cryptoPlaceOrder directly when the user has ALREADY given explicit ver
 
     backtestSignals: tool({
       description: `Run historical backtest on strategy signals for a single symbol.
-Fetches historical 5m OHLCV from Binance, replays all 6 strategies on each 5m candle,
-then simulates whether each signal would have hit TP or SL using subsequent 5m bars.
+Fetches historical OHLCV from Binance, replays the strategy scanner on each 4H candle,
+then simulates whether each signal would have hit TP or SL using subsequent 15m candles.
 
 Returns per-strategy and per-regime win rates, average P&L, expectancy.
 Use this to validate SL/TP parameters before trading.
 
+Typical run: 14 days ≈ 84 scans, 30 days ≈ 180 scans. Max 90 days.
 May take 10-30 seconds depending on the period.`,
       inputSchema: z.object({
         symbol: z.string().describe('Symbol, e.g. "BTC/USDT"'),

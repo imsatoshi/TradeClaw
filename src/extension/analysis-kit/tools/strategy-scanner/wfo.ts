@@ -52,7 +52,7 @@ export interface WFOConfig {
   oosDays?: number                // default 20 (out-of-sample window)
   strategies?: StrategyName[]
   confidenceMin?: number
-  maxHoldBars?: number            // default 144 (12h of 5m bars)
+  maxHoldBars?: number            // default 48
   slRange?: number[]              // default [0.75, 1.0, 1.25, 1.5, 2.0]
   tpRange?: number[]              // default [1.5, 2.0, 2.5, 3.0, 3.5]
   monteCarloIterations?: number   // default 1000
@@ -116,7 +116,7 @@ export async function walkForwardOptimize(config: WFOConfig): Promise<WFOResult>
     oosDays = 20,
     strategies,
     confidenceMin = 0,
-    maxHoldBars = 144,
+    maxHoldBars = 48,
     slRange = [0.75, 1.0, 1.25, 1.5, 2.0],
     tpRange = [1.5, 2.0, 2.5, 3.0, 3.5],
     monteCarloIterations = 1000,
@@ -139,20 +139,20 @@ export async function walkForwardOptimize(config: WFOConfig): Promise<WFOResult>
     confidenceMin,
   })
 
-  const { rawSignals, bars5m, scanStart, endTime } = collected
+  const { rawSignals, bars15m, scanStart, endTime } = collected
 
   if (rawSignals.length < 10) {
     throw new Error(`Insufficient signals for WFO on ${symbol}: ${rawSignals.length} (need 10+)`)
   }
 
-  // 2. Build time-based index for bars5m (for clipping)
-  const bars5mTimesMs = bars5m.map(b => b.time * 1000)
+  // 2. Build time-based index for bars15m (for clipping)
+  const bars15mTimesMs = bars15m.map(b => b.time * 1000)
 
   function findBarIdx(timeMs: number): number {
-    let lo = 0, hi = bars5mTimesMs.length
+    let lo = 0, hi = bars15mTimesMs.length
     while (lo < hi) {
       const mid = (lo + hi) >>> 1
-      if (bars5mTimesMs[mid] < timeMs) lo = mid + 1
+      if (bars15mTimesMs[mid] < timeMs) lo = mid + 1
       else hi = mid
     }
     return lo
@@ -186,11 +186,11 @@ export async function walkForwardOptimize(config: WFOConfig): Promise<WFOResult>
 
     // Clip bars for IS — prevent data leakage into OOS
     const isBarEndIdx = findBarIdx(isEndMs)
-    const isBarsClipped = bars5m.slice(0, isBarEndIdx)
+    const isBarsClipped = bars15m.slice(0, isBarEndIdx)
 
     // Clip bars for OOS — prevent future data leakage
     const oosBarEndIdx = findBarIdx(oosEndMs)
-    const oosBarsClipped = bars5m.slice(0, oosBarEndIdx)
+    const oosBarsClipped = bars15m.slice(0, oosBarEndIdx)
 
     // IS: grid search
     let bestISCombo: ParamComboResult | null = null
@@ -287,7 +287,7 @@ export async function walkForwardOptimize(config: WFOConfig): Promise<WFOResult>
       s => s.signalTimeMs >= latestIsStartMs && s.signalTimeMs < latestIsEndMs,
     )
     const isBarEndIdx = findBarIdx(latestIsEndMs)
-    const isBarsClipped = bars5m.slice(0, isBarEndIdx)
+    const isBarsClipped = bars15m.slice(0, isBarEndIdx)
 
     // Group by strategy and optimize each
     const stratGroups: Record<string, RawSignalEntry[]> = {}

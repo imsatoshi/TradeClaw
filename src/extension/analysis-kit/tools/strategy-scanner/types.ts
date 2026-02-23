@@ -4,14 +4,14 @@ export type StrategyName =
   | 'rsi_divergence' | 'ema_trend' | 'breakout_volume' | 'funding_fade'
   | 'bb_mean_revert' | 'structure_break'
 
-/** All strategies operate on 5m candles. */
-export const STRATEGY_TIMEFRAMES: Record<StrategyName, '5m'> = {
-  rsi_divergence: '5m',
-  ema_trend: '5m',
-  breakout_volume: '5m',
-  funding_fade: '5m',
-  bb_mean_revert: '5m',
-  structure_break: '5m',
+/** Primary decision timeframe for each strategy. */
+export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '15m'> = {
+  rsi_divergence: '4h',
+  ema_trend: '4h',
+  breakout_volume: '4h',
+  funding_fade: '4h',
+  bb_mean_revert: '15m',
+  structure_break: '15m',
 }
 
 export interface StrategySignal {
@@ -20,7 +20,7 @@ export interface StrategySignal {
   direction: SignalDirection
   strength: SignalStrength
   confidence: number          // 0-100
-  timeframe: string           // '5m'
+  timeframe: string           // '4h'
   entry: number               // suggested entry (current close)
   stopLoss: number            // ATR-based stop loss
   takeProfit: number          // R:R based target
@@ -59,8 +59,8 @@ export interface ScanResult {
     sessionName: string       // 'asian' | 'london' | 'ny_overlap' | 'ny' | 'late'
     note: string
   }
-  /** 1H OHLCV data used internally — exposed for regime detection reuse. */
-  ohlcv1h?: Record<string, import('../../../archive-analysis/data/interfaces.js').MarketData[]>
+  /** 4H OHLCV data used internally — exposed for regime detection reuse. */
+  ohlcv4h?: Record<string, import('../../../archive-analysis/data/interfaces.js').MarketData[]>
 }
 
 export interface FundingRateInfo {

@@ -1,8 +1,10 @@
 /**
- * Strategy scan orchestrator — 5m unified architecture.
+ * Strategy scan orchestrator.
  *
- * All 6 strategies run on 5m candles. 1H data used for regime detection only.
- * OHLCV cache (5-min TTL) avoids redundant Binance fetches across heartbeats.
+ * Enhancements over v1:
+ * - OHLCV cache (25-min TTL) — avoids redundant Binance fetches across heartbeats
+ * - Multi-timeframe confirmation (1H SMA20 trend) — adjusts signal confidence ±5/15
+ * - Signal history logging — persists all signals to data/signals/signal-log.json
  */
 
 import type { ScanResult, StrategySignal, FundingRateInfo } from './types.js'
@@ -24,10 +26,12 @@ import { createLogger } from '../../../../core/logger.js'
 
 const log = createLogger('scanner')
 
-const TIMEFRAME_5M = '5m'
+const TIMEFRAME_4H = '4h'
 const TIMEFRAME_1H = '1h'
-const CANDLE_LIMIT_5M = 300  // ~25 hours of 5m data
-const CANDLE_LIMIT_1H = 60   // ~2.5 days, enough for regime EMA55
+const TIMEFRAME_15M = '15m'
+const CANDLE_LIMIT_4H = 60   // ~10 days of 4H data
+const CANDLE_LIMIT_1H = 40   // ~2 days, enough for SMA20 trend
+const CANDLE_LIMIT_15M = 100 // ~25 hours of 15m data
 
 // ==================== OHLCV Cache ====================
 
@@ -37,7 +41,7 @@ interface CacheEntry {
 }
 
 const ohlcvCache = new Map<string, CacheEntry>()
-let CACHE_TTL_MS = 5 * 60 * 1000  // 5 minutes default for 5m data
+let CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes (overridden by config)
 
 function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
   return `${[...symbols].sort().join(',')}|${timeframe}|${limit}`
@@ -60,6 +64,66 @@ async function fetchWithCache(
   ohlcvCache.set(key, { data, fetchedAt: Date.now() })
   log.info('OHLCV fetched from Binance', { timeframe, count: symbols.length })
   return data
+}
+
+// ==================== Multi-timeframe Trend Filter ====================
+
+type Trend1H = 'bullish' | 'bearish' | 'neutral'
+
+/**
+ * Determine 1H trend direction using SMA20.
+ * - last close > SMA20 * 1.005 → bullish
+ * - last close < SMA20 * 0.995 → bearish
+ * - otherwise → neutral
+ */
+function get1HTrend(bars1h: MarketData[]): Trend1H {
+  if (bars1h.length < 20) return 'neutral'
+  const closes = bars1h.map((b) => b.close)
+  const last = closes[closes.length - 1]
+  const sma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20
+  if (last > sma20 * 1.005) return 'bullish'
+  if (last < sma20 * 0.995) return 'bearish'
+  return 'neutral'
+}
+
+/**
+ * Apply 1H trend to 4H signals:
+ * - Aligned:    confidence +boost (max 100), details note added
+ * - Conflicting: confidence +penalty, may downgrade strength to 'weak'
+ * - Neutral:    no change
+ */
+function applyMtfFilter(
+  signals: StrategySignal[],
+  trend1H: Trend1H,
+  scannerParams: Record<string, number>,
+): StrategySignal[] {
+  if (trend1H === 'neutral') return signals
+
+  const boost = scannerParams.mtfAlignedBoost ?? 5
+  const penalty = scannerParams.mtfConflictPenalty ?? -15
+  const weakThreshold = scannerParams.weakThreshold ?? 55
+
+  return signals.map((signal) => {
+    const aligned =
+      (signal.direction === 'long' && trend1H === 'bullish') ||
+      (signal.direction === 'short' && trend1H === 'bearish')
+
+    if (aligned) {
+      return {
+        ...signal,
+        confidence: Math.min(100, signal.confidence + boost),
+        details: { ...signal.details, mtf_1h: `aligned (${trend1H}) +${boost}` },
+      }
+    } else {
+      const newConf = Math.max(0, signal.confidence + penalty)
+      return {
+        ...signal,
+        confidence: newConf,
+        strength: newConf < weakThreshold ? 'weak' : signal.strength,
+        details: { ...signal.details, mtf_1h: `conflicts (${trend1H}) ${penalty}` },
+      }
+    }
+  })
 }
 
 // ==================== Session Info ====================
@@ -92,8 +156,7 @@ function getSessionInfo(): SessionInfo {
 // ==================== Main Orchestrator ====================
 
 /**
- * Run all 6 strategies on 5m data across all symbols.
- * 1H data used for regime detection only.
+ * Run all three strategies across all symbols in one call.
  *
  * @param symbols - Trading pairs to scan, e.g. ["BTC/USDT", "ETH/USDT"]
  * @param fundingRates - Optional pre-fetched funding rates (fetched automatically if omitted)
@@ -111,18 +174,24 @@ export async function runStrategyScan(
   const scannerParams = config.scanner ?? {}
 
   // Apply configurable cache TTL
-  const cacheTtlMinutes = scannerParams.cacheTtlMinutes ?? 5
+  const cacheTtlMinutes = scannerParams.cacheTtlMinutes ?? 25
   CACHE_TTL_MS = cacheTtlMinutes * 60 * 1000
 
   log.info('scan started', { symbols: symbols.length })
 
-  // Fetch 5m (primary) + 1H (regime) sequentially to avoid Binance rate-limit bursts
-  const ohlcv5m = await fetchWithCache(symbols, TIMEFRAME_5M, CANDLE_LIMIT_5M).catch((err) => {
-    errors.push(`5m OHLCV fetch failed: ${String(err)}`)
+  // Fetch timeframes sequentially to avoid Binance rate-limit bursts.
+  // Each fetchWithCache already batches symbols internally (5 concurrent + 500ms delay).
+  // Running all 3 timeframes in parallel triples the burst — sequential is safer.
+  const ohlcv4h = await fetchWithCache(symbols, TIMEFRAME_4H, CANDLE_LIMIT_4H).catch((err) => {
+    errors.push(`4H OHLCV fetch failed: ${String(err)}`)
     return {} as Record<string, MarketData[]>
   })
   const ohlcv1h = await fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
-    log.warn('1H OHLCV fetch failed — regime detection disabled', { error: String(err) })
+    log.warn('1H OHLCV fetch failed — MTF filter disabled', { error: String(err) })
+    return {} as Record<string, MarketData[]>
+  })
+  const ohlcv15m = await fetchWithCache(symbols, TIMEFRAME_15M, CANDLE_LIMIT_15M).catch((err) => {
+    log.warn('15m OHLCV fetch failed — SL/TP will fall back to 4H ATR', { error: String(err) })
     return {} as Record<string, MarketData[]>
   })
   const rates = fundingRates !== undefined
@@ -132,30 +201,31 @@ export async function runStrategyScan(
   // Regime map for confluence scoring
   const regimeMap: Record<string, MarketRegime> = {}
 
-  // Run all strategies per symbol on 5m data
+  // Run strategies per symbol
   for (const symbol of symbols) {
-    const bars5m = ohlcv5m[symbol]
-    if (!bars5m || bars5m.length < 70) {
-      errors.push(`${symbol}: insufficient 5m data (${bars5m?.length ?? 0} bars)`)
+    const bars4h = ohlcv4h[symbol]
+    if (!bars4h || bars4h.length < 30) {
+      errors.push(`${symbol}: insufficient 4H data (${bars4h?.length ?? 0} bars)`)
       continue
     }
 
+    const bars15m = ohlcv15m[symbol]
     const symbolSignals: StrategySignal[] = []
 
     try {
-      symbolSignals.push(...await scanRsiDivergence(symbol, bars5m))
+      symbolSignals.push(...await scanRsiDivergence(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} RSI divergence error: ${String(err)}`)
     }
 
     try {
-      symbolSignals.push(...await scanEmaTrend(symbol, bars5m))
+      symbolSignals.push(...await scanEmaTrend(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} EMA trend error: ${String(err)}`)
     }
 
     try {
-      symbolSignals.push(...await scanBreakoutVolume(symbol, bars5m))
+      symbolSignals.push(...await scanBreakoutVolume(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} breakout volume error: ${String(err)}`)
     }
@@ -163,29 +233,30 @@ export async function runStrategyScan(
     const funding = rates[symbol]
     if (funding) {
       try {
-        symbolSignals.push(...await scanFundingFade(symbol, bars5m, funding))
+        symbolSignals.push(...await scanFundingFade(symbol, bars4h, funding, bars15m))
       } catch (err) {
         errors.push(`${symbol} funding fade error: ${String(err)}`)
       }
     }
 
+    // 15m-native strategies
     try {
-      symbolSignals.push(...await scanBBMeanRevert(symbol, bars5m))
+      symbolSignals.push(...await scanBBMeanRevert(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} BB mean revert error: ${String(err)}`)
     }
 
     try {
-      symbolSignals.push(...await scanStructureBreak(symbol, bars5m))
+      symbolSignals.push(...await scanStructureBreak(symbol, bars4h, bars15m))
     } catch (err) {
       errors.push(`${symbol} structure break error: ${String(err)}`)
     }
 
-    // Apply regime filter using 1H data
+    // Apply regime filter — drop signals incompatible with current regime
     if (symbolSignals.length > 0) {
-      const bars1h = ohlcv1h[symbol]
-      if (bars1h && bars1h.length >= 55) {
-        const regimes = detectMarketRegime([symbol], { [symbol]: bars1h })
+      const bars4hForRegime = ohlcv4h[symbol]
+      if (bars4hForRegime && bars4hForRegime.length >= 55) {
+        const regimes = detectMarketRegime([symbol], { [symbol]: bars4hForRegime })
         if (regimes[0]) {
           regimeMap[symbol] = regimes[0]
           const beforeCount = symbolSignals.length
@@ -199,7 +270,16 @@ export async function runStrategyScan(
       }
     }
 
-    allSignals.push(...symbolSignals)
+    // Apply 1H MTF filter to this symbol's signals
+    if (symbolSignals.length > 0) {
+      const bars1h = ohlcv1h[symbol]
+      if (bars1h && bars1h.length >= 20) {
+        const trend1H = get1HTrend(bars1h)
+        allSignals.push(...applyMtfFilter(symbolSignals, trend1H, scannerParams))
+      } else {
+        allSignals.push(...symbolSignals)
+      }
+    }
   }
 
   // Sort by confidence descending
@@ -221,11 +301,11 @@ export async function runStrategyScan(
   return {
     scannedAt,
     symbols,
-    timeframe: '5m',
+    timeframe: '4h+15m',
     signals: allSignals,
     compositeSignals,
     errors,
     sessionInfo: getSessionInfo(),
-    ohlcv1h,
+    ohlcv4h,
   }
 }
