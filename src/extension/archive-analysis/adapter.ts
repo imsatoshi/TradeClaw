@@ -700,22 +700,15 @@ May take 10-30 seconds depending on the period.`,
       description: `Find optimal SL/TP multipliers for a symbol using grid-search over historical data.
 
 Runs strategy scanning ONCE, then replays exit simulation with every combination of
-slMultiplier × tpMultiplier to find the params that maximize expectancy (expected P&L per trade).
+slMultiplier × tpMultiplier (16 combos) to find the params that maximize expectancy.
 
-Returns:
-- best: the globally optimal (slMultiplier, tpMultiplier) combo
-- top5: top 5 combos ranked by expectancy
-- perStrategy: best params for each individual strategy, compared to current config
-- recommendation: human-readable summary
+Uses narrowed parameter ranges (SL: 0.75–2.0, TP: 1.5–3.0) and 12h max hold to
+reduce overfitting risk. For production use, prefer batchOptimizeParams with WFO.
 
-Set apply=true to automatically write the optimal params to strategy-params.json.
-
-IMPORTANT: After optimizing, report the results AND the recommendation to the user.
-If expectancy is positive, consider applying the params. If negative for all combos,
-the symbol may not be suitable for these strategies.`,
+Set apply=true to automatically write the optimal params to strategy-params.json.`,
       inputSchema: z.object({
         symbol: z.string().describe('Symbol, e.g. "BTC/USDT"'),
-        days: z.number().int().optional().describe('Backtest period in days (default 30, max 90)'),
+        days: z.number().int().optional().describe('Backtest period in days (default 90)'),
         strategies: z.array(z.string()).optional().describe('Filter strategies'),
         confidenceMin: z.number().optional().describe('Min confidence filter (default 0)'),
         apply: z.boolean().optional().describe('Write best params to strategy-params.json (default false)'),
@@ -723,7 +716,7 @@ the symbol may not be suitable for these strategies.`,
       execute: async ({ symbol, days, strategies, confidenceMin, apply }) => {
         return optimizeParams({
           symbol,
-          days: Math.min(days ?? 30, 90),
+          days: days ?? 90,
           strategies: strategies as import('../analysis-kit/tools/strategy-scanner/types.js').StrategyName[] | undefined,
           confidenceMin,
           apply,
@@ -732,30 +725,34 @@ the symbol may not be suitable for these strategies.`,
     }),
 
     batchOptimizeParams: tool({
-      description: `Run SL/TP parameter optimization for ALL provided symbols in one call.
+      description: `Run SL/TP parameter optimization for ALL provided symbols with Walk-Forward Optimization (WFO).
 
-Processes symbols concurrently (3 at a time) using grid-search. Each symbol gets
-its own optimal per-strategy SL/TP multipliers stored in symbolOverrides.
+Uses anti-overfitting framework:
+1. Walk-Forward: 180d data split into 6 rolling IS/OOS folds (60d IS + 20d OOS)
+2. WFO Efficiency Ratio gate: OOS_Sharpe/IS_Sharpe must be ≥ 0.5
+3. Monte Carlo bootstrap: p50 expectancy must be > 0 (1000 iterations)
 
-Returns a ranked summary: which symbols have positive expectancy (tradeable)
-vs negative expectancy (avoid). Use this to calibrate the entire whitelist.
+If either gate fails, params are NOT applied for that symbol (previous params kept).
 
-Typical runtime: ~80 symbols ≈ 2-3 minutes.
+Returns a ranked summary with gate status for each symbol.
+Typical runtime: ~80 symbols ≈ 5-8 minutes (longer than plain grid search due to WFO).
 
 IMPORTANT: After completion, report the full summary to the user, especially:
-- Which symbols have positive expectancy (good to trade)
-- Which have negative expectancy (should avoid)
-- Overall stats (how many optimized, skipped, errored)`,
+- Which symbols passed gates and have positive expectancy
+- Which symbols failed gates (overfitting detected)
+- Which have negative expectancy (should avoid)`,
       inputSchema: z.object({
         symbols: z.array(z.string()).describe('Symbols to optimize, e.g. from getAllowedSymbols or cryptoGetWhitelist'),
-        days: z.number().int().optional().describe('Backtest period in days (default 30, max 90)'),
+        days: z.number().int().optional().describe('Total history in days (default 90, WFO uses max(days, 180))'),
         apply: z.boolean().optional().describe('Write optimal params to strategy-params.json (default false)'),
+        useWfo: z.boolean().optional().describe('Use Walk-Forward Optimization (default true). Set false for legacy grid search.'),
       }),
-      execute: async ({ symbols, days, apply }) => {
+      execute: async ({ symbols, days, apply, useWfo }) => {
         return batchOptimize({
           symbols,
-          days: Math.min(days ?? 30, 90),
+          days: days ?? 90,
           apply,
+          useWfo: useWfo ?? true,
         })
       },
     }),

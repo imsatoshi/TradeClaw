@@ -20,6 +20,7 @@ import { scanFundingFade } from './strategies/funding-fade.js'
 import { detectMarketRegime } from './regime.js'
 import { getStrategyParams, getStrategyParamsFor } from './config.js'
 import { createLogger } from '../../../../core/logger.js'
+import { walkForwardOptimize } from './wfo.js'
 import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 
@@ -29,10 +30,10 @@ const log = createLogger('backtester')
 
 export interface BacktestConfig {
   symbol: string
-  days: number                    // default 30, max 90
+  days: number                    // default 90
   strategies?: StrategyName[]     // default all 4
   confidenceMin?: number          // default 0
-  maxHoldBars?: number            // default 96 (24h of 15m bars)
+  maxHoldBars?: number            // default 48 (12h of 15m bars)
 }
 
 export interface BacktestTradeResult {
@@ -59,6 +60,7 @@ export interface BacktestSummary {
   avgWinPercent: number
   avgLossPercent: number
   expectancy: number
+  sharpe: number                  // mean(pnl) / std(pnl), 0 if < 2 trades
   maxConsecutiveLosses: number
 }
 
@@ -76,12 +78,12 @@ export interface BacktestResult {
 
 export interface OptimizeConfig {
   symbol: string
-  days: number                        // default 30, max 90
+  days: number                        // default 90
   strategies?: StrategyName[]
   confidenceMin?: number
   maxHoldBars?: number
-  slRange?: number[]                  // default [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
-  tpRange?: number[]                  // default [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+  slRange?: number[]                  // default [0.75, 1.0, 1.25, 1.5, 2.0]
+  tpRange?: number[]                  // default [1.5, 2.0, 2.5, 3.0, 3.5]
   apply?: boolean                     // write best params to strategy-params.json
 }
 
@@ -108,14 +110,15 @@ export interface OptimizeResult {
 
 // ==================== Internal: raw signal with ATR ====================
 
-interface RawSignalEntry {
+export interface RawSignalEntry {
   signal: StrategySignal
   atr: number                         // 15m ATR at signal time
   regime: string
   simStartIdx: number                 // index into bars15m for exit simulation
+  signalTimeMs: number                // epoch ms — used by WFO to filter by date
 }
 
-interface CollectedSignals {
+export interface CollectedSignals {
   rawSignals: RawSignalEntry[]
   bars15m: MarketData[]
   scanStart: number                   // ms
@@ -124,13 +127,13 @@ interface CollectedSignals {
 
 // ==================== Summary helpers ====================
 
-function buildSummary(trades: BacktestTradeResult[]): BacktestSummary {
+export function buildSummary(trades: BacktestTradeResult[]): BacktestSummary {
   const total = trades.length
   if (total === 0) {
     return {
       total: 0, wins: 0, losses: 0, timeouts: 0,
       winRate: 0, avgPnlPercent: 0, avgWinPercent: 0, avgLossPercent: 0,
-      expectancy: 0, maxConsecutiveLosses: 0,
+      expectancy: 0, sharpe: 0, maxConsecutiveLosses: 0,
     }
   }
 
@@ -145,6 +148,14 @@ function buildSummary(trades: BacktestTradeResult[]): BacktestSummary {
 
   const wr = winRate / 100
   const expectancy = wr * avgWin - (1 - wr) * Math.abs(avgLoss)
+
+  // Sharpe: mean(pnl) / std(pnl), no annualization (used for relative comparison)
+  let sharpe = 0
+  if (total >= 2) {
+    const variance = trades.reduce((s, t) => s + (t.pnlPercent - avgPnl) ** 2, 0) / (total - 1)
+    const std = Math.sqrt(variance)
+    sharpe = std > 0 ? avgPnl / std : 0
+  }
 
   let maxConsec = 0
   let curConsec = 0
@@ -167,6 +178,7 @@ function buildSummary(trades: BacktestTradeResult[]): BacktestSummary {
     avgWinPercent: round(avgWin, 4),
     avgLossPercent: round(avgLoss, 4),
     expectancy: round(expectancy, 4),
+    sharpe: round(sharpe, 4),
     maxConsecutiveLosses: maxConsec,
   }
 }
@@ -225,9 +237,70 @@ function simulateExit(
   return { exitPrice: bars15m[lastIdx].close, exitReason: 'timeout', holdBars: lastIdx - startIdx + 1 }
 }
 
+// ==================== Evaluate a single (SL, TP) combo against signals ====================
+
+/**
+ * For a given (slMult, tpMult), replay all signals using the provided bars
+ * and return summary stats. Standalone function used by both optimizeParams and WFO.
+ */
+export function evaluateCombo(
+  slMult: number,
+  tpMult: number,
+  signals: RawSignalEntry[],
+  bars15m: MarketData[],
+  maxHoldBars: number,
+): { combo: ParamComboResult; trades: BacktestTradeResult[] } {
+  const trades: BacktestTradeResult[] = []
+
+  for (const { signal, atr, regime, simStartIdx } of signals) {
+    if (atr <= 0) continue
+
+    const sl = signal.direction === 'long'
+      ? signal.entry - slMult * atr
+      : signal.entry + slMult * atr
+    const tp = signal.direction === 'long'
+      ? signal.entry + tpMult * atr
+      : signal.entry - tpMult * atr
+
+    const exit = simulateExit(signal.direction, sl, tp, bars15m, simStartIdx, maxHoldBars)
+
+    const pnlPercent = signal.direction === 'long'
+      ? ((exit.exitPrice - signal.entry) / signal.entry) * 100
+      : ((signal.entry - exit.exitPrice) / signal.entry) * 100
+
+    trades.push({
+      strategy: signal.strategy,
+      direction: signal.direction,
+      confidence: signal.confidence,
+      regime,
+      entry: signal.entry,
+      stopLoss: sl,
+      takeProfit: tp,
+      exitPrice: exit.exitPrice,
+      exitReason: exit.exitReason,
+      pnlPercent: round(pnlPercent, 4),
+      holdBars: exit.holdBars,
+    })
+  }
+
+  const summary = buildSummary(trades)
+  return {
+    combo: {
+      slMultiplier: slMult,
+      tpMultiplier: tpMult,
+      riskReward: round(tpMult / slMult, 2),
+      total: summary.total,
+      winRate: summary.winRate,
+      avgPnlPercent: summary.avgPnlPercent,
+      expectancy: summary.expectancy,
+    },
+    trades,
+  }
+}
+
 // ==================== Signal collection (shared by backtest + optimizer) ====================
 
-async function collectSignals(config: {
+export async function collectSignals(config: {
   symbol: string
   days: number
   strategies?: StrategyName[]
@@ -317,7 +390,7 @@ async function collectSignals(config: {
 
     for (const signal of filtered) {
       const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
-      rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx })
+      rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
     }
   }
 
@@ -327,7 +400,7 @@ async function collectSignals(config: {
 // ==================== runBacktest ====================
 
 export async function runBacktest(config: BacktestConfig): Promise<BacktestResult> {
-  const { symbol, days = 30, strategies, confidenceMin = 0, maxHoldBars = 96 } = config
+  const { symbol, days = 90, strategies, confidenceMin = 0, maxHoldBars = 48 } = config
 
   log.info('backtest started', { symbol, days, strategies, confidenceMin })
 
@@ -401,12 +474,12 @@ export async function runBacktest(config: BacktestConfig): Promise<BacktestResul
 export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeResult> {
   const {
     symbol,
-    days = 30,
+    days = 90,
     strategies,
     confidenceMin = 0,
-    maxHoldBars = 96,
-    slRange = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
-    tpRange = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],
+    maxHoldBars = 48,
+    slRange = [0.75, 1.0, 1.25, 1.5, 2.0],
+    tpRange = [1.5, 2.0, 2.5, 3.0, 3.5],
     apply = false,
   } = config
 
@@ -420,61 +493,11 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
     throw new Error(`No signals found for ${symbol} in ${days} days — cannot optimize`)
   }
 
-  /**
-   * For a given (slMult, tpMult), replay all signals and return summary stats.
-   */
-  function evaluateCombo(slMult: number, tpMult: number, signals: RawSignalEntry[]): ParamComboResult {
-    const trades: BacktestTradeResult[] = []
-
-    for (const { signal, atr, regime, simStartIdx } of signals) {
-      if (atr <= 0) continue
-
-      // Recalculate SL/TP from entry + ATR + multipliers
-      const sl = signal.direction === 'long'
-        ? signal.entry - slMult * atr
-        : signal.entry + slMult * atr
-      const tp = signal.direction === 'long'
-        ? signal.entry + tpMult * atr
-        : signal.entry - tpMult * atr
-
-      const exit = simulateExit(signal.direction, sl, tp, bars15m, simStartIdx, maxHoldBars)
-
-      const pnlPercent = signal.direction === 'long'
-        ? ((exit.exitPrice - signal.entry) / signal.entry) * 100
-        : ((signal.entry - exit.exitPrice) / signal.entry) * 100
-
-      trades.push({
-        strategy: signal.strategy,
-        direction: signal.direction,
-        confidence: signal.confidence,
-        regime,
-        entry: signal.entry,
-        stopLoss: sl,
-        takeProfit: tp,
-        exitPrice: exit.exitPrice,
-        exitReason: exit.exitReason,
-        pnlPercent: round(pnlPercent, 4),
-        holdBars: exit.holdBars,
-      })
-    }
-
-    const summary = buildSummary(trades)
-    return {
-      slMultiplier: slMult,
-      tpMultiplier: tpMult,
-      riskReward: round(tpMult / slMult, 2),
-      total: summary.total,
-      winRate: summary.winRate,
-      avgPnlPercent: summary.avgPnlPercent,
-      expectancy: summary.expectancy,
-    }
-  }
-
   // Grid search — overall
   const allCombos: ParamComboResult[] = []
   for (const sl of slRange) {
     for (const tp of tpRange) {
-      allCombos.push(evaluateCombo(sl, tp, rawSignals))
+      allCombos.push(evaluateCombo(sl, tp, rawSignals, bars15m, maxHoldBars).combo)
     }
   }
   allCombos.sort((a, b) => b.expectancy - a.expectancy)
@@ -490,7 +513,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
     const combos: ParamComboResult[] = []
     for (const sl of slRange) {
       for (const tp of tpRange) {
-        combos.push(evaluateCombo(sl, tp, stratSignals))
+        combos.push(evaluateCombo(sl, tp, stratSignals, bars15m, maxHoldBars).combo)
       }
     }
     combos.sort((a, b) => b.expectancy - a.expectancy)
@@ -499,7 +522,7 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
     const stratConfig = await getStrategyParamsFor(stratName, symbol)
     const curSl = stratConfig.slMultiplier ?? 1.5
     const curTp = stratConfig.tpMultiplier ?? 2.5
-    const current = evaluateCombo(curSl, curTp, stratSignals)
+    const current = evaluateCombo(curSl, curTp, stratSignals, bars15m, maxHoldBars).combo
 
     perStrategy[stratName] = { best: combos[0], current }
   }
@@ -579,15 +602,20 @@ export async function optimizeParams(config: OptimizeConfig): Promise<OptimizeRe
 
 export interface BatchOptimizeConfig {
   symbols: string[]
-  days: number              // default 30, max 90
+  days: number              // default 90
   apply?: boolean           // write results to strategy-params.json
   concurrency?: number      // default 3
+  useWfo?: boolean          // default true — use Walk-Forward Optimization
 }
 
-interface SymbolOptResult {
+export interface SymbolOptResult {
   best: ParamComboResult
   totalSignals: number
   applied: boolean
+  /** WFO Efficiency Ratio — only present when useWfo=true */
+  wfoER?: number
+  /** Whether WFO gates passed — only present when useWfo=true */
+  gatesPassed?: boolean
 }
 
 export interface BatchOptimizeResult {
@@ -609,14 +637,15 @@ export interface BatchOptimizeResult {
  * ~80 symbols × 3 concurrent ≈ 2-3 minutes.
  */
 export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchOptimizeResult> {
-  const { symbols, days = 30, apply = false, concurrency = 1 } = config
+  const { symbols, days = 90, apply = false, concurrency = 1, useWfo = true } = config
   const t0 = Date.now()
 
-  log.info('batch optimize started', { symbols: symbols.length, days, concurrency })
+  log.info('batch optimize started', { symbols: symbols.length, days, concurrency, useWfo })
 
   const results: Record<string, SymbolOptResult> = {}
   const errors: Record<string, string> = {}
   let skippedCount = 0
+  let gatesFailedCount = 0
 
   // Process in chunks of `concurrency` with inter-batch delay to avoid Binance 418
   for (let i = 0; i < symbols.length; i += concurrency) {
@@ -624,19 +653,46 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
     const batch = symbols.slice(i, i + concurrency)
     const promises = batch.map(async (symbol) => {
       try {
-        const result = await optimizeParams({ symbol, days, apply })
-        if (result.totalSignals === 0) {
-          skippedCount++
-          return
-        }
-        results[symbol] = {
-          best: result.best,
-          totalSignals: result.totalSignals,
-          applied: result.applied,
+        if (useWfo) {
+          // Walk-Forward Optimization with anti-overfitting gates
+          const wfoResult = await walkForwardOptimize({
+            symbol, totalDays: Math.max(days, 180), apply,
+          })
+          if (wfoResult.totalSignals === 0) { skippedCount++; return }
+
+          const best = wfoResult.recommendedParams
+          if (!best) {
+            // Gates failed — params not applied
+            gatesFailedCount++
+            results[symbol] = {
+              best: wfoResult.folds[0]?.isParams ?? { slMultiplier: 1, tpMultiplier: 2, riskReward: 2, total: 0, winRate: 0, avgPnlPercent: 0, expectancy: 0 },
+              totalSignals: wfoResult.totalSignals,
+              applied: false,
+              wfoER: wfoResult.wfoEfficiencyRatio,
+              gatesPassed: false,
+            }
+            return
+          }
+          results[symbol] = {
+            best,
+            totalSignals: wfoResult.totalSignals,
+            applied: wfoResult.applied,
+            wfoER: wfoResult.wfoEfficiencyRatio,
+            gatesPassed: true,
+          }
+        } else {
+          // Legacy: plain grid search (no anti-overfitting)
+          const result = await optimizeParams({ symbol, days, apply })
+          if (result.totalSignals === 0) { skippedCount++; return }
+          results[symbol] = {
+            best: result.best,
+            totalSignals: result.totalSignals,
+            applied: result.applied,
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        if (msg.includes('No signals') || msg.includes('Insufficient')) {
+        if (msg.includes('No signals') || msg.includes('Insufficient') || msg.includes('0 valid folds')) {
           skippedCount++
         } else {
           errors[symbol] = msg
@@ -654,19 +710,21 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
   }
 
   // Build summary
-  const successCount = Object.keys(results).length
+  const successCount = Object.keys(results).filter(s => results[s].gatesPassed !== false).length
   const errorCount = Object.keys(errors).length
 
   const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1)
 
   const lines: string[] = [
-    `Batch optimization: ${symbols.length} symbols, ${days}d (${elapsedSec}s)`,
-    `Results: ${successCount} optimized, ${skippedCount} skipped (no signals), ${errorCount} errors`,
+    `Batch optimization${useWfo ? ' (WFO)' : ''}: ${symbols.length} symbols, ${days}d (${elapsedSec}s)`,
+    `Results: ${successCount} optimized, ${gatesFailedCount} gates-failed, ${skippedCount} skipped, ${errorCount} errors`,
     '',
   ]
 
   // Sort by expectancy descending, show top performers
-  const sorted = Object.entries(results).sort((a, b) => b[1].best.expectancy - a[1].best.expectancy)
+  const sorted = Object.entries(results)
+    .filter(([, r]) => r.gatesPassed !== false)
+    .sort((a, b) => b[1].best.expectancy - a[1].best.expectancy)
 
   const positive = sorted.filter(([, r]) => r.best.expectancy > 0)
   const negative = sorted.filter(([, r]) => r.best.expectancy <= 0)
@@ -674,7 +732,8 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
   if (positive.length > 0) {
     lines.push(`✅ Positive expectancy (${positive.length} symbols):`)
     for (const [sym, r] of positive.slice(0, 15)) {
-      lines.push(`  ${sym}: SL×${r.best.slMultiplier} TP×${r.best.tpMultiplier} → exp ${r.best.expectancy}%, win ${r.best.winRate}% (${r.totalSignals} signals)`)
+      const erStr = r.wfoER != null ? ` ER=${r.wfoER}` : ''
+      lines.push(`  ${sym}: SL×${r.best.slMultiplier} TP×${r.best.tpMultiplier} → exp ${r.best.expectancy}%, win ${r.best.winRate}%${erStr} (${r.totalSignals} signals)`)
     }
     if (positive.length > 15) lines.push(`  ... and ${positive.length - 15} more`)
   }
@@ -687,10 +746,18 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
     if (negative.length > 10) lines.push(`  ... and ${negative.length - 10} more`)
   }
 
-  if (apply) lines.push('\n✓ All optimized params written to strategy-params.json (per-symbol overrides)')
+  if (gatesFailedCount > 0) {
+    const failed = Object.entries(results).filter(([, r]) => r.gatesPassed === false)
+    lines.push(`\n⚠️ Gates failed (${gatesFailedCount} symbols — params NOT applied):`)
+    for (const [sym, r] of failed.slice(0, 10)) {
+      lines.push(`  ${sym}: WFO ER=${r.wfoER ?? '?'} — overfitting detected, previous params kept`)
+    }
+  }
+
+  if (apply && successCount > 0) lines.push('\n✓ Optimized params written to strategy-params.json (per-symbol overrides)')
 
   const summary = lines.join('\n')
-  log.info('batch optimize complete', { successCount, errorCount, skippedCount })
+  log.info('batch optimize complete', { successCount, errorCount, skippedCount, gatesFailedCount })
 
   return { totalSymbols: symbols.length, successCount, errorCount, skippedCount, results, errors, summary }
 }
