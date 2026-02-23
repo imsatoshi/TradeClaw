@@ -501,6 +501,14 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     return openOrders;
   }
 
+  // ==================== Raw Data Access (for TradeManager) ====================
+
+  /** Get raw Freqtrade trades (for TradeManager internal use). */
+  async getRawTrades(): Promise<FreqtradeTrade[]> {
+    this.ensureInit();
+    return this.get<FreqtradeTrade[]>('/api/v1/status');
+  }
+
   // ==================== Additional Freqtrade-specific methods ====================
 
   /**
@@ -655,18 +663,32 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     botConfig: FreqtradeShowConfigResponse;
     pendingOrders: CryptoOrder[];
     health: { status: 'ok' | 'degraded' | 'down'; ping: boolean; lastProcessed: string | null; details: string };
+    dailyStats: any;
+    pairPerformance: any;
   }> {
     // Health check: ping + /api/v1/health (last_process_ts)
     const healthPromise = this.checkHealth();
 
-    const [entryStats, exitStats, botConfig, pendingOrders, health] = await Promise.all([
+    const [entryStats, exitStats, botConfig, pendingOrders, health, dailyStats, pairPerformance] = await Promise.all([
       this.getEntryStats().catch(() => null),
       this.getExitStats().catch(() => null),
       this.fetchShowConfig().catch(() => null),
       this.getOpenOrders().catch(() => []),
       healthPromise,
+      this.getDailyStats().catch(() => null),
+      this.getPairPerformance().catch(() => null),
     ]);
-    return { entryStats, exitStats, botConfig: botConfig!, pendingOrders, health };
+    return { entryStats, exitStats, botConfig: botConfig!, pendingOrders, health, dailyStats, pairPerformance };
+  }
+
+  /** Get daily trading statistics (profit per day). */
+  async getDailyStats(days = 7): Promise<any> {
+    return this.get(`/api/v1/daily?timescale=${days}`);
+  }
+
+  /** Get per-pair performance summary. */
+  async getPairPerformance(): Promise<any> {
+    return this.get('/api/v1/performance');
   }
 
   /**

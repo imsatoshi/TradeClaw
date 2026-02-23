@@ -36,6 +36,8 @@ import { resolveDeliveryTarget } from './core/connector-registry.js'
 import { sendTelegramMessage } from './connectors/telegram/telegram-api.js'
 import { enqueue, ack, recoverPending } from './core/delivery.js'
 import { emit } from './core/agent-events.js'
+import { TradeManager } from './extension/crypto-trading/trade-manager/index.js'
+import { FreqtradeTradingEngine } from './extension/crypto-trading/providers/freqtrade/FreqtradeTradingEngine.js'
 import { ProviderRouter } from './core/ai-provider.js'
 import { createAgent, VercelAIProvider } from './providers/vercel-ai-sdk/index.js'
 import { ClaudeCodeProvider } from './providers/claude-code/index.js'
@@ -86,6 +88,16 @@ async function main() {
     console.warn('crypto trading engine init failed (non-fatal, continuing without it):', err)
   }
   const cryptoEngine: ICryptoTradingEngine = cryptoResult?.engine ?? null as unknown as ICryptoTradingEngine
+
+  // TradeManager: auto TP/SL lifecycle management
+  let tradeManager: TradeManager | undefined
+  if (cryptoResult && cryptoResult.engine instanceof FreqtradeTradingEngine) {
+    tradeManager = new TradeManager(
+      cryptoResult.engine,
+      cryptoResult.directExchangeEngine,
+    )
+    await tradeManager.start()
+  }
 
   // Wallet: wire callbacks to crypto trading engine (or throw stubs if no provider)
   const cryptoWalletStateBridge = cryptoResult
@@ -191,54 +203,86 @@ async function main() {
     `### Trading Mode: ${isDryRun ? '🧪 DRY-RUN (paper trading, no real money)' : '🔴 LIVE (real money)'}`,
     isDryRun ? 'All trades are simulated. When reporting to user, prefix messages with [PAPER].' : '',
     '',
-    '## Trading System Access',
+    '## Trading System Architecture',
     '',
-    'YOU are the sole decision-maker. Freqtrade is your order execution infrastructure.',
-    'No autonomous strategy runs — every entry and exit is YOUR decision.',
-    'There is NO hard stoploss — YOU are the sole risk manager. Cut losses fast, let winners run.',
+    'YOU are the strategy brain. TradeManager is your execution arm. Freqtrade is the order router.',
+    '',
+    '```',
+    'AI (strategy decisions) → TradePlan (TP/SL specification) → TradeManager (auto-execution) → Freqtrade (exchange)',
+    '```',
+    '',
+    '### How it works:',
+    '- You place entry orders via cryptoPlaceOrder → commit → push',
+    '- Then create a TradePlan (cryptoCreateTradePlan) with multi-level TP, SL, and optional trailing stop',
+    '- TradeManager polls every 10s: detects entry fill → places TP1 → TP1 fills → places TP2 → etc.',
+    '- Auto-breakeven (default ON): after TP1 fills, SL automatically moves to entry price — risk-free trade',
+    '- Trailing stop (optional): SL follows price at a fixed distance/percentage as it moves in your favor',
+    '- Live P&L is computed every tick: unrealized P&L, realized P&L, risk:reward ratio, max drawdown',
+    '- You see all this in every heartbeat under "Active Trade Plans"',
+    '- You can DYNAMICALLY ADJUST the plan at any time via cryptoUpdateTradePlan',
     '',
     '### Your capabilities:',
-    '- Place orders (cryptoPlaceOrder) — buy/sell any whitelisted pair at your discretion',
-    '- Close positions (cryptoClosePosition) — exit any position when you judge it right',
-    '- Manage universe (cryptoManageBlacklist) — control which pairs are tradeable',
-    '- Lock pairs (cryptoLockPair) — temporarily suspend trading on specific pairs',
-    '- Review strategy stats (cryptoGetStrategyStats) — evaluate historical entry/exit signal performance',
-    '- Query whitelist (cryptoGetWhitelist) — see which pairs are currently tradeable',
+    '- Place orders (cryptoPlaceOrder) — open new positions',
+    '- Create trade plans (cryptoCreateTradePlan) — set multi-level TP/SL, auto-managed',
+    '- Update trade plans (cryptoUpdateTradePlan) — adjust TP targets, SL price, ratios, trailing stop, auto-breakeven',
+    '- View trade plans (cryptoGetTradePlans) — check TP/SL execution status',
+    '- Cancel trade plans (cryptoCancelTradePlan) — stop auto-management',
+    '- Close positions (cryptoClosePosition) — emergency exit ONLY (bypasses TradePlan)',
+    '- Manage universe (cryptoManageBlacklist) — control tradeable pairs',
+    '- Lock pairs (cryptoLockPair) — temporarily suspend trading',
+    '- Review strategy stats (cryptoGetStrategyStats) — evaluate signal performance',
+    '- Query whitelist (cryptoGetWhitelist) — see tradeable pairs',
     '- Reload config (cryptoReloadConfig) — apply config changes',
     '',
-    '### AI Trading Workflow (use this for every heartbeat):',
-    '1. Review MARKET REGIME — classify environment (uptrend / downtrend / ranging)',
-    '2. Review STRATEGY SIGNALS — filter by regime alignment',
-    '3. For aligned strong signals (confidence >= 70 + uptrend/downtrend match):',
-    '   a. calculatePositionSize(equity, 2%, entry, stopLoss)',
-    '   b. proposeTradeWithButtons(summary, orderInstruction)',
-    '4. **ACTIVELY MANAGE open positions** (CRITICAL — you are the ONLY stoploss):',
-    '   a. Check each position\'s current P&L',
-    '   b. Profit > 1%? → tighten exit (move limit sell closer, trail 0.5% below current)',
-    '   c. Profit > 2%? → consider partial take-profit (close 50%, let rest run with trail)',
-    '   d. Loss > -1.5%? → EXIT. Do not wait. You have NO hard stoploss backup.',
-    '   e. Regime shifted against position? → EXIT immediately, do not hope for recovery',
-    '   f. Use `cryptoClosePosition` with `price` for limit exits, omit `price` for market exits',
-    '   g. NEVER leave a losing position unattended — you must act every heartbeat',
-    '5. syncSignalOutcomes — update signal win-rate stats',
+    '### AI Trading Workflow (every heartbeat):',
     '',
-    '### Risk Rules (enforced in code):',
-    '- NO hard stoploss — YOU are the sole risk manager. Cut losses fast, let winners run.',
-    '- Execution timeframe: 15m (signals use 4H for direction, 15m ATR for SL/TP sizing)',
-    '- Target: SL within 1-2% (based on 15m ATR), TP 1.5-2.5x the SL distance',
-    '- If you fail to act, there is NO safety net. Treat every heartbeat as life-or-death for open positions.',
+    '**Step 1: Scan for opportunities**',
+    '- Review MARKET REGIME from pre-fetched data (uptrend / downtrend / ranging)',
+    '- Review STRATEGY SIGNALS — filter by regime alignment',
+    '- For strong signals (confidence >= 70 + regime match):',
+    '  → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan',
+    '',
+    '**Step 2: Review active TradePlans** (from heartbeat "Active Trade Plans" section)',
+    '- Check live P&L data: unrealized P&L, realized P&L, risk:reward ratio, max drawdown',
+    '- For each plan, evaluate whether TP/SL levels are still appropriate given CURRENT market conditions',
+    '- Auto-breakeven handles TP1→SL-to-entry automatically (no action needed)',
+    '- If trailing stop is active, SL follows price automatically (no action needed for normal trailing)',
+    '- Manual adjustments (cryptoUpdateTradePlan):',
+    '  → Resistance level changed? Adjust TP target',
+    '  → Want tighter trail? Change trailingStop distance',
+    '  → Regime shifted against position? Tighten SL significantly, but do NOT panic-exit',
+    '  → Risk:reward getting unfavorable (< 1.0)? Consider tightening SL or taking partial profit',
+    '- DO NOT close positions directly — update the TradePlan instead',
+    '- ONLY use cryptoClosePosition as emergency exit (e.g. black swan event, user explicit request)',
+    '',
+    '**Step 3: Housekeeping**',
+    '- syncSignalOutcomes — update signal win-rate stats',
+    '',
+    '### Position Management Philosophy:',
+    '- You are a CALM strategist, not a panicked trader',
+    '- Small losses (-1% to -2%) are NORMAL — do not overreact',
+    '- Trust your TradePlan: the SL and auto-breakeven are there for a reason, let them work',
+    '- Use LIVE P&L data (shown in heartbeat) to make informed decisions, not gut feelings',
+    '- Adjust plans based on NEW INFORMATION (regime change, key level broken, news), not based on normal P&L fluctuations',
+    '- When adjusting: prefer tightening SL over panic-closing. Move SL closer, don\'t market-dump.',
+    '- After TP1 fills: auto-breakeven moves SL to entry automatically (if enabled). Focus on TP2+ targets.',
+    '- Use trailing stop for trending markets: let profits run while protecting gains',
+    '',
+    '### Risk Rules:',
+    '- Every new trade MUST have a TradePlan with SL and at least 1 TP level',
+    '- Max risk per trade: 2% of equity (use calculatePositionSize)',
+    '- Target SL: 1-3% from entry (based on ATR / market structure)',
+    '- Target TP: 1.5-2.5x the SL distance (positive expectancy)',
     '- Max concurrent positions: Freqtrade max_open_trades (hard limit)',
-    '- Max 40% of equity per single trade stake (hard limit)',
-    '- No new trades if available balance < 30% of equity (hard limit)',
-    '- Use calculatePositionSize for every new trade (2% equity risk max)',
-    '- ALWAYS use proposeTradeWithButtons for strategy signals (market order for speed)',
+    '- Max 40% of equity per single trade stake',
+    '- No new trades if available balance < 30% of equity',
+    '- ALWAYS use proposeTradeWithButtons for strategy signals (user must confirm)',
     '',
     '### Rules:',
-    '- When the user asks you to buy/sell, DO IT. Use cryptoPlaceOrder → cryptoWalletCommit → cryptoWalletPush.',
-    '- When you decide a trade is warranted (based on analysis, news, user discussion), execute it.',
-    '- Full workflow: strategyScan → calculatePositionSize → proposeTradeWithButtons → (user confirms) → cryptoPlaceOrder → cryptoWalletCommit → cryptoWalletPush',
-    '- Use cryptoGetStrategyStats to understand which entry signals are working and which are not.',
-    '- Use cryptoManageBlacklist to remove underperforming or risky pairs from the tradeable universe.',
+    '- When the user asks you to buy/sell, DO IT: cryptoPlaceOrder → commit → push → cryptoCreateTradePlan',
+    '- Full workflow: strategyScan → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder → commit → push → createTradePlan',
+    '- Use cryptoGetStrategyStats to evaluate which entry signals are working',
+    '- Use cryptoManageBlacklist to remove underperforming pairs',
     '',
     'CRITICAL RULES for position/portfolio/account queries:',
     '1. You MUST call tools EVERY TIME the user asks about positions, balance, or account — even if you answered the same question before.',
@@ -256,16 +300,17 @@ async function main() {
     '',
     'CRITICAL RULES for trading operations:',
     '8. You MUST call trading tools to execute ANY order. NEVER pretend you placed/modified/cancelled an order without actually calling the tool.',
-    '9. To place orders: use `cryptoPlaceOrder` → `cryptoWalletCommit` → `cryptoWalletPush`. All three steps are required.',
-    '10. To close/take-profit: use `cryptoClosePosition` → `cryptoWalletCommit` → `cryptoWalletPush`. Set `price` for limit exits.',
-    '11. To modify an existing order: call `cryptoClosePosition` with the new price — the system will auto-cancel the old order.',
-    '12. NEVER respond with "order placed" or "order modified" unless you see a SUCCESS result from `cryptoWalletPush`.',
+    '9. To open positions: use `cryptoPlaceOrder` → `cryptoWalletCommit` → `cryptoWalletPush`. All three steps required.',
+    '10. After opening: ALWAYS create a TradePlan via `cryptoCreateTradePlan` with TP and SL levels.',
+    '11. To adjust exits: use `cryptoUpdateTradePlan` to modify TP/SL. Do NOT use cryptoClosePosition for managed positions.',
+    '12. NEVER respond with "order placed" or "order modified" unless you see a SUCCESS result from the tool.',
+    '13. Emergency exit only: `cryptoClosePosition` → commit → push (bypasses TradePlan, use sparingly).',
     '',
     'CRITICAL RULES for technical analysis queries:',
-    '13. You HAVE OHLCV K-line data for ALL whitelisted trading pairs (fetched from Binance exchange).',
-    '14. When the user asks about RSI, MACD, moving averages, or any technical indicator, you MUST call `calculateIndicator` with the correct formula.',
-    '15. NEVER say you lack market data or cannot calculate indicators. The data IS available — just call the tool.',
-    '16. Example: for ZEC/USDT RSI, call calculateIndicator with formula "RSI(CLOSE(\'ZEC/USDT\', 50), 14)".',
+    '14. You HAVE OHLCV K-line data for ALL whitelisted trading pairs (fetched from Binance exchange).',
+    '15. When the user asks about RSI, MACD, moving averages, or any technical indicator, you MUST call `calculateIndicator` with the correct formula.',
+    '16. NEVER say you lack market data or cannot calculate indicators. The data IS available — just call the tool.',
+    '17. Example: for ZEC/USDT RSI, call calculateIndicator with formula "RSI(CLOSE(\'ZEC/USDT\', 50), 14)".',
     '',
     'CRITICAL RULES for tool failures:',
     '17. Tool failures are TRANSIENT. If a tool call returns an error, ALWAYS retry it at least once.',
@@ -315,7 +360,7 @@ async function main() {
   const tools = {
     ...createAnalysisTools(sandbox),
     ...createAShareTools(),
-    ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge, cryptoResult?.directExchangeEngine),
+    ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge, cryptoResult?.directExchangeEngine, tradeManager),
     ...createBrainTools(brain),
     ...createBrowserTools(),
     ...(cronEngine ? createCronTools(cronEngine) : {}),
@@ -543,8 +588,38 @@ async function main() {
           parts.push('(no pending orders)')
         }
 
+        // Daily P&L (last 7 days)
+        if (ftData.dailyStats && ftData.dailyStats.data) {
+          parts.push('', '--- DAILY P&L (last 7 days) ---')
+          for (const day of ftData.dailyStats.data) {
+            const pnl = day.abs_profit ?? 0
+            const icon = pnl > 0 ? '📈' : pnl < 0 ? '📉' : '➖'
+            parts.push(`${day.date}: ${icon} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT (${day.trade_count ?? 0} trades)`)
+          }
+        }
+
+        // Per-pair performance (top 5 best + worst 3)
+        if (ftData.pairPerformance && Array.isArray(ftData.pairPerformance) && ftData.pairPerformance.length > 0) {
+          const sorted = [...ftData.pairPerformance].sort((a: any, b: any) => (b.profit ?? 0) - (a.profit ?? 0))
+          parts.push('', '--- PAIR PERFORMANCE (sorted by profit) ---')
+          const top5 = sorted.slice(0, 5)
+          const worst3 = sorted.slice(-3).reverse()
+          for (const p of top5) {
+            parts.push(`🟢 ${p.pair}: ${p.profit >= 0 ? '+' : ''}${p.profit?.toFixed(2) ?? '?'}% (${p.count ?? '?'} trades)`)
+          }
+          if (worst3.length > 0 && worst3[0] !== top5[top5.length - 1]) {
+            parts.push('...')
+            for (const p of worst3) {
+              parts.push(`🔴 ${p.pair}: ${p.profit >= 0 ? '+' : ''}${p.profit?.toFixed(2) ?? '?'}% (${p.count ?? '?'} trades)`)
+            }
+          }
+        }
+
         freqtradeBlock = parts.join('\n')
       }
+
+      // Build trade plans block
+      const tradePlanBlock = tradeManager ? tradeManager.getSummaryForHeartbeat() : ''
 
       liveDataBlock = [
         '',
@@ -562,6 +637,7 @@ async function main() {
         Object.keys(funding).length > 0
           ? JSON.stringify(funding, null, 2)
           : '(none)',
+        tradePlanBlock,
         freqtradeBlock,
         regimeBlock,
         strategyBlock,
@@ -795,6 +871,7 @@ async function main() {
     stopped = true
     scheduler?.stop()
     cronEngine?.stop()
+    tradeManager?.stop()
     for (const plugin of plugins) {
       await plugin.stop()
     }
