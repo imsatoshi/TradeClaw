@@ -57,14 +57,22 @@ export class VercelAIProvider implements AIProvider {
 
   async ask(prompt: string): Promise<ProviderResult> {
     const media: MediaAttachment[] = []
+    let totalToolCalls = 0
     const result = await this.agent.generate({
       prompt,
       onStepFinish: (step) => {
+        totalToolCalls += step.toolCalls.length
         for (const tr of step.toolResults) {
           media.push(...extractMediaFromToolOutput(tr.output))
         }
       },
     })
+    const usage = (result as any).usage
+    if (usage) {
+      const input = usage.inputTokens ?? 0
+      const output = usage.outputTokens ?? 0
+      console.log(`token usage: input=${input} output=${output} total=${input + output} tools=${totalToolCalls}`)
+    }
     return { text: result.text ?? '', media }
   }
 
@@ -108,6 +116,14 @@ export class VercelAIProvider implements AIProvider {
         }
       },
     })
+
+    // Log token usage
+    const usage = (result as any).usage
+    if (usage) {
+      const input = usage.inputTokens ?? 0
+      const output = usage.outputTokens ?? 0
+      console.log(`token usage: input=${input} output=${output} total=${input + output} steps=${(result as any).steps?.length ?? '?'} tools=${totalToolCalls}`)
+    }
 
     // Log Anthropic cache stats (if available)
     if (this.isAnthropic) {

@@ -504,6 +504,7 @@ async function main() {
         ? (cryptoEngine as any).getHeartbeatData().catch(() => null)
         : Promise.resolve(null)
 
+      console.log('heartbeat: fetching live data...')
       const [positions, account, scanResult, signalStats, ftData, detailedStats, tradeMemory] = await Promise.all([
         (tools.cryptoGetPositions as any).execute({}),
         (tools.cryptoGetAccount as any).execute({}),
@@ -516,6 +517,7 @@ async function main() {
         computeDetailedStats().catch(() => null),
         loadTradeMemory().catch(() => null),
       ])
+      console.log('heartbeat: live data fetched OK')
 
       // Reuse scanner's 4H data for regime detection (no extra Binance fetch)
       const ohlcv4h = scanResult?.ohlcv4h ?? {}
@@ -526,9 +528,14 @@ async function main() {
       const heldSymbols = Array.isArray(positions?.positions)
         ? positions.positions.map((p: any) => p.symbol)
         : []
+      console.log('heartbeat: fetching funding rates for', heldSymbols.length, 'symbols')
       const funding = heldSymbols.length > 0
-        ? await ((tools as Record<string, any>).cryptoGetFundingRate)?.execute({ symbols: heldSymbols })
+        ? await ((tools as Record<string, any>).cryptoGetFundingRate)?.execute({ symbols: heldSymbols }).catch((err: unknown) => {
+          console.warn('heartbeat: funding rate fetch failed (non-fatal):', err)
+          return {}
+        })
         : {}
+      console.log('heartbeat: funding rates OK')
 
       // Build market regime block (replaces strategy signals)
       let regimeBlock = ''
@@ -867,7 +874,9 @@ async function main() {
     }
 
     // Stateless call — no session accumulation, fresh every time
+    console.log('heartbeat: calling engine.ask(), prompt length =', fullPrompt.length)
     const result = await engine.ask(fullPrompt)
+    console.log('heartbeat: engine.ask() returned, text length =', result.text.length)
 
     // Strip ack token to decide if the response should be delivered.
     // Cron events bypass the ack check — they must always be delivered.
