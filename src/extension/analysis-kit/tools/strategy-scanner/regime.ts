@@ -7,6 +7,7 @@
  */
 
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
+import type { StrategySignal } from './types.js'
 import { emaSeries, rsiSeries } from './helpers.js'
 
 export interface MarketRegime {
@@ -106,4 +107,74 @@ export function detectMarketRegime(
   }
 
   return results
+}
+
+// ==================== Regime-Strategy Filter ====================
+
+/**
+ * Regime-strategy compatibility rules.
+ *
+ * Mean-reversion strategies work in ranges; trend-following in trends.
+ * `allowed: false` = hard filter (signal dropped).
+ * `confidenceAdjust` = bonus/penalty applied to surviving signals.
+ */
+const REGIME_STRATEGY_RULES: Record<
+  MarketRegime['regime'],
+  Record<string, { allowed: boolean; confidenceAdjust: number }>
+> = {
+  uptrend: {
+    ema_trend:        { allowed: true,  confidenceAdjust: +5 },
+    breakout_volume:  { allowed: true,  confidenceAdjust: +5 },
+    structure_break:  { allowed: true,  confidenceAdjust: +10 },
+    rsi_divergence:   { allowed: false, confidenceAdjust: -20 },
+    funding_fade:     { allowed: false, confidenceAdjust: -15 },
+    bb_mean_revert:   { allowed: false, confidenceAdjust: -20 },
+  },
+  downtrend: {
+    ema_trend:        { allowed: true,  confidenceAdjust: +5 },
+    breakout_volume:  { allowed: true,  confidenceAdjust: +5 },
+    structure_break:  { allowed: true,  confidenceAdjust: +10 },
+    rsi_divergence:   { allowed: false, confidenceAdjust: -20 },
+    funding_fade:     { allowed: false, confidenceAdjust: -15 },
+    bb_mean_revert:   { allowed: false, confidenceAdjust: -20 },
+  },
+  ranging: {
+    rsi_divergence:   { allowed: true,  confidenceAdjust: +5 },
+    funding_fade:     { allowed: true,  confidenceAdjust: +5 },
+    bb_mean_revert:   { allowed: true,  confidenceAdjust: +10 },
+    ema_trend:        { allowed: false, confidenceAdjust: -15 },
+    breakout_volume:  { allowed: false, confidenceAdjust: -15 },
+    structure_break:  { allowed: false, confidenceAdjust: -15 },
+  },
+}
+
+/**
+ * Filter signals by regime compatibility.
+ *
+ * 1. Drop signals whose strategy is incompatible with current regime.
+ * 2. Drop signals whose direction conflicts with trend (long in downtrend, short in uptrend).
+ * 3. Adjust confidence for surviving signals.
+ *
+ * Mutates `confidence` and `details.regime` on surviving signals.
+ */
+export function applyRegimeFilter(
+  signals: StrategySignal[],
+  regime: MarketRegime,
+): StrategySignal[] {
+  return signals.filter(signal => {
+    const rules = REGIME_STRATEGY_RULES[regime.regime]
+    const rule = rules[signal.strategy]
+    if (!rule) return true // unknown strategy, pass through
+
+    if (!rule.allowed) return false
+
+    // Direction alignment: block counter-trend signals
+    if (regime.regime === 'uptrend' && signal.direction === 'short') return false
+    if (regime.regime === 'downtrend' && signal.direction === 'long') return false
+
+    // Adjust confidence
+    signal.confidence = Math.min(100, Math.max(0, signal.confidence + rule.confidenceAdjust))
+    signal.details = { ...signal.details, regime: regime.regime }
+    return true
+  })
 }

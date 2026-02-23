@@ -10,6 +10,7 @@
 
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import type { StrategySignal, StrategyName, FundingRateInfo } from './types.js'
+import { STRATEGY_TIMEFRAMES } from './types.js'
 import type { MarketRegime } from './regime.js'
 import { fetchHistoricalOHLCV } from '../../../archive-analysis/data/ExchangeClient.js'
 import { fetchFundingRates } from '../../../archive-analysis/data/FundingRateClient.js'
@@ -17,7 +18,9 @@ import { scanRsiDivergence } from './strategies/rsi-divergence.js'
 import { scanEmaTrend } from './strategies/ema-trend.js'
 import { scanBreakoutVolume } from './strategies/breakout-volume.js'
 import { scanFundingFade } from './strategies/funding-fade.js'
-import { detectMarketRegime } from './regime.js'
+import { scanBBMeanRevert } from './strategies/bb-mean-revert.js'
+import { scanStructureBreak } from './strategies/structure-break.js'
+import { detectMarketRegime, applyRegimeFilter } from './regime.js'
 import { getStrategyParams, getStrategyParamsFor } from './config.js'
 import { createLogger } from '../../../../core/logger.js'
 import { walkForwardOptimize } from './wfo.js'
@@ -333,8 +336,12 @@ export async function collectSignals(config: {
   }
 
   const enabledStrategies = new Set<StrategyName>(
-    strategies ?? ['rsi_divergence', 'ema_trend', 'breakout_volume', 'funding_fade'],
+    strategies ?? ['rsi_divergence', 'ema_trend', 'breakout_volume', 'funding_fade', 'bb_mean_revert', 'structure_break'],
   )
+
+  // Separate 4H and 15m strategies
+  const enabled4h = [...enabledStrategies].filter(s => STRATEGY_TIMEFRAMES[s] === '4h')
+  const enabled15m = [...enabledStrategies].filter(s => STRATEGY_TIMEFRAMES[s] === '15m')
 
   const bars15mTimes = bars15m.map(b => b.time)
   function find15mIdx(timeSec: number): number {
@@ -349,50 +356,125 @@ export async function collectSignals(config: {
 
   const rawSignals: RawSignalEntry[] = []
 
-  for (let i = 60; i < bars4h.length; i++) {
-    const scanBar = bars4h[i]
-    const scanTimeSec = scanBar.time
+  // ── Loop 1: 4H strategies (iterate over 4H bars) ──
+  if (enabled4h.length > 0) {
+    for (let i = 60; i < bars4h.length; i++) {
+      const scanBar = bars4h[i]
+      const scanTimeSec = scanBar.time
 
-    if (scanTimeSec * 1000 < scanStart) continue
+      if (scanTimeSec * 1000 < scanStart) continue
 
-    const window4h = bars4h.slice(Math.max(0, i - 59), i + 1)
-    const endIdx15m = find15mIdx(scanTimeSec + 1)
-    const window15m = bars15m.slice(Math.max(0, endIdx15m - 100), endIdx15m)
+      const window4h = bars4h.slice(Math.max(0, i - 59), i + 1)
+      const endIdx15m = find15mIdx(scanTimeSec + 1)
+      const window15m = bars15m.slice(Math.max(0, endIdx15m - 100), endIdx15m)
 
-    // Detect regime
-    const regimes = detectMarketRegime([symbol], { [symbol]: window4h })
-    const regime: MarketRegime = regimes[0] ?? {
-      symbol, regime: 'ranging', emaFast: 0, emaMid: 0, emaSlow: 0,
-      price: scanBar.close, priceVsEma55: 0, rsi: 50, reason: 'unknown',
-    }
+      // Detect regime
+      const regimes = detectMarketRegime([symbol], { [symbol]: window4h })
+      const regime: MarketRegime = regimes[0] ?? {
+        symbol, regime: 'ranging', emaFast: 0, emaMid: 0, emaSlow: 0,
+        price: scanBar.close, priceVsEma55: 0, rsi: 50, reason: 'unknown',
+      }
 
-    // Run strategies
-    const signals: StrategySignal[] = []
-    if (enabledStrategies.has('rsi_divergence')) {
-      try { signals.push(...await scanRsiDivergence(symbol, window4h, window15m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('ema_trend')) {
-      try { signals.push(...await scanEmaTrend(symbol, window4h, window15m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('breakout_volume')) {
-      try { signals.push(...await scanBreakoutVolume(symbol, window4h, window15m)) } catch { /* skip */ }
-    }
-    if (enabledStrategies.has('funding_fade')) {
-      const funding = fundingRates[symbol]
-      if (funding) {
-        try { signals.push(...await scanFundingFade(symbol, window4h, funding, window15m)) } catch { /* skip */ }
+      // Run 4H strategies
+      const signals: StrategySignal[] = []
+      if (enabledStrategies.has('rsi_divergence')) {
+        try { signals.push(...await scanRsiDivergence(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('ema_trend')) {
+        try { signals.push(...await scanEmaTrend(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('breakout_volume')) {
+        try { signals.push(...await scanBreakoutVolume(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('funding_fade')) {
+        const funding = fundingRates[symbol]
+        if (funding) {
+          try { signals.push(...await scanFundingFade(symbol, window4h, funding, window15m)) } catch { /* skip */ }
+        }
+      }
+
+      const confFiltered = signals.filter(s => s.confidence >= confidenceMin)
+      const regimeFiltered = applyRegimeFilter(confFiltered, regime)
+      const simStartIdx = find15mIdx(scanTimeSec)
+      if (simStartIdx >= bars15m.length) continue
+
+      for (const signal of regimeFiltered) {
+        const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
+        rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
       }
     }
+  }
 
-    const filtered = signals.filter(s => s.confidence >= confidenceMin)
-    const simStartIdx = find15mIdx(scanTimeSec)
-    if (simStartIdx >= bars15m.length) continue
+  // ── Loop 2: 15m strategies (iterate over 15m bars) ──
+  if (enabled15m.length > 0) {
+    const MIN_15M_LOOKBACK = 100
+    // Deduplication: prevent same strategy+direction within 4 bars (1 hour on 15m)
+    const DEDUP_COOLDOWN = 4
+    const lastSignalBar = new Map<string, number>()
 
-    for (const signal of filtered) {
-      const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
-      rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
+    // Pre-compute 4H bar index lookup for regime detection
+    const bars4hTimes = bars4h.map(b => b.time)
+    function find4hIdx(timeSec: number): number {
+      let lo = 0, hi = bars4hTimes.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (bars4hTimes[mid] < timeSec) lo = mid + 1
+        else hi = mid
+      }
+      return lo
+    }
+
+    for (let i = MIN_15M_LOOKBACK; i < bars15m.length; i++) {
+      const scanBar15m = bars15m[i]
+      const scanTimeSec = scanBar15m.time
+
+      if (scanTimeSec * 1000 < scanStart) continue
+
+      // Slice 15m window for strategies
+      const window15m = bars15m.slice(Math.max(0, i - MIN_15M_LOOKBACK), i + 1)
+
+      // Find aligned 4H window for regime detection
+      const aligned4hIdx = find4hIdx(scanTimeSec + 1) - 1
+      if (aligned4hIdx < 55) continue
+      const window4h = bars4h.slice(Math.max(0, aligned4hIdx - 59), aligned4hIdx + 1)
+
+      // Detect regime from 4H data
+      const regimes = detectMarketRegime([symbol], { [symbol]: window4h })
+      const regime: MarketRegime = regimes[0] ?? {
+        symbol, regime: 'ranging', emaFast: 0, emaMid: 0, emaSlow: 0,
+        price: scanBar15m.close, priceVsEma55: 0, rsi: 50, reason: 'unknown',
+      }
+
+      // Run 15m strategies
+      const signals: StrategySignal[] = []
+      if (enabledStrategies.has('bb_mean_revert')) {
+        try { signals.push(...await scanBBMeanRevert(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+      if (enabledStrategies.has('structure_break')) {
+        try { signals.push(...await scanStructureBreak(symbol, window4h, window15m)) } catch { /* skip */ }
+      }
+
+      const confFiltered = signals.filter(s => s.confidence >= confidenceMin)
+      const regimeFiltered = applyRegimeFilter(confFiltered, regime)
+
+      const simStartIdx = i + 1 // next 15m bar after signal
+      if (simStartIdx >= bars15m.length) continue
+
+      for (const signal of regimeFiltered) {
+        // Dedup: skip if same strategy+direction fired within cooldown
+        const dedupKey = `${signal.strategy}:${signal.direction}`
+        const lastBar = lastSignalBar.get(dedupKey)
+        if (lastBar !== undefined && i - lastBar < DEDUP_COOLDOWN) continue
+        lastSignalBar.set(dedupKey, i)
+
+        const atr = typeof signal.details.atr === 'number' ? signal.details.atr : 0
+        rawSignals.push({ signal, atr, regime: regime.regime, simStartIdx, signalTimeMs: scanTimeSec * 1000 })
+      }
     }
   }
+
+  // Sort all signals by time (4H + 15m merged)
+  rawSignals.sort((a, b) => a.signalTimeMs - b.signalTimeMs)
 
   return { rawSignals, bars15m, scanStart, endTime }
 }

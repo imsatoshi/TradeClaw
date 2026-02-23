@@ -1,6 +1,18 @@
 export type SignalDirection = 'long' | 'short'
 export type SignalStrength = 'strong' | 'moderate' | 'weak'
-export type StrategyName = 'rsi_divergence' | 'ema_trend' | 'breakout_volume' | 'funding_fade'
+export type StrategyName =
+  | 'rsi_divergence' | 'ema_trend' | 'breakout_volume' | 'funding_fade'
+  | 'bb_mean_revert' | 'structure_break'
+
+/** Primary decision timeframe for each strategy. */
+export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '15m'> = {
+  rsi_divergence: '4h',
+  ema_trend: '4h',
+  breakout_volume: '4h',
+  funding_fade: '4h',
+  bb_mean_revert: '15m',
+  structure_break: '15m',
+}
 
 export interface StrategySignal {
   strategy: StrategyName

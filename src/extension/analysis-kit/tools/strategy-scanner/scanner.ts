@@ -15,8 +15,11 @@ import { scanRsiDivergence } from './strategies/rsi-divergence.js'
 import { scanEmaTrend } from './strategies/ema-trend.js'
 import { scanBreakoutVolume } from './strategies/breakout-volume.js'
 import { scanFundingFade } from './strategies/funding-fade.js'
+import { scanBBMeanRevert } from './strategies/bb-mean-revert.js'
+import { scanStructureBreak } from './strategies/structure-break.js'
 import { appendSignalLog } from './signal-log.js'
 import { getStrategyParams } from './config.js'
+import { detectMarketRegime, applyRegimeFilter } from './regime.js'
 import { createLogger } from '../../../../core/logger.js'
 
 const log = createLogger('scanner')
@@ -228,6 +231,36 @@ export async function runStrategyScan(
         symbolSignals.push(...await scanFundingFade(symbol, bars4h, funding, bars15m))
       } catch (err) {
         errors.push(`${symbol} funding fade error: ${String(err)}`)
+      }
+    }
+
+    // 15m-native strategies
+    try {
+      symbolSignals.push(...await scanBBMeanRevert(symbol, bars4h, bars15m))
+    } catch (err) {
+      errors.push(`${symbol} BB mean revert error: ${String(err)}`)
+    }
+
+    try {
+      symbolSignals.push(...await scanStructureBreak(symbol, bars4h, bars15m))
+    } catch (err) {
+      errors.push(`${symbol} structure break error: ${String(err)}`)
+    }
+
+    // Apply regime filter — drop signals incompatible with current regime
+    if (symbolSignals.length > 0) {
+      const bars4hForRegime = ohlcv4h[symbol]
+      if (bars4hForRegime && bars4hForRegime.length >= 55) {
+        const regimes = detectMarketRegime([symbol], { [symbol]: bars4hForRegime })
+        if (regimes[0]) {
+          const beforeCount = symbolSignals.length
+          const regimeFiltered = applyRegimeFilter(symbolSignals, regimes[0])
+          symbolSignals.length = 0
+          symbolSignals.push(...regimeFiltered)
+          if (symbolSignals.length < beforeCount) {
+            log.info('regime filter', { symbol, regime: regimes[0].regime, before: beforeCount, after: symbolSignals.length })
+          }
+        }
       }
     }
 
