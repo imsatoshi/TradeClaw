@@ -101,7 +101,7 @@ function applyMtfFilter(
   if (trend1H === 'neutral') return signals
 
   const boost = scannerParams.mtfAlignedBoost ?? 5
-  const penalty = scannerParams.mtfConflictPenalty ?? -15
+  const penalty = scannerParams.mtfConflictPenalty ?? -8
   const weakThreshold = scannerParams.weakThreshold ?? 55
 
   return signals.map((signal) => {

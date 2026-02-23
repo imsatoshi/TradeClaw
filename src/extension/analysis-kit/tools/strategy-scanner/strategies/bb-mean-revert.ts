@@ -9,7 +9,7 @@
 
 import type { MarketData } from '../../../../archive-analysis/data/interfaces.js'
 import type { StrategySignal } from '../types.js'
-import { rsiSeries, atrSeries, sma } from '../helpers.js'
+import { rsiSeries, atrSeries, sma, bandwidthSeries } from '../helpers.js'
 import { getStrategyParamsFor } from '../config.js'
 
 export async function scanBBMeanRevert(
@@ -34,6 +34,15 @@ export async function scanBBMeanRevert(
   const STRONG_CONF = p.strongConfidence ?? 75
   const MOD_CONF = p.moderateConfidence ?? 60
   const PIERCE_PCT = p.piercePct ?? 0.5
+
+  // Bandwidth filter parameters (BBWP — percentile-based)
+  const BBWP_LOOKBACK = p.bwPercentileLookback ?? 120  // 120 bars = 30h on 15m
+  const BW_MAX_PCTL = p.bwMaxPercentile ?? 80          // block above 80th percentile (expansion)
+  const BW_MIN_PCTL = p.bwMinPercentile ?? 10          // block below 10th percentile (squeeze)
+  const BW_ABS_MAX = p.bwAbsoluteMax ?? 12.0           // absolute cap (extreme events)
+  const BW_ABS_MIN = p.bwAbsoluteMin ?? 1.5            // too tight, no profit room
+  const BW_ELEV_PCTL = p.bwElevatedPercentile ?? 60    // elevated zone starts at 60th pctl
+  const BW_ELEV_PENALTY = p.bwElevatedConfPenalty ?? 10 // confidence penalty for elevated BW
 
   if (bars15m.length < BB_PERIOD + RSI_PERIOD) return []
 
@@ -72,6 +81,28 @@ export async function scanBBMeanRevert(
   // Bandwidth as % of middle (for details)
   const bandwidth = middle > 0 ? ((upper - lower) / middle) * 100 : 0
 
+  // --- Bandwidth filter (BBWP — percentile-based) ---
+  // Hard blocks: absolute thresholds
+  if (bandwidth > BW_ABS_MAX) return []  // extreme volatility — mean reversion will fail
+  if (bandwidth < BW_ABS_MIN) return []  // too tight — no profit room, squeeze breakout imminent
+
+  // BBWP: compute percentile of current bandwidth in recent history
+  const bwSeries = bandwidthSeries(closes, BB_PERIOD, BB_MULT)
+  let bbwp = 50  // default if insufficient data
+  if (bwSeries.length >= 20) {
+    const lookbackSlice = bwSeries.slice(-Math.min(BBWP_LOOKBACK, bwSeries.length))
+    const currentBwRatio = bwSeries[bwSeries.length - 1]
+    const belowCount = lookbackSlice.filter(bw => bw < currentBwRatio).length
+    bbwp = (belowCount / lookbackSlice.length) * 100
+  }
+
+  // Hard blocks: percentile thresholds
+  if (bbwp > BW_MAX_PCTL) return []   // expansion regime — price rides the band
+  if (bbwp < BW_MIN_PCTL) return []   // squeeze — breakout imminent, not mean-reversion
+
+  // Soft penalty for elevated bandwidth (applied to confidence below)
+  const bwPenalty = bbwp > BW_ELEV_PCTL ? BW_ELEV_PENALTY : 0
+
   const signals: StrategySignal[] = []
 
   // Long: price at/below lower band + RSI oversold
@@ -81,7 +112,8 @@ export async function scanBBMeanRevert(
     const strength = isStrong ? 'strong' as const : 'moderate' as const
     let confidence = isStrong ? STRONG_CONF : MOD_CONF
     if (exhaustion) confidence += 5
-    confidence = Math.min(100, confidence)
+    confidence -= bwPenalty  // elevated bandwidth penalty
+    confidence = Math.min(100, Math.max(0, confidence))
 
     const sl = currentClose - SL_MULT * atr
     const tp = currentClose + TP_MULT * atr // target middle band
@@ -103,13 +135,14 @@ export async function scanBBMeanRevert(
         bbMiddle: round(middle),
         bbLower: round(lower),
         bandwidth: round(bandwidth),
+        bbwp: round(bbwp),
         rsi: round(rsi),
         volumeRatio: round(volRatio),
         exhaustion: exhaustion ? 1 : 0,
         piercePct: round(piercePct),
         atr: round(atr),
       },
-      reason: `BB mean revert LONG: price $${currentClose.toFixed(2)} at lower band $${lower.toFixed(2)} (pierce ${piercePct.toFixed(1)}%), RSI ${rsi.toFixed(0)}, vol ${volRatio.toFixed(1)}x avg${exhaustion ? ' (exhaustion)' : ''}`,
+      reason: `BB mean revert LONG: price $${currentClose.toFixed(2)} at lower band $${lower.toFixed(2)} (pierce ${piercePct.toFixed(1)}%), RSI ${rsi.toFixed(0)}, vol ${volRatio.toFixed(1)}x avg, BBWP ${bbwp.toFixed(0)}${exhaustion ? ', exhaustion' : ''}`,
     })
   }
 
@@ -120,7 +153,8 @@ export async function scanBBMeanRevert(
     const strength = isStrong ? 'strong' as const : 'moderate' as const
     let confidence = isStrong ? STRONG_CONF : MOD_CONF
     if (exhaustion) confidence += 5
-    confidence = Math.min(100, confidence)
+    confidence -= bwPenalty  // elevated bandwidth penalty
+    confidence = Math.min(100, Math.max(0, confidence))
 
     const sl = currentClose + SL_MULT * atr
     const tp = currentClose - TP_MULT * atr // target middle band
@@ -142,13 +176,14 @@ export async function scanBBMeanRevert(
         bbMiddle: round(middle),
         bbLower: round(lower),
         bandwidth: round(bandwidth),
+        bbwp: round(bbwp),
         rsi: round(rsi),
         volumeRatio: round(volRatio),
         exhaustion: exhaustion ? 1 : 0,
         piercePct: round(piercePct),
         atr: round(atr),
       },
-      reason: `BB mean revert SHORT: price $${currentClose.toFixed(2)} at upper band $${upper.toFixed(2)} (pierce ${piercePct.toFixed(1)}%), RSI ${rsi.toFixed(0)}, vol ${volRatio.toFixed(1)}x avg${exhaustion ? ' (exhaustion)' : ''}`,
+      reason: `BB mean revert SHORT: price $${currentClose.toFixed(2)} at upper band $${upper.toFixed(2)} (pierce ${piercePct.toFixed(1)}%), RSI ${rsi.toFixed(0)}, vol ${volRatio.toFixed(1)}x avg, BBWP ${bbwp.toFixed(0)}${exhaustion ? ', exhaustion' : ''}`,
     })
   }
 

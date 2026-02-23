@@ -33,6 +33,12 @@ export async function scanStructureBreak(
   const STRONG_CONF = p.strongConfidence ?? 72
   const MOD_CONF = p.moderateConfidence ?? 58
 
+  // Swing recency parameters (15m-tuned)
+  const MAX_SWING_AGE = p.maxSwingAge ?? 50         // max 50 bars (12.5h) — older swings are stale
+  const VOL_AGING_THRESHOLD = p.volAgingThreshold ?? 30  // swings older than 30 bars need extra volume
+  const VOL_AGING_RATIO = p.volAgingRatio ?? 1.6    // volume required for aging swings
+  const FRESH_AGE = p.freshAge ?? 15                // swings <= 15 bars get a confidence bonus
+
   const closes = bars15m.map(b => b.close)
   const highs = bars15m.map(b => b.high)
   const lows = bars15m.map(b => b.low)
@@ -78,42 +84,53 @@ export async function scanStructureBreak(
   // Bullish BOS: price breaks above most recent swing high
   if (swingHighs.length >= 1 && volumeConfirm) {
     const recentHigh = swingHighs[swingHighs.length - 1]
-    // Only consider swings that are not the very last bar (need break confirmation)
     const swingAge = len - 1 - recentHigh.index
-    if (swingAge >= SWING_WINDOW && currentClose > recentHigh.price) {
-      const breakPct = ((currentClose - recentHigh.price) / recentHigh.price) * 100
-      const isStrong = breakPct > BREAK_PCT && volRatio > VOL_STRONG
-      const strength = isStrong ? 'strong' as const : 'moderate' as const
-      let confidence = isStrong ? STRONG_CONF : MOD_CONF
-      if (volRatio > VOL_STRONG) confidence += 5
-      confidence = Math.min(100, confidence)
 
-      const sl = recentHigh.price - SL_MULT * atr // below broken structure
-      const tp = currentClose + TP_MULT * atr
-      const slDist = currentClose - sl
-      const rr = slDist > 0 ? (tp - currentClose) / slDist : 0
+    // Swing recency: must be within [SWING_WINDOW, MAX_SWING_AGE]
+    if (swingAge >= SWING_WINDOW && swingAge <= MAX_SWING_AGE && currentClose > recentHigh.price) {
+      // Aging swings require stronger volume confirmation
+      if (swingAge > VOL_AGING_THRESHOLD && volRatio < VOL_AGING_RATIO) {
+        // Skip: stale swing with weak volume — likely false breakout
+      } else {
+        const breakPct = ((currentClose - recentHigh.price) / recentHigh.price) * 100
+        const isStrong = breakPct > BREAK_PCT && volRatio > VOL_STRONG
+        const strength = isStrong ? 'strong' as const : 'moderate' as const
+        let confidence = isStrong ? STRONG_CONF : MOD_CONF
+        if (volRatio > VOL_STRONG) confidence += 5
 
-      signals.push({
-        strategy: 'structure_break',
-        symbol,
-        direction: 'long',
-        strength,
-        confidence,
-        timeframe: '15m',
-        entry: currentClose,
-        stopLoss: round(sl),
-        takeProfit: round(tp),
-        riskRewardRatio: round(rr),
-        details: {
-          swingHighPrice: round(recentHigh.price),
-          swingAge,
-          breakPct: round(breakPct),
-          rsi: round(currentRsi),
-          volumeRatio: round(volRatio),
-          atr: round(atr),
-        },
-        reason: `BOS LONG: price $${currentClose.toFixed(2)} broke swing high $${recentHigh.price.toFixed(2)} (+${breakPct.toFixed(1)}%), vol ${volRatio.toFixed(1)}x avg, RSI ${currentRsi.toFixed(0)}`,
-      })
+        // Age-based confidence adjustments
+        if (swingAge <= FRESH_AGE) confidence += 3       // fresh swing bonus
+        else if (swingAge > VOL_AGING_THRESHOLD) confidence -= 5  // aging swing penalty
+
+        confidence = Math.min(100, Math.max(0, confidence))
+
+        const sl = recentHigh.price - SL_MULT * atr // below broken structure
+        const tp = currentClose + TP_MULT * atr
+        const slDist = currentClose - sl
+        const rr = slDist > 0 ? (tp - currentClose) / slDist : 0
+
+        signals.push({
+          strategy: 'structure_break',
+          symbol,
+          direction: 'long',
+          strength,
+          confidence,
+          timeframe: '15m',
+          entry: currentClose,
+          stopLoss: round(sl),
+          takeProfit: round(tp),
+          riskRewardRatio: round(rr),
+          details: {
+            swingHighPrice: round(recentHigh.price),
+            swingAge,
+            breakPct: round(breakPct),
+            rsi: round(currentRsi),
+            volumeRatio: round(volRatio),
+            atr: round(atr),
+          },
+          reason: `BOS LONG: price $${currentClose.toFixed(2)} broke swing high $${recentHigh.price.toFixed(2)} (+${breakPct.toFixed(1)}%), vol ${volRatio.toFixed(1)}x avg, age ${swingAge} bars, RSI ${currentRsi.toFixed(0)}`,
+        })
+      }
     }
   }
 
@@ -121,40 +138,52 @@ export async function scanStructureBreak(
   if (swingLows.length >= 1 && volumeConfirm) {
     const recentLow = swingLows[swingLows.length - 1]
     const swingAge = len - 1 - recentLow.index
-    if (swingAge >= SWING_WINDOW && currentClose < recentLow.price) {
-      const breakPct = ((recentLow.price - currentClose) / recentLow.price) * 100
-      const isStrong = breakPct > BREAK_PCT && volRatio > VOL_STRONG
-      const strength = isStrong ? 'strong' as const : 'moderate' as const
-      let confidence = isStrong ? STRONG_CONF : MOD_CONF
-      if (volRatio > VOL_STRONG) confidence += 5
-      confidence = Math.min(100, confidence)
 
-      const sl = recentLow.price + SL_MULT * atr // above broken structure
-      const tp = currentClose - TP_MULT * atr
-      const slDist = sl - currentClose
-      const rr = slDist > 0 ? (currentClose - tp) / slDist : 0
+    // Swing recency: must be within [SWING_WINDOW, MAX_SWING_AGE]
+    if (swingAge >= SWING_WINDOW && swingAge <= MAX_SWING_AGE && currentClose < recentLow.price) {
+      // Aging swings require stronger volume confirmation
+      if (swingAge > VOL_AGING_THRESHOLD && volRatio < VOL_AGING_RATIO) {
+        // Skip: stale swing with weak volume — likely false breakout
+      } else {
+        const breakPct = ((recentLow.price - currentClose) / recentLow.price) * 100
+        const isStrong = breakPct > BREAK_PCT && volRatio > VOL_STRONG
+        const strength = isStrong ? 'strong' as const : 'moderate' as const
+        let confidence = isStrong ? STRONG_CONF : MOD_CONF
+        if (volRatio > VOL_STRONG) confidence += 5
 
-      signals.push({
-        strategy: 'structure_break',
-        symbol,
-        direction: 'short',
-        strength,
-        confidence,
-        timeframe: '15m',
-        entry: currentClose,
-        stopLoss: round(sl),
-        takeProfit: round(tp),
-        riskRewardRatio: round(rr),
-        details: {
-          swingLowPrice: round(recentLow.price),
-          swingAge,
-          breakPct: round(breakPct),
-          rsi: round(currentRsi),
-          volumeRatio: round(volRatio),
-          atr: round(atr),
-        },
-        reason: `BOS SHORT: price $${currentClose.toFixed(2)} broke swing low $${recentLow.price.toFixed(2)} (-${breakPct.toFixed(1)}%), vol ${volRatio.toFixed(1)}x avg, RSI ${currentRsi.toFixed(0)}`,
-      })
+        // Age-based confidence adjustments
+        if (swingAge <= FRESH_AGE) confidence += 3       // fresh swing bonus
+        else if (swingAge > VOL_AGING_THRESHOLD) confidence -= 5  // aging swing penalty
+
+        confidence = Math.min(100, Math.max(0, confidence))
+
+        const sl = recentLow.price + SL_MULT * atr // above broken structure
+        const tp = currentClose - TP_MULT * atr
+        const slDist = sl - currentClose
+        const rr = slDist > 0 ? (currentClose - tp) / slDist : 0
+
+        signals.push({
+          strategy: 'structure_break',
+          symbol,
+          direction: 'short',
+          strength,
+          confidence,
+          timeframe: '15m',
+          entry: currentClose,
+          stopLoss: round(sl),
+          takeProfit: round(tp),
+          riskRewardRatio: round(rr),
+          details: {
+            swingLowPrice: round(recentLow.price),
+            swingAge,
+            breakPct: round(breakPct),
+            rsi: round(currentRsi),
+            volumeRatio: round(volRatio),
+            atr: round(atr),
+          },
+          reason: `BOS SHORT: price $${currentClose.toFixed(2)} broke swing low $${recentLow.price.toFixed(2)} (-${breakPct.toFixed(1)}%), vol ${volRatio.toFixed(1)}x avg, age ${swingAge} bars, RSI ${currentRsi.toFixed(0)}`,
+        })
+      }
     }
   }
 

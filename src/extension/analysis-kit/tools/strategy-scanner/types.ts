@@ -6,7 +6,7 @@ export type StrategyName =
 
 /** Primary decision timeframe for each strategy. */
 export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '15m'> = {
-  rsi_divergence: '4h',
+  rsi_divergence: '15m',
   ema_trend: '4h',
   breakout_volume: '4h',
   funding_fade: '4h',
