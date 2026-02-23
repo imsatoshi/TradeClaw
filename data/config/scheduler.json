@@ -1,7 +1,7 @@
 {
   "heartbeat": {
     "enabled": true,
-    "every": "15m"
+    "every": "5m"
   },
   "cron": {
     "enabled": true

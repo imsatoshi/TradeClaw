@@ -17,7 +17,6 @@ export async function scanFundingFade(
   symbol: string,
   bars: MarketData[],
   fundingRate: FundingRateInfo,
-  bars15m?: MarketData[],
 ): Promise<StrategySignal[]> {
   const p = await getStrategyParamsFor('funding_fade', symbol)
 
@@ -42,12 +41,7 @@ export async function scanFundingFade(
 
   const rsi = RSI(closes, RSI_PERIOD)
 
-  // SL/TP uses 15m ATR when available (tighter, more appropriate for 15m execution)
-  const slTpBars = bars15m && bars15m.length >= ATR_PERIOD + 2 ? bars15m : bars
-  const slTpHighs = slTpBars.map(b => b.high)
-  const slTpLows = slTpBars.map(b => b.low)
-  const slTpCloses = slTpBars.map(b => b.close)
-  const atrArr = atrSeries(slTpHighs, slTpLows, slTpCloses, ATR_PERIOD)
+  const atrArr = atrSeries(highs, lows, closes, ATR_PERIOD)
   const atr = atrArr[atrArr.length - 1]
 
   const currentClose = closes[closes.length - 1]
@@ -73,7 +67,7 @@ export async function scanFundingFade(
       direction: 'short',
       strength,
       confidence,
-      timeframe: '4h',
+      timeframe: '5m',
       entry: currentClose,
       stopLoss: Math.round(sl * 100) / 100,
       takeProfit: Math.round(tp * 100) / 100,
@@ -84,7 +78,7 @@ export async function scanFundingFade(
         rsi: Math.round(rsi * 100) / 100,
         rsiConfirms: rsiConfirms ? 'yes' : 'no',
         atr: Math.round(atr * 100) / 100,
-        slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
+        slTpTimeframe: '5m',
         markPrice: fundingRate.markPrice,
         nextFunding: fundingRate.nextFundingTimeISO,
       },
@@ -110,7 +104,7 @@ export async function scanFundingFade(
       direction: 'long',
       strength,
       confidence,
-      timeframe: '4h',
+      timeframe: '5m',
       entry: currentClose,
       stopLoss: Math.round(sl * 100) / 100,
       takeProfit: Math.round(tp * 100) / 100,
@@ -121,7 +115,7 @@ export async function scanFundingFade(
         rsi: Math.round(rsi * 100) / 100,
         rsiConfirms: rsiConfirms ? 'yes' : 'no',
         atr: Math.round(atr * 100) / 100,
-        slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
+        slTpTimeframe: '5m',
         markPrice: fundingRate.markPrice,
         nextFunding: fundingRate.nextFundingTimeISO,
       },

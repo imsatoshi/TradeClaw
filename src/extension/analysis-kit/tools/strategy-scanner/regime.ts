@@ -1,7 +1,7 @@
 /**
  * Market regime detection for AI trading context.
  *
- * Uses 4H EMA9/21/55 alignment + price position to classify each symbol
+ * Uses 1H EMA9/21/55 alignment + price position to classify each symbol
  * as downtrend / uptrend / ranging. The heartbeat uses this as context
  * for evaluating strategy signals and managing open positions.
  */
@@ -23,7 +23,7 @@ export interface MarketRegime {
 }
 
 /**
- * Detect market regime for each symbol using 4H OHLCV data.
+ * Detect market regime for each symbol using 1H OHLCV data.
  *
  * Logic:
  *   downtrend: EMA9 < EMA21 < EMA55 AND price < EMA55
@@ -31,16 +31,16 @@ export interface MarketRegime {
  *   ranging:   anything else
  *
  * @param symbols  - list of trading pairs
- * @param ohlcv4h  - pre-fetched 4H candle data keyed by symbol
+ * @param ohlcv    - pre-fetched 1H candle data keyed by symbol
  */
 export function detectMarketRegime(
   symbols: string[],
-  ohlcv4h: Record<string, MarketData[]>,
+  ohlcv: Record<string, MarketData[]>,
 ): MarketRegime[] {
   const results: MarketRegime[] = []
 
   for (const symbol of symbols) {
-    const bars = ohlcv4h[symbol]
+    const bars = ohlcv[symbol]
     if (!bars || bars.length < 55) {
       // Not enough data — default to ranging (safe, no lock)
       results.push({

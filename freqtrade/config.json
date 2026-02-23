@@ -8,7 +8,7 @@
   "fiat_display_currency": "USD",
   "force_entry_enable": true,
   "initial_state": "running",
-  "timeframe": "15m",
+  "timeframe": "5m",
   "trading_mode": "futures",
   "margin_mode": "isolated",
   "dataformat_ohlcv": "feather",

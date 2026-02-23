@@ -1,5 +1,5 @@
 /**
- * Bollinger Band Mean Reversion strategy (15m-native)
+ * Bollinger Band Mean Reversion strategy (5m)
  *
  * Mean-reversion strategy for ranging markets:
  * - Long: price touches lower BB + RSI oversold + volume exhaustion
@@ -14,10 +14,9 @@ import { getStrategyParamsFor } from '../config.js'
 
 export async function scanBBMeanRevert(
   symbol: string,
-  bars4h: MarketData[],
-  bars15m?: MarketData[],
+  bars: MarketData[],
 ): Promise<StrategySignal[]> {
-  if (!bars15m || bars15m.length < 40) return []
+  if (bars.length < 40) return []
 
   const p = await getStrategyParamsFor('bb_mean_revert', symbol)
 
@@ -35,12 +34,12 @@ export async function scanBBMeanRevert(
   const MOD_CONF = p.moderateConfidence ?? 60
   const PIERCE_PCT = p.piercePct ?? 0.5
 
-  if (bars15m.length < BB_PERIOD + RSI_PERIOD) return []
+  if (bars.length < BB_PERIOD + RSI_PERIOD) return []
 
-  const closes = bars15m.map(b => b.close)
-  const highs = bars15m.map(b => b.high)
-  const lows = bars15m.map(b => b.low)
-  const volumes = bars15m.map(b => b.volume)
+  const closes = bars.map(b => b.close)
+  const highs = bars.map(b => b.high)
+  const lows = bars.map(b => b.low)
+  const volumes = bars.map(b => b.volume)
 
   // Bollinger Bands on 15m
   const bbSlice = closes.slice(-BB_PERIOD)
@@ -93,7 +92,7 @@ export async function scanBBMeanRevert(
       direction: 'long',
       strength,
       confidence,
-      timeframe: '15m',
+      timeframe: '5m',
       entry: currentClose,
       stopLoss: round(sl),
       takeProfit: round(tp),
@@ -132,7 +131,7 @@ export async function scanBBMeanRevert(
       direction: 'short',
       strength,
       confidence,
-      timeframe: '15m',
+      timeframe: '5m',
       entry: currentClose,
       stopLoss: round(sl),
       takeProfit: round(tp),

@@ -1,5 +1,5 @@
 /**
- * Structure Break (BOS) strategy (15m-native)
+ * Structure Break (BOS) strategy (5m)
  *
  * Trend-following strategy that detects Break of Structure:
  * - Bullish BOS: price breaks above most recent swing high with volume
@@ -14,10 +14,9 @@ import { getStrategyParamsFor } from '../config.js'
 
 export async function scanStructureBreak(
   symbol: string,
-  bars4h: MarketData[],
-  bars15m?: MarketData[],
+  bars: MarketData[],
 ): Promise<StrategySignal[]> {
-  if (!bars15m || bars15m.length < 50) return []
+  if (bars.length < 50) return []
 
   const p = await getStrategyParamsFor('structure_break', symbol)
 
@@ -33,10 +32,10 @@ export async function scanStructureBreak(
   const STRONG_CONF = p.strongConfidence ?? 72
   const MOD_CONF = p.moderateConfidence ?? 58
 
-  const closes = bars15m.map(b => b.close)
-  const highs = bars15m.map(b => b.high)
-  const lows = bars15m.map(b => b.low)
-  const volumes = bars15m.map(b => b.volume)
+  const closes = bars.map(b => b.close)
+  const highs = bars.map(b => b.high)
+  const lows = bars.map(b => b.low)
+  const volumes = bars.map(b => b.volume)
 
   // RSI series for swing detection (helpers require aligned rsi+vol arrays)
   const rsiArr = rsiSeries(closes, RSI_PERIOD)
@@ -99,7 +98,7 @@ export async function scanStructureBreak(
         direction: 'long',
         strength,
         confidence,
-        timeframe: '15m',
+        timeframe: '5m',
         entry: currentClose,
         stopLoss: round(sl),
         takeProfit: round(tp),
@@ -140,7 +139,7 @@ export async function scanStructureBreak(
         direction: 'short',
         strength,
         confidence,
-        timeframe: '15m',
+        timeframe: '5m',
         entry: currentClose,
         stopLoss: round(sl),
         takeProfit: round(tp),
