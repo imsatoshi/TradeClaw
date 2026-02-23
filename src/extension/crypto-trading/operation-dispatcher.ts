@@ -12,6 +12,9 @@
 import type { ICryptoTradingEngine, CryptoPlaceOrderRequest } from './interfaces.js';
 import { CRYPTO_MAX_OPEN_TRADES, MAX_STAKE_PERCENT_OF_EQUITY, MIN_AVAILABLE_BALANCE_RATIO } from './interfaces.js';
 import type { Operation } from './wallet/types.js';
+import { createLogger } from '../../core/logger.js';
+
+const log = createLogger('op-dispatcher');
 
 export function createCryptoOperationDispatcher(
   engine: ICryptoTradingEngine,
@@ -119,7 +122,7 @@ export function createCryptoOperationDispatcher(
           const isStopLoss = (position.side === 'short' && price > currentPrice)
                           || (position.side === 'long' && price < currentPrice);
           if (isStopLoss) {
-            console.log(`operation-dispatcher: auto-detected stoploss for ${symbol} (${position.side}, close@${price} vs current@${currentPrice})`);
+            log.info(`auto-detected stoploss for ${symbol} (${position.side}, close@${price} vs current@${currentPrice})`);
             orderType = 'stoploss';
           }
         }
@@ -136,7 +139,7 @@ export function createCryptoOperationDispatcher(
           : engine;
 
         if (orderType === 'stoploss') {
-          console.log(`operation-dispatcher: routing stoploss to direct exchange — ${symbol} ${closeSide} size=${closeSize} stopPrice=${price}`);
+          log.info(`routing stoploss to direct exchange — ${symbol} ${closeSide} size=${closeSize} stopPrice=${price}`);
         }
 
         const result = await targetEngine.placeOrder({
@@ -149,7 +152,7 @@ export function createCryptoOperationDispatcher(
         });
 
         if (orderType === 'stoploss') {
-          console.log(`operation-dispatcher: stoploss result — success=${result.success} orderId=${result.orderId} error=${result.error} message=${result.message}`);
+          log.info(`stoploss result — success=${result.success} orderId=${result.orderId} error=${result.error} message=${result.message}`);
         }
 
         if (!result.success) {
