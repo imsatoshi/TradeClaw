@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { readFile } from 'fs/promises'
+import { readFile, writeFile, mkdir } from 'fs/promises'
 import { resolve } from 'path'
 
 const CONFIG_DIR = resolve('data/config')
@@ -7,12 +7,46 @@ const CONFIG_DIR = resolve('data/config')
 // ==================== Individual Schemas ====================
 
 const engineSchema = z.object({
-  pairs: z.array(z.string()).min(1),
+  pairs: z.array(z.string()).min(1).default(['BTC/USD', 'ETH/USD', 'SOL/USD']),
   interval: z.number().int().positive().default(5000),
   port: z.number().int().positive().default(3000),
-  mcpPort: z.number().int().positive().optional(),
+  mcpPort: z.number().int().positive().default(3001),
+  askMcpPort: z.number().int().positive().optional(),
+  webPort: z.number().int().positive().default(3002),
   timeframe: z.string().default('1h'),
-  dataRefreshInterval: z.number().int().positive().default(300_000),
+  dataRefreshInterval: z.number().int().positive().default(300000),
+})
+
+const activeHoursSchema = z.object({
+  start: z.string().regex(/^\d{1,2}:\d{2}$/, 'Expected HH:MM format'),
+  end: z.string().regex(/^\d{1,2}:\d{2}$/, 'Expected HH:MM format'),
+  timezone: z.string().default('local'),
+}).nullable().default(null)
+
+const schedulerSchema = z.object({
+  heartbeat: z.object({
+    enabled: z.boolean().default(false),
+    every: z.string().default('30m'),
+    prompt: z.string().default('Read data/brain/heartbeat.md (or data/default/heartbeat.default.md if not found) and follow the instructions inside.'),
+    ackToken: z.string().default('ACK'),
+    ackMaxChars: z.number().default(10),
+    activeHours: activeHoursSchema,
+  }).default({
+    enabled: false,
+    every: '30m',
+    prompt: 'Read data/brain/heartbeat.md (or data/default/heartbeat.default.md if not found) and follow the instructions inside.',
+    ackToken: 'ACK',
+    ackMaxChars: 10,
+    activeHours: null,
+  }),
+  cron: z.object({
+    enabled: z.boolean().default(true),
+    storePath: z.string().default('data/cron/jobs.json'),
+  }).default({ enabled: true, storePath: 'data/cron/jobs.json' }),
+  delivery: z.object({
+    queueDir: z.string().default('data/delivery-queue'),
+    maxRetries: z.number().int().positive().default(5),
+  }).default({ queueDir: 'data/delivery-queue', maxRetries: 5 }),
 })
 
 const modelSchema = z.object({
@@ -23,8 +57,9 @@ const modelSchema = z.object({
 
 const agentSchema = z.object({
   maxSteps: z.number().int().positive().default(20),
+  evolutionMode: z.boolean().default(false),
   claudeCode: z.object({
-    allowedTools: z.array(z.string()).default(['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch']),
+    allowedTools: z.array(z.string()).optional(),
     disallowedTools: z.array(z.string()).default([
       'Task', 'TaskOutput',
       'AskUserQuestion', 'TodoWrite',
@@ -34,7 +69,6 @@ const agentSchema = z.object({
     ]),
     maxTurns: z.number().int().positive().default(20),
   }).default({
-    allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
     disallowedTools: [
       'Task', 'TaskOutput',
       'AskUserQuestion', 'TodoWrite',
@@ -70,11 +104,14 @@ const cryptoSchema = z.object({
     z.object({
       type: z.literal('none'),
     }),
-  ]).default({ type: 'none' }),
+  ]).default({ type: 'ccxt', exchange: 'bybit', sandbox: false, demoTrading: true, defaultMarketType: 'swap' }),
 })
 
 const securitiesSchema = z.object({
-  allowedSymbols: z.array(z.string()).default([]),
+  allowedSymbols: z.array(z.string()).default([
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA',
+    'SPY', 'QQQ',
+  ]),
   provider: z.discriminatedUnion('type', [
     z.object({
       type: z.literal('alpaca'),
@@ -83,7 +120,17 @@ const securitiesSchema = z.object({
     z.object({
       type: z.literal('none'),
     }),
-  ]).default({ type: 'none' }),
+  ]).default({ type: 'alpaca', paper: true }),
+})
+
+const openbbSchema = z.object({
+  apiUrl: z.string().default('http://localhost:6900'),
+  defaultProvider: z.string().default('yfinance'),
+  providerKeys: z.object({
+    fred: z.string().optional(),
+    fmp: z.string().optional(),
+    eia: z.string().optional(),
+  }).default({}),
 })
 
 const compactionSchema = z.object({
@@ -93,48 +140,15 @@ const compactionSchema = z.object({
   microcompactKeepRecent: z.number().default(3),
 })
 
-const activeHoursSchema = z.object({
-  start: z.string().regex(/^\d{1,2}:\d{2}$/, 'Expected HH:MM format'),
-  end: z.string().regex(/^\d{1,2}:\d{2}$/, 'Expected HH:MM format'),
-  timezone: z.string().default('local'),
-}).nullable().default(null)
+export const aiProviderSchema = z.object({
+  provider: z.enum(['claude-code', 'vercel-ai-sdk']).default('claude-code'),
+})
 
 const heartbeatSchema = z.object({
   enabled: z.boolean().default(false),
   every: z.string().default('30m'),
-  prompt: z.string().default('Read HEARTBEAT.md and check if anything needs attention. Reply HEARTBEAT_OK if nothing to report.'),
-  ackToken: z.string().default('HEARTBEAT_OK'),
-  ackMaxChars: z.number().default(300),
+  prompt: z.string().default('Read data/brain/heartbeat.md (or data/default/heartbeat.default.md if not found) and follow the instructions inside.'),
   activeHours: activeHoursSchema,
-})
-
-const cronConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  storePath: z.string().default('data/cron/jobs.json'),
-})
-
-const deliveryConfigSchema = z.object({
-  queueDir: z.string().default('data/delivery-queue'),
-  maxRetries: z.number().int().positive().default(5),
-})
-
-const schedulerSchema = z.object({
-  heartbeat: heartbeatSchema.default({
-    enabled: false,
-    every: '30m',
-    prompt: 'Read HEARTBEAT.md and check if anything needs attention. Reply HEARTBEAT_OK if nothing to report.',
-    ackToken: 'HEARTBEAT_OK',
-    ackMaxChars: 300,
-    activeHours: null,
-  }),
-  cron: cronConfigSchema.default({
-    enabled: false,
-    storePath: 'data/cron/jobs.json',
-  }),
-  delivery: deliveryConfigSchema.default({
-    queueDir: 'data/delivery-queue',
-    maxRetries: 5,
-  }),
 })
 
 // ==================== Unified Config Type ====================
@@ -145,42 +159,102 @@ export type Config = {
   agent: z.infer<typeof agentSchema>
   crypto: z.infer<typeof cryptoSchema>
   securities: z.infer<typeof securitiesSchema>
+  openbb: z.infer<typeof openbbSchema>
   compaction: z.infer<typeof compactionSchema>
+  aiProvider: z.infer<typeof aiProviderSchema>
+  heartbeat: z.infer<typeof heartbeatSchema>
   scheduler: z.infer<typeof schedulerSchema>
 }
 
 // ==================== Loader ====================
 
-async function loadJsonFile(filename: string): Promise<unknown> {
+/** Read a JSON config file. Returns undefined if file does not exist. */
+async function loadJsonFile(filename: string): Promise<unknown | undefined> {
   try {
-    const raw = await readFile(resolve(CONFIG_DIR, filename), 'utf-8')
-    return JSON.parse(raw)
+    return JSON.parse(await readFile(resolve(CONFIG_DIR, filename), 'utf-8'))
   } catch (err: unknown) {
     if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return {} // File not found → use defaults from Zod schema
+      return undefined
     }
     throw err
   }
 }
 
+/** Parse with Zod; if the file was missing, seed it to disk with defaults. */
+async function parseAndSeed<T>(filename: string, schema: z.ZodType<T>, raw: unknown | undefined): Promise<T> {
+  const parsed = schema.parse(raw ?? {})
+  if (raw === undefined) {
+    await mkdir(CONFIG_DIR, { recursive: true })
+    await writeFile(resolve(CONFIG_DIR, filename), JSON.stringify(parsed, null, 2) + '\n')
+  }
+  return parsed
+}
+
 export async function loadConfig(): Promise<Config> {
-  const [engineRaw, modelRaw, agentRaw, cryptoRaw, securitiesRaw, compactionRaw, schedulerRaw] = await Promise.all([
-    loadJsonFile('engine.json'),
-    loadJsonFile('model.json'),
-    loadJsonFile('agent.json'),
-    loadJsonFile('crypto.json'),
-    loadJsonFile('securities.json'),
-    loadJsonFile('compaction.json'),
-    loadJsonFile('scheduler.json'),
-  ])
+  const files = ['engine.json', 'model.json', 'agent.json', 'crypto.json', 'securities.json', 'openbb.json', 'compaction.json', 'ai-provider.json', 'heartbeat.json', 'scheduler.json'] as const
+  const raws = await Promise.all(files.map((f) => loadJsonFile(f)))
 
   return {
-    engine: engineSchema.parse(engineRaw),
-    model: modelSchema.parse(modelRaw),
-    agent: agentSchema.parse(agentRaw),
-    crypto: cryptoSchema.parse(cryptoRaw),
-    securities: securitiesSchema.parse(securitiesRaw),
-    compaction: compactionSchema.parse(compactionRaw),
-    scheduler: schedulerSchema.parse(schedulerRaw),
+    engine:     await parseAndSeed(files[0], engineSchema, raws[0]),
+    model:      await parseAndSeed(files[1], modelSchema, raws[1]),
+    agent:      await parseAndSeed(files[2], agentSchema, raws[2]),
+    crypto:     await parseAndSeed(files[3], cryptoSchema, raws[3]),
+    securities: await parseAndSeed(files[4], securitiesSchema, raws[4]),
+    openbb:     await parseAndSeed(files[5], openbbSchema, raws[5]),
+    compaction: await parseAndSeed(files[6], compactionSchema, raws[6]),
+    aiProvider: await parseAndSeed(files[7], aiProviderSchema, raws[7]),
+    heartbeat:  await parseAndSeed(files[8], heartbeatSchema, raws[8]),
+    scheduler:  await parseAndSeed(files[9], schedulerSchema, raws[9]),
   }
+}
+
+// ==================== Hot-read helpers ====================
+
+/** Read agent config from disk (called per-request for hot-reload). */
+export async function readAgentConfig() {
+  try {
+    const raw = JSON.parse(await readFile(resolve(CONFIG_DIR, 'agent.json'), 'utf-8'))
+    return agentSchema.parse(raw)
+  } catch {
+    return agentSchema.parse({})
+  }
+}
+
+// ==================== Writer ====================
+
+export type ConfigSection = keyof Config
+
+const sectionSchemas: Record<ConfigSection, z.ZodTypeAny> = {
+  engine: engineSchema,
+  model: modelSchema,
+  agent: agentSchema,
+  crypto: cryptoSchema,
+  securities: securitiesSchema,
+  openbb: openbbSchema,
+  compaction: compactionSchema,
+  aiProvider: aiProviderSchema,
+  heartbeat: heartbeatSchema,
+  scheduler: schedulerSchema,
+}
+
+const sectionFiles: Record<ConfigSection, string> = {
+  engine: 'engine.json',
+  model: 'model.json',
+  agent: 'agent.json',
+  crypto: 'crypto.json',
+  securities: 'securities.json',
+  openbb: 'openbb.json',
+  compaction: 'compaction.json',
+  aiProvider: 'ai-provider.json',
+  heartbeat: 'heartbeat.json',
+  scheduler: 'scheduler.json',
+}
+
+/** Validate and write a config section to disk. Returns the validated config. */
+export async function writeConfigSection(section: ConfigSection, data: unknown): Promise<unknown> {
+  const schema = sectionSchemas[section]
+  const validated = schema.parse(data)
+  await mkdir(CONFIG_DIR, { recursive: true })
+  await writeFile(resolve(CONFIG_DIR, sectionFiles[section]), JSON.stringify(validated, null, 2) + '\n')
+  return validated
 }

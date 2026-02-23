@@ -7,9 +7,9 @@
  * - RSI is used as a bonus/upgrade factor, not a hard requirement
  */
 
-import type { MarketData } from '../../../data/interfaces.js'
+import type { MarketData } from '../../../../archive-analysis/data/interfaces.js'
 import type { FundingRateInfo, StrategySignal } from '../types.js'
-import { RSI } from '../../indicators/functions/technical.js'
+import { RSI } from '../../../../archive-analysis/tools/indicators/functions/technical.js'
 import { atrSeries } from '../helpers.js'
 import { getStrategyParamsFor } from '../config.js'
 

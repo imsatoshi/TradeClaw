@@ -1,4 +1,4 @@
-import type { Update, Message, Chat, User } from '@grammyjs/types'
+import type { Update, Message, Chat, User } from 'grammy/types'
 
 export type { Update, Message, Chat, User }
 
@@ -21,7 +21,7 @@ export interface ParsedMessage {
   media: MediaRef[]
   /** media_group_id if present */
   mediaGroupId?: string
-  raw: Update
+  raw: Message
 }
 
 export interface MediaRef {
@@ -33,17 +33,12 @@ export interface MediaRef {
   height?: number
 }
 
-export interface InlineKeyboardButton {
-  text: string
-  callback_data?: string
-}
-
 export interface OutboundMessage {
   chatId: number
   text: string
-  parseMode?: 'HTML' | 'MarkdownV2'
+  parseMode?: string
   replyToMessageId?: number
-  replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }
+  replyMarkup?: unknown
 }
 
 export interface ParsedCallbackQuery {

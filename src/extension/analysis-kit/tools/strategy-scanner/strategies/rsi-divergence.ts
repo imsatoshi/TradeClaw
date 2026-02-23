@@ -6,7 +6,7 @@
  * - Bearish divergence: price makes higher high, RSI makes lower high, volume declining
  */
 
-import type { MarketData } from '../../../data/interfaces.js'
+import type { MarketData } from '../../../../archive-analysis/data/interfaces.js'
 import type { StrategySignal } from '../types.js'
 import { rsiSeries, findSwingLows, findSwingHighs, atrSeries } from '../helpers.js'
 import { getStrategyParamsFor } from '../config.js'

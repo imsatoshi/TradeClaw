@@ -8,9 +8,9 @@
  */
 
 import type { ScanResult, StrategySignal, FundingRateInfo } from './types.js'
-import type { MarketData } from '../../data/interfaces.js'
-import { fetchExchangeOHLCV } from '../../data/ExchangeClient.js'
-import { fetchFundingRates } from '../../data/FundingRateClient.js'
+import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
+import { fetchExchangeOHLCV } from '../../../archive-analysis/data/ExchangeClient.js'
+import { fetchFundingRates } from '../../../archive-analysis/data/FundingRateClient.js'
 import { scanRsiDivergence } from './strategies/rsi-divergence.js'
 import { scanEmaTrend } from './strategies/ema-trend.js'
 import { scanBreakoutVolume } from './strategies/breakout-volume.js'

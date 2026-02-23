@@ -6,7 +6,7 @@
  * for evaluating strategy signals and managing open positions.
  */
 
-import type { MarketData } from '../../data/interfaces.js'
+import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import { emaSeries, rsiSeries } from './helpers.js'
 
 export interface MarketRegime {

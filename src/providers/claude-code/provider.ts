@@ -25,9 +25,23 @@ function stripImageData(raw: string): string {
   } catch { return raw }
 }
 
-const DEFAULT_ALLOWED_TOOLS = [
-  'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+/** Tools pre-approved in normal mode (no Bash). */
+const NORMAL_ALLOWED_TOOLS = [
+  'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+  'mcp__tradeclaw__*',
 ]
+
+/** Tools pre-approved in evolution mode (includes Bash). */
+const EVOLUTION_ALLOWED_TOOLS = [
+  'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+  'mcp__tradeclaw__*',
+]
+
+/** Extra tools to disallow in normal mode. */
+const NORMAL_EXTRA_DISALLOWED = ['Bash']
+
+/** Extra tools to disallow in evolution mode. */
+const EVOLUTION_EXTRA_DISALLOWED: string[] = []
 
 /**
  * Spawn `claude -p` as a stateless child process and collect the result.
@@ -41,8 +55,9 @@ export async function askClaudeCode(
   config: ClaudeCodeConfig = {},
 ): Promise<ClaudeCodeResult> {
   const {
-    allowedTools = DEFAULT_ALLOWED_TOOLS,
+    allowedTools = [],
     disallowedTools = [],
+    evolutionMode = false,
     maxTurns = 20,
     cwd = process.cwd(),
     systemPrompt,
@@ -50,16 +65,25 @@ export async function askClaudeCode(
     onToolResult,
   } = config
 
+  // Merge: explicit config overrides mode defaults
+  const modeAllowed = evolutionMode ? EVOLUTION_ALLOWED_TOOLS : NORMAL_ALLOWED_TOOLS
+  const modeDisallowed = evolutionMode ? EVOLUTION_EXTRA_DISALLOWED : NORMAL_EXTRA_DISALLOWED
+  const finalAllowed = allowedTools.length > 0 ? allowedTools : modeAllowed
+  const finalDisallowed = [...disallowedTools, ...modeDisallowed]
+
   const args = [
     '-p', prompt,
     '--output-format', 'stream-json',
     '--verbose',
     '--max-turns', String(maxTurns),
-    '--allowedTools', allowedTools.join(','),
   ]
 
-  if (disallowedTools.length > 0) {
-    args.push('--disallowedTools', ...disallowedTools)
+  if (finalAllowed.length > 0) {
+    args.push('--allowedTools', ...finalAllowed)
+  }
+
+  if (finalDisallowed.length > 0) {
+    args.push('--disallowedTools', ...finalDisallowed)
   }
 
   if (systemPrompt) {
@@ -159,8 +183,23 @@ export async function askClaudeCode(
         })
       }
 
+      // When the final turn is a tool call with no standalone text output,
+      // resultText is empty. Fall back to the last assistant text blocks.
+      let text = resultText
+      if (!text) {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'assistant') {
+            text = messages[i].content
+              .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+              .map(b => b.text)
+              .join('\n')
+            if (text) break
+          }
+        }
+      }
+
       resolve({
-        text: resultText || '(no output)',
+        text: text || '(no output)',
         ok: true,
         messages,
       })

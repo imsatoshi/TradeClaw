@@ -3,6 +3,8 @@ dist/
 logs/
 /data/*
 !/data/config/
+!/data/default/
+!/data/default/**
 state.json
 *.log
 
@@ -20,11 +22,15 @@ Thumbs.db
 *.swp
 *.swo
 
+# Build cache
+*.tsbuildinfo
+
 # Test
 coverage/
 
-# Claude Code project config (internal use only)
+# Claude Code
 CLAUDE.md
+.claude/
 
 # Runtime state (written by writeAIConfig, not project config)
 data/config/ai-provider.json

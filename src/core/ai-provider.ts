@@ -1,9 +1,9 @@
 /**
- * AIProvider interface + ProviderRouter — upstream-aligned provider abstraction.
+ * AIProvider — unified abstraction over AI backends.
  *
- * The ProviderRouter reads ai-config.json at call time to decide whether to
- * route to VercelAIProvider (DeepSeek) or ClaudeCodeProvider (Claude CLI).
- * Engine delegates to this instead of managing provider logic itself.
+ * Each provider (Vercel AI SDK, Claude Code CLI, …) implements this interface
+ * with its own session management flow.  ProviderRouter reads the runtime
+ * config and delegates to the correct implementation.
  */
 
 import type { SessionStore } from './session.js'
@@ -13,11 +13,11 @@ import { readAIConfig } from './ai-config.js'
 // ==================== Types ====================
 
 export interface AskOptions {
-  /** Preamble text injected before conversation history. */
+  /** Preamble text inside <chat_history> block (Claude Code only). */
   historyPreamble?: string
-  /** System prompt for the provider. */
+  /** System prompt override (Claude Code only). */
   systemPrompt?: string
-  /** Max history entries to include. */
+  /** Max text history entries in <chat_history>. Default: 50 (Claude Code only). */
   maxHistoryEntries?: number
   /**
    * Data freshness TTL in milliseconds.
@@ -33,19 +33,30 @@ export interface ProviderResult {
   media: MediaAttachment[]
 }
 
-// ==================== Interface ====================
-
+/** Unified AI provider — each backend implements its own session handling. */
 export interface AIProvider {
+  /** Stateless prompt — no session context. */
+  ask(prompt: string): Promise<ProviderResult>
+  /** Prompt with session history and compaction. */
   askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult>
 }
 
 // ==================== Router ====================
 
+/** Reads runtime AI config and delegates to the correct provider. */
 export class ProviderRouter implements AIProvider {
   constructor(
     private vercel: AIProvider,
     private claudeCode: AIProvider | null,
   ) {}
+
+  async ask(prompt: string): Promise<ProviderResult> {
+    const aiConfig = await readAIConfig()
+    if (aiConfig.provider === 'claude-code' && this.claudeCode) {
+      return this.claudeCode.ask(prompt)
+    }
+    return this.vercel.ask(prompt)
+  }
 
   async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
     const aiConfig = await readAIConfig()

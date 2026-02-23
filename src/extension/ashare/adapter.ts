@@ -1,9 +1,9 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import { searchStock, getQuote, getKline, detectMarket } from './client.js'
-import { RealMarketDataProvider } from '../analysis-kit/data/RealMarketDataProvider.js'
-import { calculateIndicator } from '../analysis-kit/tools/calculate-indicator.tool.js'
-import type { MarketData } from '../analysis-kit/data/interfaces.js'
+import { RealMarketDataProvider } from '../archive-analysis/data/RealMarketDataProvider.js'
+import { calculateIndicator } from '../archive-analysis/tools/calculate-indicator.tool.js'
+import type { MarketData } from '../archive-analysis/data/interfaces.js'
 
 /**
  * Create A-share analysis AI tools

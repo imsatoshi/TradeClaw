@@ -55,6 +55,19 @@ export class VercelAIProvider implements AIProvider {
     return { role: 'system', content: this.instructions } as ModelMessage
   }
 
+  async ask(prompt: string): Promise<ProviderResult> {
+    const media: MediaAttachment[] = []
+    const result = await this.agent.generate({
+      prompt,
+      onStepFinish: (step) => {
+        for (const tr of step.toolResults) {
+          media.push(...extractMediaFromToolOutput(tr.output))
+        }
+      },
+    })
+    return { text: result.text ?? '', media }
+  }
+
   async askWithSession(prompt: string, session: SessionStore, opts?: AskOptions): Promise<ProviderResult> {
     // Append user message to session
     await session.appendUser(prompt, 'human')

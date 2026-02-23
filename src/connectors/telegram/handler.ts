@@ -167,6 +167,6 @@ export function parseUpdate(update: Update, botUsername?: string): ParsedMessage
     commandArgs,
     media: extractMedia(msg),
     mediaGroupId: 'media_group_id' in msg ? (msg as any).media_group_id : undefined,
-    raw: update,
+    raw: msg,
   }
 }

@@ -43,6 +43,8 @@ import { ProviderRouter } from './core/ai-provider.js'
 import { createAgent, VercelAIProvider } from './providers/vercel-ai-sdk/index.js'
 import { ClaudeCodeProvider } from './providers/claude-code/index.js'
 import { resolveCompactionConfig } from './core/compaction.js'
+import { createEventLog } from './core/event-log.js'
+import type { Heartbeat } from './task/heartbeat/index.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const BRAIN_FILE = resolve('data/brain/commit.json')
@@ -155,7 +157,6 @@ async function main() {
   const sandbox = new Sandbox(
     { timeframe: config.engine.timeframe },
     marketProvider,
-    newsProvider,
   )
 
   // Brain: cognitive state with commit-based tracking
@@ -411,7 +412,25 @@ async function main() {
     ))
   }
 
-  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine }
+  // Event log — persistent append-only event log used by web plugin + heartbeat
+  const eventLog = await createEventLog()
+
+  // Noop heartbeat stub (our scheduler handles heartbeat via core/scheduler.ts)
+  const heartbeat: Heartbeat = {
+    start: async () => {},
+    stop: () => {},
+    setEnabled: async () => {},
+    isEnabled: () => config.scheduler.heartbeat.enabled,
+  }
+
+  // CronEngine is already created above (may be null if cron disabled)
+  // Create a noop stub if null to satisfy EngineContext
+  const cronEngineForCtx = cronEngine ?? createCronEngine({
+    config: config.scheduler.cron,
+    onWake: () => {},
+  })
+
+  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine, eventLog, heartbeat, cronEngine: cronEngineForCtx as any }
 
   for (const plugin of plugins) {
     await plugin.start(ctx)
@@ -475,7 +494,7 @@ async function main() {
         ? positions.positions.map((p: any) => p.symbol)
         : []
       const funding = heldSymbols.length > 0
-        ? await (tools.cryptoGetFundingRate as any).execute({ symbols: heldSymbols })
+        ? await ((tools as Record<string, any>).cryptoGetFundingRate)?.execute({ symbols: heldSymbols })
         : {}
 
       // Build market regime block (replaces strategy signals)

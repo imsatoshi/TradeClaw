@@ -8,11 +8,11 @@
  * The optimizer then replays exits cheaply with different SL/TP multipliers.
  */
 
-import type { MarketData } from '../../data/interfaces.js'
+import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import type { StrategySignal, StrategyName, FundingRateInfo } from './types.js'
 import type { MarketRegime } from './regime.js'
-import { fetchHistoricalOHLCV } from '../../data/ExchangeClient.js'
-import { fetchFundingRates } from '../../data/FundingRateClient.js'
+import { fetchHistoricalOHLCV } from '../../../archive-analysis/data/ExchangeClient.js'
+import { fetchFundingRates } from '../../../archive-analysis/data/FundingRateClient.js'
 import { scanRsiDivergence } from './strategies/rsi-divergence.js'
 import { scanEmaTrend } from './strategies/ema-trend.js'
 import { scanBreakoutVolume } from './strategies/breakout-volume.js'

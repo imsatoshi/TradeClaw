@@ -7,9 +7,9 @@
  * - Volume and EMA separation used for strength/confidence grading
  */
 
-import type { MarketData } from '../../../data/interfaces.js'
+import type { MarketData } from '../../../../archive-analysis/data/interfaces.js'
 import type { StrategySignal } from '../types.js'
-import { RSI } from '../../indicators/functions/technical.js'
+import { RSI } from '../../../../archive-analysis/tools/indicators/functions/technical.js'
 import { emaSeries, sma, atrSeries } from '../helpers.js'
 import { getStrategyParamsFor } from '../config.js'
 
