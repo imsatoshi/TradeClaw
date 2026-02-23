@@ -240,10 +240,14 @@ async function main() {
     '',
     '### AI Trading Workflow (every heartbeat):',
     '',
-    '**Step 1: Scan for opportunities**',
-    '- Review MARKET REGIME from pre-fetched data (uptrend / downtrend / ranging)',
-    '- Review STRATEGY SIGNALS — filter by regime alignment',
-    '- For strong signals (confidence >= 70 + regime match):',
+    '**Step 1: Scan for opportunities (CONFLUENCE-FIRST)**',
+    '- Check CONFLUENCE SIGNALS first (multi-strategy agreement = highest conviction):',
+    '  → Grade A (3+ strategies agree): propose trade via proposeTradeWithButtons',
+    '  → Grade B (2 strategies, avg conf >= 70): propose if regime strongly aligned',
+    '  → Grade C or single-strategy: DO NOT propose, mention in summary only',
+    '- NEVER open new positions based on a single strategy signal alone',
+    '- Individual signals are for context/analysis only (exit decisions, adjustments)',
+    '- For qualifying confluence signals:',
     '  → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan',
     '',
     '**Step 2: Review active TradePlans** (from heartbeat "Active Trade Plans" section)',
@@ -524,27 +528,57 @@ async function main() {
         ].join('\n')
       }
 
-      // Build strategy signals block (AI's primary signal source)
+      // Build strategy signals block — two-tier: confluence (primary) + individual (context)
       let strategyBlock = ''
       if (scanResult) {
-        const actionable = scanResult.signals.filter((s: any) => s.confidence >= 70)
         const session = scanResult.sessionInfo
-        const signalLines = actionable.map((s: any, i: number) => {
-          const details = s.details ? Object.values(s.details).join(', ') : ''
-          // Tag signal with regime context
-          const regime = regimeResults.find((r) => r.symbol === s.symbol)
-          const regimeTag = regime ? ` [${regime.regime}]` : ''
-          return `${i + 1}. ${s.strategy} ${s.direction.toUpperCase()} ${s.symbol}${regimeTag}: confidence ${s.confidence}%, entry $${s.entry?.toFixed(4) ?? 'N/A'}, SL $${s.stopLoss?.toFixed(4) ?? 'N/A'}, TP $${s.takeProfit?.toFixed(4) ?? 'N/A'} | ${details}`
-        })
-
-        strategyBlock = [
+        const parts: string[] = [
           '',
-          '--- STRATEGY SIGNALS (auto-scanned, primary signal source) ---',
           `Session: ${session.sessionName} — ${session.note}`,
-          `Scanned ${scanResult.symbols.length} symbols, found ${actionable.length} actionable signals (confidence >= 70):`,
+        ]
+
+        // Tier 1: Confluence signals (multi-strategy agreement — highest conviction)
+        const composites = scanResult.compositeSignals ?? []
+        parts.push(
           '',
-          ...(signalLines.length > 0 ? signalLines : ['(no actionable signals this scan)']),
-        ].join('\n')
+          '--- CONFLUENCE SIGNALS (multi-strategy agreement, highest conviction) ---',
+        )
+        if (composites.length > 0) {
+          parts.push(`Found ${composites.length} confluence opportunities:`)
+          for (let i = 0; i < composites.length; i++) {
+            const c = composites[i]
+            const stars = c.grade === 'A' ? '\u2605\u2605\u2605' : c.grade === 'B' ? '\u2605\u2605' : '\u2605'
+            parts.push(
+              `${i + 1}. ${stars} ${c.symbol} ${c.direction.toUpperCase()} [Grade ${c.grade}, ${c.regime}]: score ${c.compositeScore}, ${c.strategyCount} strategies agree`,
+              `   ${c.strategies.join(' + ')} | avg confidence ${c.avgConfidence}%`,
+              `   Entry $${c.bestEntry.toFixed(4)} | SL $${c.bestSL.toFixed(4)} | TP $${c.bestTP.toFixed(4)} | R:R ${c.riskRewardRatio}`,
+            )
+          }
+        } else {
+          parts.push('(no confluence signals — no multi-strategy agreement found)')
+        }
+
+        // Tier 2: Individual signals (context only — do NOT trade on these alone)
+        const actionable = scanResult.signals.filter((s: any) => s.confidence >= 70)
+        parts.push(
+          '',
+          '--- INDIVIDUAL SIGNALS (single-strategy, context only — do NOT trade alone) ---',
+          `Scanned ${scanResult.symbols.length} symbols, ${actionable.length} individual signals (conf >= 70):`,
+        )
+        if (actionable.length > 0) {
+          for (let i = 0; i < actionable.length; i++) {
+            const s = actionable[i]
+            const regime = regimeResults.find((r: any) => r.symbol === s.symbol)
+            const regimeTag = regime ? ` [${regime.regime}]` : ''
+            parts.push(
+              `${i + 1}. ${s.strategy} ${s.direction.toUpperCase()} ${s.symbol}${regimeTag}: conf ${s.confidence}%, entry $${s.entry?.toFixed(4) ?? 'N/A'}, SL $${s.stopLoss?.toFixed(4) ?? 'N/A'}, TP $${s.takeProfit?.toFixed(4) ?? 'N/A'}`,
+            )
+          }
+        } else {
+          parts.push('(no individual signals above threshold)')
+        }
+
+        strategyBlock = parts.join('\n')
       }
 
       // Build signal stats block

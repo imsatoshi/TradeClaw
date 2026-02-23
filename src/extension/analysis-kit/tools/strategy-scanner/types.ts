@@ -29,11 +29,29 @@ export interface StrategySignal {
   reason: string              // human-readable signal reason
 }
 
+/** Multi-strategy confluence signal — only created when 2+ strategies agree on direction. */
+export interface CompositeSignal {
+  symbol: string
+  direction: SignalDirection
+  compositeScore: number          // 0-100, weighted sum
+  regime: string                  // from regime detection
+  strategies: StrategyName[]      // which strategies agree
+  strategyCount: number           // how many agree (2+ required)
+  avgConfidence: number           // average confidence across agreeing strategies
+  bestEntry: number               // from highest-confidence signal
+  bestSL: number                  // tightest SL (most conservative)
+  bestTP: number                  // closest TP (most conservative)
+  riskRewardRatio: number
+  reasons: string[]               // individual strategy reasons
+  grade: 'A' | 'B' | 'C'         // A: 3+ strategies, B: 2 strategies strong, C: 2 strategies moderate
+}
+
 export interface ScanResult {
   scannedAt: string           // ISO timestamp
   symbols: string[]
   timeframe: string
   signals: StrategySignal[]
+  compositeSignals: CompositeSignal[]  // multi-strategy confluence
   errors: string[]
   sessionInfo: {
     currentHourUTC: number

@@ -20,6 +20,8 @@ import { scanStructureBreak } from './strategies/structure-break.js'
 import { appendSignalLog } from './signal-log.js'
 import { getStrategyParams } from './config.js'
 import { detectMarketRegime, applyRegimeFilter } from './regime.js'
+import type { MarketRegime } from './regime.js'
+import { computeConfluence } from './confluence.js'
 import { createLogger } from '../../../../core/logger.js'
 
 const log = createLogger('scanner')
@@ -196,6 +198,9 @@ export async function runStrategyScan(
     ? fundingRates
     : await fetchFundingRates(symbols).catch(() => ({} as Record<string, FundingRateInfo>))
 
+  // Regime map for confluence scoring
+  const regimeMap: Record<string, MarketRegime> = {}
+
   // Run strategies per symbol
   for (const symbol of symbols) {
     const bars4h = ohlcv4h[symbol]
@@ -253,6 +258,7 @@ export async function runStrategyScan(
       if (bars4hForRegime && bars4hForRegime.length >= 55) {
         const regimes = detectMarketRegime([symbol], { [symbol]: bars4hForRegime })
         if (regimes[0]) {
+          regimeMap[symbol] = regimes[0]
           const beforeCount = symbolSignals.length
           const regimeFiltered = applyRegimeFilter(symbolSignals, regimes[0])
           symbolSignals.length = 0
@@ -279,8 +285,12 @@ export async function runStrategyScan(
   // Sort by confidence descending
   allSignals.sort((a, b) => b.confidence - a.confidence)
 
+  // Compute confluence — multi-strategy agreement
+  const compositeSignals = computeConfluence(allSignals, regimeMap)
+
   log.info('scan complete', {
     signals: allSignals.length,
+    confluence: compositeSignals.length,
     actionable: allSignals.filter((s) => s.confidence >= 70).length,
     errors: errors.length,
   })
@@ -293,6 +303,7 @@ export async function runStrategyScan(
     symbols,
     timeframe: '4h+15m',
     signals: allSignals,
+    compositeSignals,
     errors,
     sessionInfo: getSessionInfo(),
     ohlcv4h,

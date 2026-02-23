@@ -1,6 +1,7 @@
 export { runStrategyScan } from './scanner.js'
 export { detectMarketRegime, applyRegimeFilter } from './regime.js'
 export type { MarketRegime } from './regime.js'
+export { computeConfluence } from './confluence.js'
 export { scanBBMeanRevert } from './strategies/bb-mean-revert.js'
 export { scanStructureBreak } from './strategies/structure-break.js'
 export { runBacktest, optimizeParams, batchOptimize } from './backtester.js'
@@ -12,6 +13,7 @@ export { validateByMonteCarlo } from './monte-carlo.js'
 export type { MonteCarloResult } from './monte-carlo.js'
 export type {
   StrategySignal,
+  CompositeSignal,
   ScanResult,
   FundingRateInfo,
   SwingPoint,
