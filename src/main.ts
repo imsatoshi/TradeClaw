@@ -9,7 +9,7 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime, batchOptimize } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
 import { computeSignalStats, computeDetailedStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
 import type { DetailedSignalStats, StrategyWeight } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
@@ -965,69 +965,11 @@ async function main() {
     }
   }
 
-  // Post-startup: batch optimize all whitelisted symbols (fire-and-forget)
-  // Runs in background, sends summary to Telegram when done.
-  ;(async () => {
-    try {
-      // Freqtrade VolumePairList is dynamic — whitelist is empty at boot, populated after first cycle.
-      // Poll the Freqtrade API directly until the whitelist is populated.
-      const ftUrl = config.crypto.provider.type === 'freqtrade' ? config.crypto.provider.url : null
-      const ftAuth = config.crypto.provider.type === 'freqtrade'
-        ? 'Basic ' + Buffer.from(`${config.crypto.provider.username}:${config.crypto.provider.password}`).toString('base64')
-        : null
-      if (!ftUrl || !ftAuth) return
-
-      // Helper: fetch current whitelist from Freqtrade
-      const fetchWhitelist = async (): Promise<string[]> => {
-        const res = await fetch(`${ftUrl}/api/v1/whitelist`, { headers: { Authorization: ftAuth! } })
-        if (!res.ok) return []
-        const data = await res.json() as { whitelist: string[] }
-        return data.whitelist
-          .map((s: string) => s.replace(/:.*$/, ''))
-          .filter((s: string) => /^[A-Z0-9]+\/USDT$/.test(s))
-      }
-
-      // Phase 1: Wait for whitelist to become non-empty
-      let symbols: string[] = []
-      for (let attempt = 0; attempt < 20; attempt++) {
-        try { symbols = await fetchWhitelist() } catch { /* retry */ }
-        if (symbols.length > 0) break
-        console.log(`post-startup: waiting for Freqtrade whitelist (attempt ${attempt + 1}/20)...`)
-        await new Promise(r => setTimeout(r, 15_000))
-      }
-
-      // Phase 2: Wait for whitelist to stabilize (VolumePairList loads incrementally after fresh restart)
-      if (symbols.length > 0) {
-        let stableCount = 0
-        for (let i = 0; i < 6; i++) {  // up to ~3 min extra
-          await new Promise(r => setTimeout(r, 30_000))
-          try {
-            const fresh = await fetchWhitelist()
-            if (fresh.length <= symbols.length) {
-              stableCount++
-              if (stableCount >= 2) break  // stable for 2 consecutive checks
-            } else {
-              console.log(`post-startup: whitelist growing ${symbols.length} → ${fresh.length}, waiting...`)
-              symbols = fresh
-              stableCount = 0
-            }
-          } catch { /* keep current */ }
-        }
-        console.log(`post-startup: whitelist stabilized at ${symbols.length} symbols`)
-      }
-
-      if (symbols.length === 0) {
-        console.log('post-startup: no USDT symbols after waiting, skipping optimization')
-        return
-      }
-      console.log(`post-startup: optimizing ${symbols.length} symbols (90d, apply=true)`)
-      const result = await batchOptimize({ symbols, days: 90, apply: true })
-      console.log(`post-startup: optimization done — ${result.successCount} optimized, ${result.skippedCount} skipped, ${result.errorCount} errors`)
-      await sendTelegramMessage(`🔧 Startup Optimization Complete\n\n${result.summary}`)
-    } catch (err) {
-      console.error('post-startup: batch optimize failed:', err instanceof Error ? err.message : err)
-    }
-  })()
+  // Post-startup WFO optimization — DISABLED
+  // Reason: strategies had bugs (ema_trend EMA alignment, regime hard filter)
+  // so all historical optimization data is invalid. Re-enable after collecting
+  // clean data with fixed strategies (1-2 weeks).
+  // See: batchOptimize() in analysis-kit for the implementation.
 
   // Recover any pending deliveries from previous runs (fire-and-forget)
   recoverPending({
