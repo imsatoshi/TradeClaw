@@ -4,7 +4,7 @@ import type { Sandbox } from '../sandbox/Sandbox';
 import { calculate } from '../tools/calculate.tool';
 import { calculateIndicator } from '../tools/calculate-indicator.tool';
 import { globNews, grepNews, readNews } from '../tools/news.tool';
-import { CRYPTO_ALLOWED_SYMBOLS, CRYPTO_DEFAULT_LEVERAGE } from '../../crypto-trading/interfaces.js';
+import { CRYPTO_ALLOWED_SYMBOLS, CRYPTO_DEFAULT_LEVERAGE, CRYPTO_MAX_OPEN_TRADES } from '../../crypto-trading/interfaces.js';
 import { runStrategyScan } from '../tools/strategy-scanner/index.js';
 import { runBacktest, optimizeParams, batchOptimize } from '../tools/strategy-scanner/index.js';
 import { fetchFundingRates } from '../data/FundingRateClient.js';
@@ -753,27 +753,35 @@ IMPORTANT: After completion, report the full summary to the user, especially:
 
     calculatePositionSize: tool({
       description: `
-Calculate optimal position size based on fixed risk percentage.
+Calculate optimal position size with built-in risk management checks.
 
-Given your account equity, risk tolerance, and stop-loss distance, computes:
+Computes position size based on fixed risk percentage, then validates against
+account limits before returning the result.
+
+Returns:
 - riskAmount: dollars you're willing to lose if stop is hit
-- positionValue: total value of the position (before leverage)
-- stakeAmount: margin required (positionValue / leverage)
-- size: coin quantity (positionValue / entryPrice)
+- positionValue: total leveraged exposure
+- stakeAmount: actual margin required (positionValue / leverage)
+- size: coin quantity
+- warnings: any risk limit violations detected
+- approved: true if all checks pass, false if any limit exceeded
 
-Leverage is auto-detected from Freqtrade open trades. No leverage parameter needed.
+You MUST check the 'approved' field before placing the order.
+If approved=false, do NOT proceed — adjust parameters or skip the trade.
 
 Example: $500 equity, 2% risk, entry $8.50, stop $8.00
-→ riskAmount=$10, positionValue=$170, stakeAmount=$56.7, size=20 coins
+→ riskAmount=$10, stakeAmount=$56.7, size=20 coins, approved=true
       `.trim(),
       inputSchema: z.object({
-        accountEquity: z.number().positive().describe('Total account equity in USDT'),
+        accountEquity: z.number().positive().describe('Total account equity in USDT (from cryptoGetAccount)'),
+        availableBalance: z.number().positive().describe('Available balance in USDT (from cryptoGetAccount)'),
         riskPercent: z.number().positive().max(10).describe('Max risk per trade as % of equity (e.g. 2 for 2%)'),
         entryPrice: z.number().positive().describe('Planned entry price'),
         stopLossPrice: z.number().positive().describe('Stop-loss price'),
+        currentOpenPositions: z.number().int().min(0).optional().describe('Number of currently open positions (from cryptoGetPositions). Used for max-trades check.'),
       }),
-      execute: ({ accountEquity, riskPercent, entryPrice, stopLossPrice }) => {
-        const leverage = CRYPTO_DEFAULT_LEVERAGE; // auto-detected from Freqtrade trades at startup
+      execute: ({ accountEquity, availableBalance, riskPercent, entryPrice, stopLossPrice, currentOpenPositions }) => {
+        const leverage = CRYPTO_DEFAULT_LEVERAGE;
         const riskAmount = accountEquity * (riskPercent / 100);
         const priceRiskPercent = Math.abs(entryPrice - stopLossPrice) / entryPrice;
 
@@ -785,6 +793,42 @@ Example: $500 equity, 2% risk, entry $8.50, stop $8.00
         const stakeAmount = positionValue / leverage;
         const size = positionValue / entryPrice;
 
+        // --- Risk Management Checks ---
+        const warnings: string[] = [];
+        let approved = true;
+
+        // Check 1: Stake exceeds max % of equity (40%)
+        const maxStakePercent = 0.40;
+        const stakePercentOfEquity = stakeAmount / accountEquity;
+        if (stakePercentOfEquity > maxStakePercent) {
+          warnings.push(`Stake $${stakeAmount.toFixed(2)} is ${(stakePercentOfEquity * 100).toFixed(1)}% of equity (max ${maxStakePercent * 100}%)`)
+          approved = false;
+        }
+
+        // Check 2: Available balance check (need 30% reserve)
+        const minReserveRatio = 0.30;
+        const balanceAfterTrade = availableBalance - stakeAmount;
+        const reserveRatio = balanceAfterTrade / accountEquity;
+        if (reserveRatio < minReserveRatio) {
+          warnings.push(`After this trade, available balance would be $${balanceAfterTrade.toFixed(2)} (${(reserveRatio * 100).toFixed(1)}% of equity, min ${minReserveRatio * 100}%)`)
+          approved = false;
+        }
+
+        // Check 3: Max open trades
+        const maxTrades = CRYPTO_MAX_OPEN_TRADES;
+        if (currentOpenPositions !== undefined && currentOpenPositions >= maxTrades) {
+          warnings.push(`Already at max open trades: ${currentOpenPositions}/${maxTrades}`)
+          approved = false;
+        }
+
+        // Check 4: SL distance sanity (warn if > 5% or < 0.1%)
+        if (priceRiskPercent > 0.05) {
+          warnings.push(`Stop-loss distance ${(priceRiskPercent * 100).toFixed(2)}% is very wide (>5%). Consider tighter SL.`)
+        }
+        if (priceRiskPercent < 0.001) {
+          warnings.push(`Stop-loss distance ${(priceRiskPercent * 100).toFixed(3)}% is extremely tight (<0.1%). Likely to get stopped out by noise.`)
+        }
+
         return {
           riskAmount: Math.round(riskAmount * 100) / 100,
           positionValue: Math.round(positionValue * 100) / 100,
@@ -792,7 +836,12 @@ Example: $500 equity, 2% risk, entry $8.50, stop $8.00
           size: Math.round(size * 10000) / 10000,
           leverage,
           priceRiskPercent: `${(priceRiskPercent * 100).toFixed(2)}%`,
-          note: `Risking ${riskPercent}% of equity ($${riskAmount.toFixed(2)}) with ${leverage}x leverage`,
+          stakePercentOfEquity: `${(stakePercentOfEquity * 100).toFixed(1)}%`,
+          approved,
+          warnings: warnings.length > 0 ? warnings : undefined,
+          note: approved
+            ? `✅ Risking ${riskPercent}% of equity ($${riskAmount.toFixed(2)}) with ${leverage}x leverage`
+            : `⚠️ Trade BLOCKED: ${warnings.join('; ')}`,
         };
       },
     }),

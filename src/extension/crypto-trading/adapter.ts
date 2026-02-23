@@ -4,6 +4,8 @@ import type { ICryptoTradingEngine } from './interfaces';
 import type { IWallet } from './wallet/interfaces';
 import type { OrderStatusUpdate, WalletState } from './wallet/types';
 import { createCryptoWalletToolsImpl } from './wallet/adapter';
+import type { TradeManager } from './trade-manager/TradeManager';
+import { createTradePlanTools } from './trade-manager/adapter';
 
 /**
  * Create crypto trading AI tools (market interaction + wallet management)
@@ -22,10 +24,14 @@ export function createCryptoTradingTools(
   wallet: IWallet,
   getWalletState?: () => Promise<WalletState>,
   directExchangeEngine?: ICryptoTradingEngine,
+  tradeManager?: TradeManager,
 ) {
   return {
     // ==================== Wallet operations ====================
     ...createCryptoWalletToolsImpl(wallet),
+
+    // ==================== Trade Plan management (auto TP/SL) ====================
+    ...(tradeManager ? createTradePlanTools(tradeManager) : {}),
 
     // ==================== Sync ====================
 
