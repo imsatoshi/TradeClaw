@@ -438,19 +438,17 @@ Example use cases:
 
     strategyScan: tool({
       description: `
-Scan all whitelisted trading pairs for strategy signals and confluence opportunities.
+Scan all whitelisted trading pairs using the multi-factor scoring pipeline.
 
-Runs 6 strategies on 4H + 15m candlestick data from Binance:
-1. RSI Divergence + Volume Exhaustion (mean-reversion)
-2. EMA Trend Momentum (trend-following)
-3. N-Period Breakout + Volume Confirmation (breakout)
-4. Funding Rate Fade (contrarian)
-5. Bollinger Band Mean Reversion (15m mean-reversion)
-6. Structure Break / BOS (15m breakout)
+Pipeline (4H + 1H + 15m data from Binance):
+  Stage 1: 4H regime detection → determines direction (long/short/both)
+  Stage 2: 6-dimension setup scoring (0-100): trend, momentum, structure, volume, volatility, funding
+  Stage 3: 15m entry trigger → precise SL/TP levels (3-tier TP)
 
-Returns TWO tiers:
-- compositeSignals: CONFLUENCE signals where 2+ strategies agree (Grade A/B/C) — ONLY propose trades on these
-- signals: individual strategy signals for context only — NEVER trade on single signals alone
+Returns pipelineSignals sorted by score:
+- Grade A (≥70): high-confidence setup, propose trade if entry triggered
+- Grade B (55-69): moderate setup, propose with caveats if entry triggered
+- Grade C (<55): below threshold, context only
 
 Call this when user asks about market opportunities or during heartbeat.
       `.trim(),
@@ -467,16 +465,21 @@ Call this when user asks about market opportunities or during heartbeat.
           ? symbols
           : [...CRYPTO_ALLOWED_SYMBOLS];
         const result = await runStrategyScan(targetSymbols);
-        // Return confluence + actionable signals (no raw OHLCV — saves ~150K+ tokens)
-        const actionable = result.signals.filter(s => s.confidence >= 60);
+        const pipeline = result.pipelineSignals ?? [];
+        const qualified = pipeline.filter(s => s.grade !== 'C');
+        const triggered = pipeline.filter(s => s.entry?.triggered);
         return {
           scannedAt: result.scannedAt,
           symbolCount: result.symbols.length,
           timeframe: result.timeframe,
-          compositeSignals: result.compositeSignals,
-          confluenceCount: result.compositeSignals.length,
-          signals: actionable,
-          signalCount: { total: result.signals.length, actionable: actionable.length },
+          pipelineSignals: pipeline,
+          summary: {
+            total: pipeline.length,
+            qualified: qualified.length,
+            triggered: triggered.length,
+            gradeA: pipeline.filter(s => s.grade === 'A').length,
+            gradeB: pipeline.filter(s => s.grade === 'B').length,
+          },
           errors: result.errors.length > 0 ? result.errors.slice(0, 5) : [],
           sessionInfo: result.sessionInfo,
         };
