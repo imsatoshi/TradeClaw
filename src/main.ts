@@ -242,29 +242,28 @@ async function main() {
     '',
     '### AI Trading Workflow (every heartbeat):',
     '',
-    '**Step 1: Scan for opportunities (AI JUDGE — use context, not blind rules)**',
-    '- Check CONFLUENCE SIGNALS first (multi-strategy agreement = highest conviction)',
-    '- For each confluence signal, evaluate the [AI Judge Context] data:',
-    '  1. Per-strategy win rate for this SYMBOL — is it historically profitable here?',
-    '  2. Per-strategy win rate in current REGIME — does this strategy work in this regime?',
-    '  3. Recent outcomes — is this strategy on a winning or losing streak for this pair?',
-    '  4. Strategy weights — is any contributing strategy underweight or muted?',
-    '- Decision framework:',
-    '  → Grade A (3+ strategies) with POSITIVE context → propose via proposeTradeWithButtons',
-    '  → Grade A with MIXED context (some strategies underperforming) → mention and explain caution',
-    '  → Grade B with STRONG context (strategies historically profitable here) → propose',
-    '  → Grade B/C with WEAK context (low win rates, losing streaks) → skip, explain why',
+    '**Step 1: Evaluate setup scores (multi-factor pipeline)**',
+    '- Check SETUP SCORES — each symbol is scored on 6 dimensions (Trend, Momentum, Structure, Volume, Volatility, Funding)',
+    '- Decision framework based on setup score grade:',
+    '  → Grade A (score ≥ 70) with ENTRY ✓: propose via proposeTradeWithButtons',
+    '  → Grade A without entry trigger: alert user — setup is strong but waiting for 15m confirmation',
+    '  → Grade B (score 55-69) with ENTRY ✓ + strong dimensions: propose with caveats',
+    '  → Grade B without entry: monitor, briefly mention in report',
+    '  → Grade C (score < 55): skip, optionally mention why (which dimensions are weak)',
+    '- Use the DIMENSION BREAKDOWN to explain your reasoning:',
+    '  → Example: "BTC scores 74/100: strong trend (22/25) and structure (14/20) support this LONG,',
+    '     momentum building (RSI 42 recovery), entry triggered at $95200"',
+    '- Check [AI Judge Context] for historical win rates when available',
     ...(config.model.enableVision ? [
       '- Chart analysis (AI Vision):',
-      '  → For Grade A/B confluence signals you plan to propose: call analyzeChart to see price structure',
-      '  → Use the chart to identify: key S/R near entry/SL/TP, chart patterns (wedges, flags, H&S), volume confirmation',
-      '  → If chart shows adverse pattern (e.g. H&S top for a long trade), downgrade or skip with explanation',
-      '  → Do NOT call analyzeChart for every symbol — only for signals you are seriously considering',
+      '  → For Grade A/B setups with ENTRY ✓: call analyzeChart to validate price structure',
+      '  → Use the chart to identify: key S/R near entry/SL/TP, chart patterns, volume confirmation',
+      '  → If chart shows adverse pattern, downgrade or skip with explanation',
     ] : []),
-    '- ALWAYS explain your reasoning in 1-2 sentences when proposing or skipping a signal',
-    '- NEVER open new positions based on a single strategy signal alone',
-    '- Individual signals are for context/analysis only (exit decisions, adjustments)',
-    '- For qualifying confluence signals:',
+    '- ALWAYS explain your reasoning in 1-2 sentences when proposing or skipping',
+    '- For HELD positions: if the setup score for the OPPOSITE direction rises to Grade A, suggest tightening SL or closing via proposeTradeWithButtons',
+    '- The 3-tier TP system (TP1 40%, TP2 30%, TP3 trailing 30%) should be reflected in createTradePlan',
+    '- For qualifying setups with ENTRY ✓:',
     ...(config.model.enableVision
       ? ['  → analyzeChart → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']
       : ['  → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']),
@@ -564,7 +563,7 @@ async function main() {
         ].join('\n')
       }
 
-      // Build strategy signals block — two-tier: confluence (primary) + individual (context)
+      // Build strategy signals block — multi-factor pipeline scores
       let strategyBlock = ''
       if (scanResult) {
         const session = scanResult.sessionInfo
@@ -573,74 +572,72 @@ async function main() {
           `Session: ${session.sessionName} — ${session.note}`,
         ]
 
-        // Tier 1: Confluence signals (multi-strategy agreement — highest conviction)
-        const composites = scanResult.compositeSignals ?? []
+        // Pipeline setup scores (multi-factor scoring — replaces old confluence system)
+        const pipeline = scanResult.pipelineSignals ?? []
+        const qualified = pipeline.filter(s => s.grade !== 'C')
+        const triggered = pipeline.filter(s => s.entry?.triggered)
+
         parts.push(
           '',
-          '--- CONFLUENCE SIGNALS (multi-strategy agreement, highest conviction) ---',
+          '--- SETUP SCORES (multi-factor pipeline) ---',
+          `Scored ${pipeline.length} setups across ${scanResult.symbols.length} symbols: ${qualified.length} qualified (Grade A/B), ${triggered.length} with entry trigger`,
         )
-        if (composites.length > 0) {
-          parts.push(`Found ${composites.length} confluence opportunities:`)
-          for (let i = 0; i < composites.length; i++) {
-            const c = composites[i]
-            const stars = c.grade === 'A' ? '\u2605\u2605\u2605' : c.grade === 'B' ? '\u2605\u2605' : '\u2605'
+
+        if (pipeline.length > 0) {
+          // Show all scored setups (Grade A first, then B, then top C for context)
+          const toShow = [
+            ...pipeline.filter(s => s.grade === 'A'),
+            ...pipeline.filter(s => s.grade === 'B'),
+            ...pipeline.filter(s => s.grade === 'C').slice(0, 3), // top 3 C-grade for context
+          ]
+
+          for (let i = 0; i < toShow.length; i++) {
+            const ps = toShow[i]
+            const stars = ps.grade === 'A' ? '\u2605\u2605\u2605' : ps.grade === 'B' ? '\u2605\u2605' : '\u2605'
+            const entryTag = ps.entry?.triggered ? 'ENTRY \u2713' : ps.grade !== 'C' ? 'ENTRY \u2717' : ''
+
             parts.push(
-              `${i + 1}. ${stars} ${c.symbol} ${c.direction.toUpperCase()} [Grade ${c.grade}, ${c.regime}]: score ${c.compositeScore}, ${c.strategyCount} strategies agree`,
-              `   ${c.strategies.join(' + ')} | avg confidence ${c.avgConfidence}%`,
-              `   Entry $${c.bestEntry.toFixed(4)} | SL $${c.bestSL.toFixed(4)} | TP $${c.bestTP.toFixed(4)} | R:R ${c.riskRewardRatio}`,
+              `${i + 1}. ${stars} ${ps.symbol} ${ps.direction.toUpperCase()} [Grade ${ps.grade}, ${ps.regime}]: ${ps.setupScore}/100  ${entryTag}`,
             )
 
-            // AI Judge context: per-strategy historical performance for this signal
-            if (detailedStats) {
-              const contextLines: string[] = []
-              for (const strat of c.strategies) {
-                const symKey = `${strat}|${c.symbol}`
-                const regKey = `${strat}|${c.regime}`
-                const symStat = detailedStats.strategySymbol[symKey]
-                const regStat = detailedStats.strategyRegime[regKey]
-                const w = scanResult?.strategyWeights?.[strat]
+            // Dimension breakdown
+            const d = ps.dimensions
+            parts.push(
+              `   Trend: ${d.trend.score}/${d.trend.max} (${d.trend.detail})`,
+              `   Momentum: ${d.momentum.score}/${d.momentum.max} (${d.momentum.detail})`,
+              `   Structure: ${d.structure.score}/${d.structure.max} (${d.structure.detail})`,
+              `   Volume: ${d.volume.score}/${d.volume.max} (${d.volume.detail})`,
+              `   Volatility: ${d.volatility.score}/${d.volatility.max} (${d.volatility.detail})`,
+              `   Funding: ${d.funding.score}/${d.funding.max} (${d.funding.detail})`,
+            )
 
-                let line = `     ${strat}`
-                if (symStat) {
-                  line += ` on ${c.symbol}: ${symStat.winRate}% winRate (${symStat.wins + symStat.losses} trades)`
-                  if (symStat.lastOutcome) line += `, last=${symStat.lastOutcome}${symStat.lastPnl != null ? ` ${symStat.lastPnl > 0 ? '+' : ''}${symStat.lastPnl}%` : ''}`
-                }
-                if (regStat) {
-                  line += ` | in ${c.regime}: ${regStat.winRate}% winRate`
-                }
-                if (w && w.weight !== 1.0) {
-                  line += ` | weight=${w.weight}${w.muted ? ' MUTED' : ''}`
-                }
-                if (symStat || regStat) contextLines.push(line)
-              }
-              if (contextLines.length > 0) {
-                parts.push('   [AI Judge Context]')
-                parts.push(...contextLines)
+            // Entry trigger details
+            if (ps.entry?.triggered) {
+              const e = ps.entry
+              parts.push(
+                `   \u2192 Entry $${e.entry.toFixed(4)} | SL $${e.stopLoss.toFixed(4)} | TP1 $${e.takeProfits.tp1.price.toFixed(4)} (${Math.round(e.takeProfits.tp1.ratio * 100)}%) | TP2 $${e.takeProfits.tp2.price.toFixed(4)} (${Math.round(e.takeProfits.tp2.ratio * 100)}%) | TP3 trailing (${Math.round(e.takeProfits.tp3.ratio * 100)}%) | R:R ${e.riskReward}`,
+                `   Trigger: ${e.reason}`,
+              )
+            } else if (ps.grade !== 'C') {
+              parts.push(`   \u2192 Waiting for 15m entry trigger`)
+            }
+
+            // AI Judge context: historical performance for this symbol
+            if (detailedStats) {
+              const symKey = `pipeline|${ps.symbol}`
+              const regKey = `pipeline|${ps.regime}`
+              const symStat = detailedStats.strategySymbol[symKey]
+              const regStat = detailedStats.strategyRegime[regKey]
+              if (symStat || regStat) {
+                let ctx = '   [AI Judge Context]'
+                if (symStat) ctx += ` ${ps.symbol}: ${symStat.winRate}% winRate (${symStat.wins + symStat.losses} trades)${symStat.lastOutcome ? `, last=${symStat.lastOutcome}` : ''}`
+                if (regStat) ctx += ` | in ${ps.regime}: ${regStat.winRate}% winRate`
+                parts.push(ctx)
               }
             }
           }
         } else {
-          parts.push('(no confluence signals — no multi-strategy agreement found)')
-        }
-
-        // Tier 2: Individual signals (context only — do NOT trade on these alone)
-        const actionable = scanResult.signals.filter((s: any) => s.confidence >= 70)
-        parts.push(
-          '',
-          '--- INDIVIDUAL SIGNALS (single-strategy, context only — do NOT trade alone) ---',
-          `Scanned ${scanResult.symbols.length} symbols, ${actionable.length} individual signals (conf >= 70):`,
-        )
-        if (actionable.length > 0) {
-          for (let i = 0; i < actionable.length; i++) {
-            const s = actionable[i]
-            const regime = regimeResults.find((r: any) => r.symbol === s.symbol)
-            const regimeTag = regime ? ` [${regime.regime}]` : ''
-            parts.push(
-              `${i + 1}. ${s.strategy} ${s.direction.toUpperCase()} ${s.symbol}${regimeTag}: conf ${s.confidence}%, entry $${s.entry?.toFixed(4) ?? 'N/A'}, SL $${s.stopLoss?.toFixed(4) ?? 'N/A'}, TP $${s.takeProfit?.toFixed(4) ?? 'N/A'}`,
-            )
-          }
-        } else {
-          parts.push('(no individual signals above threshold)')
+          parts.push('(no setups scored — insufficient data)')
         }
 
         strategyBlock = parts.join('\n')

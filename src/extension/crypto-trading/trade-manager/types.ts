@@ -91,4 +91,16 @@ export interface TradePlan {
   maxDrawdown?: number
   /** Realized P&L from filled TPs (accumulated, persisted) */
   realizedPnl?: number
+
+  // --- Time decay ---
+
+  /** Auto-tighten SL after trade sits too long without TP1 fill */
+  timeDecay?: {
+    /** Hours before tightening (default 8) */
+    hoursToTighten: number
+    /** Percentage to tighten SL distance (default 50 — moves SL to midpoint) */
+    tightenPercent: number
+  }
+  /** Whether time-decay SL tightening has already been applied */
+  timeDecayApplied?: boolean
 }

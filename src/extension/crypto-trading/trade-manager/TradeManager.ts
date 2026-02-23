@@ -426,6 +426,45 @@ export class TradeManager {
     // Don't emit event for every trail tick — too noisy. Only log.
   }
 
+  /** Time-decay: tighten SL after trade sits too long without TP1 fill. */
+  private async applyTimeDecay(plan: TradePlan): Promise<void> {
+    if (!plan.timeDecay || plan.timeDecayApplied) return
+    if (!plan.entryPrice) return
+
+    // Check if TP1 has already filled — no decay needed
+    const tp1 = plan.takeProfits.find(tp => tp.level === 1)
+    if (tp1?.status === 'filled') return
+
+    // Check elapsed time since plan creation
+    const elapsed = Date.now() - new Date(plan.createdAt).getTime()
+    const thresholdMs = plan.timeDecay.hoursToTighten * 60 * 60 * 1000
+    if (elapsed < thresholdMs) return
+
+    // Tighten SL toward entry: move SL distance by tightenPercent
+    const isLong = plan.direction === 'long'
+    const slDist = Math.abs(plan.entryPrice - plan.stopLoss.price)
+    const tightenAmount = slDist * (plan.timeDecay.tightenPercent / 100)
+
+    const newSl = isLong
+      ? plan.stopLoss.price + tightenAmount
+      : plan.stopLoss.price - tightenAmount
+
+    // Cancel existing SL
+    if (plan.stopLoss.status === 'placed' && plan.stopLoss.orderId && this.directEngine) {
+      await this.directEngine.cancelOrder(plan.stopLoss.orderId).catch(() => {})
+    }
+
+    const oldSl = plan.stopLoss.price
+    plan.stopLoss = { price: Number(newSl.toFixed(6)), status: 'pending' }
+    plan.timeDecayApplied = true
+
+    await this.placeStopLoss(plan)
+    await this.store.save(plan)
+
+    log.info(`${plan.symbol} time-decay — SL tightened $${oldSl} → $${plan.stopLoss.price} (${plan.timeDecay.hoursToTighten}h elapsed, TP1 unfilled)`)
+    this.emitEvent(plan, 'sl_tightened', `${plan.symbol} SL auto-tightened to $${plan.stopLoss.price} — trade held ${plan.timeDecay.hoursToTighten}h without TP1 fill`)
+  }
+
   // ==================== Tick Logic ====================
 
   private async safeTick(): Promise<void> {
@@ -485,6 +524,9 @@ export class TradeManager {
         // Apply auto SL behaviors
         await this.applyAutoBreakeven(plan)
         await this.applyTrailingStop(plan, trade.current_rate)
+
+        // Apply time-decay SL tightening
+        await this.applyTimeDecay(plan)
       }
 
       await this.handleActive(plan, trade)

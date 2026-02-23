@@ -1,28 +1,31 @@
 /**
- * Strategy scan orchestrator.
+ * Strategy scan orchestrator — multi-factor pipeline.
  *
- * Enhancements over v1:
- * - OHLCV cache (25-min TTL) — avoids redundant Binance fetches across heartbeats
- * - Multi-timeframe confirmation (1H SMA20 trend) — adjusts signal confidence ±5/15
- * - Signal history logging — persists all signals to data/signals/signal-log.json
+ * Architecture:
+ *   Stage 1: Direction (4H regime) → determines which directions to evaluate
+ *   Stage 2: Setup scoring (15m/1H) → multi-factor 0-100 composite score
+ *   Stage 3: Entry trigger (15m) → precise entry with ATR-based SL/TP
+ *   Stage 4: Exit management → handled by TradeManager (not in scanner)
+ *
+ * Retained from v1:
+ * - OHLCV cache (25-min TTL)
+ * - Signal history logging
+ * - Strategy weights (for AI context)
+ * - Session info
  */
 
-import type { ScanResult, StrategySignal, FundingRateInfo } from './types.js'
+import type { ScanResult, StrategySignal, FundingRateInfo, PipelineSignal } from './types.js'
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import { fetchExchangeOHLCV } from '../../../archive-analysis/data/ExchangeClient.js'
 import { fetchFundingRates } from '../../../archive-analysis/data/FundingRateClient.js'
-import { scanRsiDivergence } from './strategies/rsi-divergence.js'
-import { scanEmaTrend } from './strategies/ema-trend.js'
-import { scanBreakoutVolume } from './strategies/breakout-volume.js'
-import { scanFundingFade } from './strategies/funding-fade.js'
-import { scanBBMeanRevert } from './strategies/bb-mean-revert.js'
-import { scanStructureBreak } from './strategies/structure-break.js'
 import { appendSignalLog, computeStrategyWeights } from './signal-log.js'
 import type { StrategyWeight } from './signal-log.js'
 import { getStrategyParams } from './config.js'
-import { detectMarketRegime, applyRegimeFilter } from './regime.js'
+import { detectMarketRegime } from './regime.js'
 import type { MarketRegime } from './regime.js'
-import { computeConfluence } from './confluence.js'
+import { scoreSetup } from './setup-scorer.js'
+import { checkEntryTrigger } from './entry-trigger.js'
+import { atrSeries } from './helpers.js'
 import { createLogger } from '../../../../core/logger.js'
 
 const log = createLogger('scanner')
@@ -67,66 +70,6 @@ async function fetchWithCache(
   return data
 }
 
-// ==================== Multi-timeframe Trend Filter ====================
-
-type Trend1H = 'bullish' | 'bearish' | 'neutral'
-
-/**
- * Determine 1H trend direction using SMA20.
- * - last close > SMA20 * 1.005 → bullish
- * - last close < SMA20 * 0.995 → bearish
- * - otherwise → neutral
- */
-function get1HTrend(bars1h: MarketData[]): Trend1H {
-  if (bars1h.length < 20) return 'neutral'
-  const closes = bars1h.map((b) => b.close)
-  const last = closes[closes.length - 1]
-  const sma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20
-  if (last > sma20 * 1.005) return 'bullish'
-  if (last < sma20 * 0.995) return 'bearish'
-  return 'neutral'
-}
-
-/**
- * Apply 1H trend to 4H signals:
- * - Aligned:    confidence +boost (max 100), details note added
- * - Conflicting: confidence +penalty, may downgrade strength to 'weak'
- * - Neutral:    no change
- */
-function applyMtfFilter(
-  signals: StrategySignal[],
-  trend1H: Trend1H,
-  scannerParams: Record<string, number>,
-): StrategySignal[] {
-  if (trend1H === 'neutral') return signals
-
-  const boost = scannerParams.mtfAlignedBoost ?? 5
-  const penalty = scannerParams.mtfConflictPenalty ?? -8
-  const weakThreshold = scannerParams.weakThreshold ?? 55
-
-  return signals.map((signal) => {
-    const aligned =
-      (signal.direction === 'long' && trend1H === 'bullish') ||
-      (signal.direction === 'short' && trend1H === 'bearish')
-
-    if (aligned) {
-      return {
-        ...signal,
-        confidence: Math.min(100, signal.confidence + boost),
-        details: { ...signal.details, mtf_1h: `aligned (${trend1H}) +${boost}` },
-      }
-    } else {
-      const newConf = Math.max(0, signal.confidence + penalty)
-      return {
-        ...signal,
-        confidence: newConf,
-        strength: newConf < weakThreshold ? 'weak' : signal.strength,
-        details: { ...signal.details, mtf_1h: `conflicts (${trend1H}) ${penalty}` },
-      }
-    }
-  })
-}
-
 // ==================== Session Info ====================
 
 type SessionName = 'asian' | 'london' | 'ny_overlap' | 'ny' | 'late'
@@ -142,25 +85,30 @@ function getSessionInfo(): SessionInfo {
   const hourUTC = new Date().getUTCHours()
 
   if (hourUTC >= 0 && hourUTC < 8) {
-    return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'asian', note: 'Asian session: low volume. Funding fade signals most relevant.' }
+    return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'asian', note: 'Asian session: low volume. Funding-driven setups most relevant.' }
   } else if (hourUTC >= 8 && hourUTC < 12) {
-    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'london', note: 'London open: good for breakout and trend signals.' }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'london', note: 'London open: good for breakout and trend setups.' }
   } else if (hourUTC >= 12 && hourUTC < 16) {
-    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny_overlap', note: 'NY/London overlap: best liquidity, all strategies valid.' }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny_overlap', note: 'NY/London overlap: best liquidity, all setups valid.' }
   } else if (hourUTC >= 16 && hourUTC < 21) {
-    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny', note: 'NY session: RSI divergence primary, trend continuation.' }
+    return { currentHourUTC: hourUTC, isOptimalSession: true, sessionName: 'ny', note: 'NY session: momentum and structure setups primary.' }
   } else {
-    return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'late', note: 'Late/early session: only act on strong signals (confidence >= 80).' }
+    return { currentHourUTC: hourUTC, isOptimalSession: false, sessionName: 'late', note: 'Late/early session: only act on Grade A setups (score >= 70).' }
   }
 }
 
 // ==================== Main Orchestrator ====================
 
 /**
- * Run all three strategies across all symbols in one call.
+ * Run multi-factor pipeline across all symbols.
+ *
+ * Pipeline:
+ *   1. Detect 4H regime → determines direction(s) to evaluate
+ *   2. Score each (symbol, direction) on 6 dimensions → 0-100 composite
+ *   3. If score qualifies, check 15m entry trigger → precise SL/TP
  *
  * @param symbols - Trading pairs to scan, e.g. ["BTC/USDT", "ETH/USDT"]
- * @param fundingRates - Optional pre-fetched funding rates (fetched automatically if omitted)
+ * @param fundingRates - Optional pre-fetched funding rates
  */
 export async function runStrategyScan(
   symbols: string[],
@@ -168,7 +116,6 @@ export async function runStrategyScan(
 ): Promise<ScanResult> {
   const scannedAt = new Date().toISOString()
   const errors: string[] = []
-  const allSignals: StrategySignal[] = []
 
   // Load scanner config (cached, re-reads from disk at most once per minute)
   const config = await getStrategyParams()
@@ -178,144 +125,150 @@ export async function runStrategyScan(
   const cacheTtlMinutes = scannerParams.cacheTtlMinutes ?? 25
   CACHE_TTL_MS = cacheTtlMinutes * 60 * 1000
 
-  log.info('scan started', { symbols: symbols.length })
+  log.info('pipeline scan started', { symbols: symbols.length })
 
-  // Fetch timeframes sequentially to avoid Binance rate-limit bursts.
-  // Each fetchWithCache already batches symbols internally (5 concurrent + 500ms delay).
-  // Running all 3 timeframes in parallel triples the burst — sequential is safer.
+  // Fetch timeframes sequentially to avoid Binance rate-limit bursts
   const ohlcv4h = await fetchWithCache(symbols, TIMEFRAME_4H, CANDLE_LIMIT_4H).catch((err) => {
     errors.push(`4H OHLCV fetch failed: ${String(err)}`)
     return {} as Record<string, MarketData[]>
   })
   const ohlcv1h = await fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
-    log.warn('1H OHLCV fetch failed — MTF filter disabled', { error: String(err) })
+    log.warn('1H OHLCV fetch failed — trend dimension degraded', { error: String(err) })
     return {} as Record<string, MarketData[]>
   })
   const ohlcv15m = await fetchWithCache(symbols, TIMEFRAME_15M, CANDLE_LIMIT_15M).catch((err) => {
-    log.warn('15m OHLCV fetch failed — SL/TP will fall back to 4H ATR', { error: String(err) })
+    log.warn('15m OHLCV fetch failed — scoring disabled', { error: String(err) })
     return {} as Record<string, MarketData[]>
   })
   const rates = fundingRates !== undefined
     ? fundingRates
     : await fetchFundingRates(symbols).catch(() => ({} as Record<string, FundingRateInfo>))
 
-  // Regime map for confluence scoring
+  // Stage 1: Detect 4H regime for all symbols
   const regimeMap: Record<string, MarketRegime> = {}
+  const regimeResults = detectMarketRegime(symbols, ohlcv4h)
+  for (const r of regimeResults) {
+    regimeMap[r.symbol] = r
+  }
 
-  // Run strategies per symbol
+  // Pipeline scoring thresholds
+  const THRESHOLD_TREND = scannerParams.pipelineThresholdTrend ?? 55
+  const THRESHOLD_RANGE = scannerParams.pipelineThresholdRange ?? 65
+
+  // Stage 2 + 3: Score setups and check entry triggers
+  const pipelineSignals: PipelineSignal[] = []
+
   for (const symbol of symbols) {
-    const bars4h = ohlcv4h[symbol]
-    if (!bars4h || bars4h.length < 30) {
-      errors.push(`${symbol}: insufficient 4H data (${bars4h?.length ?? 0} bars)`)
+    const regime = regimeMap[symbol]
+    if (!regime) {
+      errors.push(`${symbol}: no regime data`)
       continue
     }
 
     const bars15m = ohlcv15m[symbol]
-    const symbolSignals: StrategySignal[] = []
-
-    try {
-      symbolSignals.push(...await scanRsiDivergence(symbol, bars4h, bars15m))
-    } catch (err) {
-      errors.push(`${symbol} RSI divergence error: ${String(err)}`)
+    if (!bars15m || bars15m.length < 40) {
+      errors.push(`${symbol}: insufficient 15m data (${bars15m?.length ?? 0} bars)`)
+      continue
     }
 
-    try {
-      symbolSignals.push(...await scanEmaTrend(symbol, bars4h, bars15m))
-    } catch (err) {
-      errors.push(`${symbol} EMA trend error: ${String(err)}`)
-    }
-
-    try {
-      symbolSignals.push(...await scanBreakoutVolume(symbol, bars4h, bars15m))
-    } catch (err) {
-      errors.push(`${symbol} breakout volume error: ${String(err)}`)
-    }
-
+    const bars1h = ohlcv1h[symbol] ?? []
     const funding = rates[symbol]
-    if (funding) {
+
+    // Determine directions based on regime
+    const directions: ('long' | 'short')[] =
+      regime.regime === 'uptrend' ? ['long']
+        : regime.regime === 'downtrend' ? ['short']
+        : ['long', 'short']
+
+    // Compute ATR once for entry trigger
+    const highs = bars15m.map(b => b.high)
+    const lows = bars15m.map(b => b.low)
+    const closes = bars15m.map(b => b.close)
+    const atrArr = atrSeries(highs, lows, closes, 14)
+    const atr = atrArr.length > 0 ? atrArr[atrArr.length - 1] : 0
+
+    for (const direction of directions) {
       try {
-        symbolSignals.push(...await scanFundingFade(symbol, bars4h, funding, bars15m))
-      } catch (err) {
-        errors.push(`${symbol} funding fade error: ${String(err)}`)
-      }
-    }
+        const score = await scoreSetup(symbol, direction, regime, bars15m, bars1h, funding)
+        const threshold = regime.regime === 'ranging' ? THRESHOLD_RANGE : THRESHOLD_TREND
 
-    // 15m-native strategies
-    try {
-      symbolSignals.push(...await scanBBMeanRevert(symbol, bars4h, bars15m))
-    } catch (err) {
-      errors.push(`${symbol} BB mean revert error: ${String(err)}`)
-    }
-
-    try {
-      symbolSignals.push(...await scanStructureBreak(symbol, bars4h, bars15m))
-    } catch (err) {
-      errors.push(`${symbol} structure break error: ${String(err)}`)
-    }
-
-    // Apply regime filter — drop signals incompatible with current regime
-    if (symbolSignals.length > 0) {
-      const bars4hForRegime = ohlcv4h[symbol]
-      if (bars4hForRegime && bars4hForRegime.length >= 55) {
-        const regimes = detectMarketRegime([symbol], { [symbol]: bars4hForRegime })
-        if (regimes[0]) {
-          regimeMap[symbol] = regimes[0]
-          const beforeCount = symbolSignals.length
-          const regimeFiltered = applyRegimeFilter(symbolSignals, regimes[0])
-          symbolSignals.length = 0
-          symbolSignals.push(...regimeFiltered)
-          if (symbolSignals.length < beforeCount) {
-            log.info('regime filter', { symbol, regime: regimes[0].regime, before: beforeCount, after: symbolSignals.length })
-          }
+        // Stage 3: Check entry trigger if score qualifies
+        if (score.totalScore >= threshold && atr > 0) {
+          score.entry = checkEntryTrigger(direction, bars15m, atr)
         }
-      }
-    }
 
-    // Apply 1H MTF filter to this symbol's signals
-    if (symbolSignals.length > 0) {
-      const bars1h = ohlcv1h[symbol]
-      if (bars1h && bars1h.length >= 20) {
-        const trend1H = get1HTrend(bars1h)
-        allSignals.push(...applyMtfFilter(symbolSignals, trend1H, scannerParams))
-      } else {
-        allSignals.push(...symbolSignals)
+        const grade = score.totalScore >= 70 ? 'A' as const
+          : score.totalScore >= threshold ? 'B' as const
+          : 'C' as const
+
+        pipelineSignals.push({
+          symbol,
+          direction,
+          setupScore: score.totalScore,
+          regime: regime.regime,
+          dimensions: score.dimensions,
+          entry: score.entry,
+          grade,
+        })
+      } catch (err) {
+        errors.push(`${symbol} ${direction} scoring error: ${String(err)}`)
       }
     }
   }
 
-  // Sort by confidence descending
-  allSignals.sort((a, b) => b.confidence - a.confidence)
+  // Sort by setup score descending
+  pipelineSignals.sort((a, b) => b.setupScore - a.setupScore)
 
-  // Compute dynamic strategy weights from historical win rates
+  // Compute strategy weights (still useful for AI context / historical performance)
   const weights = await computeStrategyWeights().catch(() => ({} as Record<string, StrategyWeight>))
 
-  const mutedStrategies = Object.values(weights).filter(w => w.muted).map(w => w.strategy)
-  if (mutedStrategies.length > 0) {
-    log.info('muted strategies', { muted: mutedStrategies })
-  }
+  const qualified = pipelineSignals.filter(s => s.grade !== 'C')
+  const triggered = pipelineSignals.filter(s => s.entry?.triggered)
 
-  // Compute confluence — multi-strategy agreement (with dynamic weights)
-  const compositeSignals = computeConfluence(allSignals, regimeMap, weights)
-
-  log.info('scan complete', {
-    signals: allSignals.length,
-    confluence: compositeSignals.length,
-    actionable: allSignals.filter((s) => s.confidence >= 70).length,
+  log.info('pipeline scan complete', {
+    scored: pipelineSignals.length,
+    qualified: qualified.length,
+    triggered: triggered.length,
     errors: errors.length,
   })
 
-  // Persist all signals for history tracking (fire-and-forget)
-  appendSignalLog(allSignals).catch(() => { /* already logged inside */ })
+  // Persist triggered signals to signal-log for outcome tracking
+  // Convert pipeline signals with entry triggers to StrategySignal format for logging
+  const loggableSignals: StrategySignal[] = triggered.map(ps => ({
+    strategy: 'pipeline',
+    symbol: ps.symbol,
+    direction: ps.direction,
+    strength: ps.grade === 'A' ? 'strong' as const : 'moderate' as const,
+    confidence: ps.setupScore,
+    timeframe: '15m',
+    entry: ps.entry!.entry,
+    stopLoss: ps.entry!.stopLoss,
+    takeProfit: ps.entry!.takeProfits.tp1.price,
+    riskRewardRatio: ps.entry!.riskReward,
+    details: {
+      grade: ps.grade,
+      regime: ps.regime,
+      trend: ps.dimensions.trend.score,
+      momentum: ps.dimensions.momentum.score,
+      structure: ps.dimensions.structure.score,
+      volume: ps.dimensions.volume.score,
+      volatility: ps.dimensions.volatility.score,
+      funding: ps.dimensions.funding.score,
+    },
+    reason: `Pipeline ${ps.direction.toUpperCase()}: score ${ps.setupScore}/100 [${ps.grade}] — ${ps.entry!.reason}`,
+  }))
+  appendSignalLog(loggableSignals).catch(() => { /* already logged inside */ })
 
   return {
     scannedAt,
     symbols,
     timeframe: '4h+15m',
-    signals: allSignals,
-    compositeSignals,
+    signals: loggableSignals,       // backward compat: triggered signals as StrategySignal
+    compositeSignals: [],           // backward compat: empty (replaced by pipelineSignals)
     errors,
     sessionInfo: getSessionInfo(),
     ohlcv4h,
     strategyWeights: weights,
+    pipelineSignals,
   }
 }

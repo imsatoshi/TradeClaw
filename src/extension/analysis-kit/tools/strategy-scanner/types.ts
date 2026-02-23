@@ -3,6 +3,7 @@ export type SignalStrength = 'strong' | 'moderate' | 'weak'
 export type StrategyName =
   | 'rsi_divergence' | 'ema_trend' | 'breakout_volume' | 'funding_fade'
   | 'bb_mean_revert' | 'structure_break'
+  | 'pipeline'
 
 /** Primary decision timeframe for each strategy. */
 export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '15m'> = {
@@ -12,6 +13,7 @@ export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '15m'> = {
   funding_fade: '4h',
   bb_mean_revert: '15m',
   structure_break: '15m',
+  pipeline: '15m',
 }
 
 export interface StrategySignal {
@@ -63,6 +65,8 @@ export interface ScanResult {
   ohlcv4h?: Record<string, import('../../../archive-analysis/data/interfaces.js').MarketData[]>
   /** Dynamic strategy weights based on rolling win rates. */
   strategyWeights?: Record<string, import('./signal-log.js').StrategyWeight>
+  /** Multi-factor pipeline signals — primary scoring output. */
+  pipelineSignals?: PipelineSignal[]
 }
 
 export interface FundingRateInfo {
@@ -80,4 +84,56 @@ export interface SwingPoint {
   price: number
   rsi: number
   volume: number
+}
+
+// ==================== Multi-Factor Pipeline Types ====================
+
+/** Per-dimension score with detail explanation. */
+export interface DimensionScore {
+  score: number
+  max: number
+  detail: string
+}
+
+/** Multi-factor setup score — replaces independent strategy confluence. */
+export interface SetupScore {
+  symbol: string
+  direction: SignalDirection
+  totalScore: number           // 0-100
+  regime: 'uptrend' | 'downtrend' | 'ranging'
+  dimensions: {
+    trend:      DimensionScore  // max 25
+    momentum:   DimensionScore  // max 20
+    structure:  DimensionScore  // max 20
+    volume:     DimensionScore  // max 15
+    volatility: DimensionScore  // max 10
+    funding:    DimensionScore  // max 10
+  }
+  /** Entry trigger result (null if score below threshold) */
+  entry: EntryTrigger | null
+}
+
+/** 15m entry trigger with precise SL/TP levels. */
+export interface EntryTrigger {
+  triggered: boolean
+  entry: number               // suggested entry price
+  stopLoss: number            // ATR-based SL
+  takeProfits: {
+    tp1: { price: number; ratio: number }  // 1.5×ATR, 40%
+    tp2: { price: number; ratio: number }  // 3.0×ATR, 30%
+    tp3: { price: number; ratio: number }  // trailing, 30%
+  }
+  riskReward: number
+  reason: string
+}
+
+/** Pipeline signal — the primary output of the new scoring system. */
+export interface PipelineSignal {
+  symbol: string
+  direction: SignalDirection
+  setupScore: number          // 0-100
+  regime: string
+  dimensions: SetupScore['dimensions']
+  entry: EntryTrigger | null  // null if score < threshold or no trigger
+  grade: 'A' | 'B' | 'C'     // A: ≥70, B: 55-69, C: <55
 }
