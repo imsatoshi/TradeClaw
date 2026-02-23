@@ -696,8 +696,12 @@ export interface SymbolOptResult {
   applied: boolean
   /** WFO Efficiency Ratio — only present when useWfo=true */
   wfoER?: number
+  /** Monte Carlo p50 expectancy — only present when useWfo=true */
+  mcP50?: number
   /** Whether WFO gates passed — only present when useWfo=true */
   gatesPassed?: boolean
+  /** Which gates passed/failed */
+  gates?: { wfoERPassed: boolean; mcP50Passed: boolean }
 }
 
 export interface BatchOptimizeResult {
@@ -751,7 +755,9 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
               totalSignals: wfoResult.totalSignals,
               applied: false,
               wfoER: wfoResult.wfoEfficiencyRatio,
+              mcP50: wfoResult.monteCarlo.p50Expectancy,
               gatesPassed: false,
+              gates: { wfoERPassed: wfoResult.gates.wfoERPassed, mcP50Passed: wfoResult.gates.monteCarloP50Passed },
             }
             return
           }
@@ -760,7 +766,9 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
             totalSignals: wfoResult.totalSignals,
             applied: wfoResult.applied,
             wfoER: wfoResult.wfoEfficiencyRatio,
+            mcP50: wfoResult.monteCarlo.p50Expectancy,
             gatesPassed: true,
+            gates: { wfoERPassed: true, mcP50Passed: true },
           }
         } else {
           // Legacy: plain grid search (no anti-overfitting)
@@ -832,7 +840,11 @@ export async function batchOptimize(config: BatchOptimizeConfig): Promise<BatchO
     const failed = Object.entries(results).filter(([, r]) => r.gatesPassed === false)
     lines.push(`\n⚠️ Gates failed (${gatesFailedCount} symbols — params NOT applied):`)
     for (const [sym, r] of failed.slice(0, 10)) {
-      lines.push(`  ${sym}: WFO ER=${r.wfoER ?? '?'} — overfitting detected, previous params kept`)
+      const reasons: string[] = []
+      if (r.gates && !r.gates.wfoERPassed) reasons.push(`ER=${r.wfoER ?? '?'} < 0.5 (overfitting)`)
+      if (r.gates && !r.gates.mcP50Passed) reasons.push(`MC p50=${r.mcP50 ?? '?'}% ≤ 0 (no edge)`)
+      if (reasons.length === 0) reasons.push('unknown')
+      lines.push(`  ${sym}: ${reasons.join(', ')} [${r.totalSignals} signals]`)
     }
   }
 
