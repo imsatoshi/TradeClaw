@@ -8,6 +8,7 @@
 
 import type { StrategySignal, CompositeSignal, StrategyName } from './types.js'
 import type { MarketRegime } from './regime.js'
+import type { StrategyWeight } from './signal-log.js'
 
 /** Strategy category for regime alignment bonus. */
 const TREND_FOLLOWING: StrategyName[] = ['ema_trend', 'breakout_volume', 'structure_break']
@@ -29,10 +30,16 @@ const REGIME_ALIGNMENT_BONUS = 15
 export function computeConfluence(
   signals: StrategySignal[],
   regimeMap: Record<string, MarketRegime>,
+  weights?: Record<string, StrategyWeight>,
 ): CompositeSignal[] {
+  // Pre-filter: drop signals from muted strategies
+  const activeSignals = weights
+    ? signals.filter(s => !weights[s.strategy]?.muted)
+    : signals
+
   // Group signals by (symbol, direction)
   const groups = new Map<string, StrategySignal[]>()
-  for (const signal of signals) {
+  for (const signal of activeSignals) {
     const key = `${signal.symbol}|${signal.direction}`
     const group = groups.get(key)
     if (group) {
@@ -62,10 +69,24 @@ export function computeConfluence(
     const symbol = uniqueSignals[0].symbol
     const direction = uniqueSignals[0].direction
     const strategies = uniqueSignals.map(s => s.strategy)
-    const confidences = uniqueSignals.map(s => s.confidence)
-    const avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length
 
-    // Weighted composite score — equal weight for now, base = average confidence
+    // Weighted average confidence (using strategy weights if available)
+    let avgConfidence: number
+    if (weights) {
+      let weightedSum = 0
+      let weightSum = 0
+      for (const sig of uniqueSignals) {
+        const w = weights[sig.strategy]?.weight ?? 1.0
+        weightedSum += sig.confidence * w
+        weightSum += w
+      }
+      avgConfidence = weightSum > 0 ? weightedSum / weightSum : 0
+    } else {
+      const confidences = uniqueSignals.map(s => s.confidence)
+      avgConfidence = confidences.reduce((a, b) => a + b, 0) / confidences.length
+    }
+
+    // Weighted composite score — base = weighted average confidence
     let compositeScore = avgConfidence
 
     // Regime alignment bonus

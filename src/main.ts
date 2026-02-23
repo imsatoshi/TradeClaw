@@ -11,7 +11,9 @@ import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
 import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime, batchOptimize } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
-import { computeSignalStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
+import { computeSignalStats, computeDetailedStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
+import type { DetailedSignalStats, StrategyWeight } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
+import { loadTradeMemory } from './extension/brain/TradeMemory.js'
 import type { ICryptoTradingEngine, Operation, WalletExportState } from './extension/crypto-trading/index.js'
 import {
   Wallet,
@@ -240,15 +242,32 @@ async function main() {
     '',
     '### AI Trading Workflow (every heartbeat):',
     '',
-    '**Step 1: Scan for opportunities (CONFLUENCE-FIRST)**',
-    '- Check CONFLUENCE SIGNALS first (multi-strategy agreement = highest conviction):',
-    '  → Grade A (3+ strategies agree): propose trade via proposeTradeWithButtons',
-    '  → Grade B (2 strategies, avg conf >= 70): propose if regime strongly aligned',
-    '  → Grade C or single-strategy: DO NOT propose, mention in summary only',
+    '**Step 1: Scan for opportunities (AI JUDGE — use context, not blind rules)**',
+    '- Check CONFLUENCE SIGNALS first (multi-strategy agreement = highest conviction)',
+    '- For each confluence signal, evaluate the [AI Judge Context] data:',
+    '  1. Per-strategy win rate for this SYMBOL — is it historically profitable here?',
+    '  2. Per-strategy win rate in current REGIME — does this strategy work in this regime?',
+    '  3. Recent outcomes — is this strategy on a winning or losing streak for this pair?',
+    '  4. Strategy weights — is any contributing strategy underweight or muted?',
+    '- Decision framework:',
+    '  → Grade A (3+ strategies) with POSITIVE context → propose via proposeTradeWithButtons',
+    '  → Grade A with MIXED context (some strategies underperforming) → mention and explain caution',
+    '  → Grade B with STRONG context (strategies historically profitable here) → propose',
+    '  → Grade B/C with WEAK context (low win rates, losing streaks) → skip, explain why',
+    ...(config.model.enableVision ? [
+      '- Chart analysis (AI Vision):',
+      '  → For Grade A/B confluence signals you plan to propose: call analyzeChart to see price structure',
+      '  → Use the chart to identify: key S/R near entry/SL/TP, chart patterns (wedges, flags, H&S), volume confirmation',
+      '  → If chart shows adverse pattern (e.g. H&S top for a long trade), downgrade or skip with explanation',
+      '  → Do NOT call analyzeChart for every symbol — only for signals you are seriously considering',
+    ] : []),
+    '- ALWAYS explain your reasoning in 1-2 sentences when proposing or skipping a signal',
     '- NEVER open new positions based on a single strategy signal alone',
     '- Individual signals are for context/analysis only (exit decisions, adjustments)',
     '- For qualifying confluence signals:',
-    '  → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan',
+    ...(config.model.enableVision
+      ? ['  → analyzeChart → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']
+      : ['  → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']),
     '',
     '**Step 2: Review active TradePlans** (from heartbeat "Active Trade Plans" section)',
     '- Check live P&L data: unrealized P&L, realized P&L, risk:reward ratio, max drawdown',
@@ -267,6 +286,14 @@ async function main() {
     '',
     '**Step 3: Housekeeping**',
     '- syncSignalOutcomes — update signal win-rate stats',
+    '',
+    '**Step 4: Learn from outcomes**',
+    '- After syncSignalOutcomes, review any newly resolved signals',
+    '- For each resolved signal: call tradeMemoryUpdate with a 1-sentence lesson',
+    '- Lessons should be SPECIFIC and ACTIONABLE (not generic platitudes)',
+    '  → Good: "SOL breakout_volume in Asian session lost 3 times — avoid low-volume hours"',
+    '  → Bad: "Need better entry timing"',
+    '- Check tradeMemoryQuery before proposing trades for relevant historical patterns',
     '',
     '### Position Management Philosophy:',
     '- You are a CALM strategist, not a panicked trader',
@@ -477,7 +504,7 @@ async function main() {
         ? (cryptoEngine as any).getHeartbeatData().catch(() => null)
         : Promise.resolve(null)
 
-      const [positions, account, scanResult, signalStats, ftData] = await Promise.all([
+      const [positions, account, scanResult, signalStats, ftData, detailedStats, tradeMemory] = await Promise.all([
         (tools.cryptoGetPositions as any).execute({}),
         (tools.cryptoGetAccount as any).execute({}),
         runStrategyScan([...CRYPTO_ALLOWED_SYMBOLS]).catch((err: unknown) => {
@@ -486,6 +513,8 @@ async function main() {
         }),
         computeSignalStats().catch(() => null),
         ftDataPromise,
+        computeDetailedStats().catch(() => null),
+        loadTradeMemory().catch(() => null),
       ])
 
       // Reuse scanner's 4H data for regime detection (no extra Binance fetch)
@@ -553,6 +582,35 @@ async function main() {
               `   ${c.strategies.join(' + ')} | avg confidence ${c.avgConfidence}%`,
               `   Entry $${c.bestEntry.toFixed(4)} | SL $${c.bestSL.toFixed(4)} | TP $${c.bestTP.toFixed(4)} | R:R ${c.riskRewardRatio}`,
             )
+
+            // AI Judge context: per-strategy historical performance for this signal
+            if (detailedStats) {
+              const contextLines: string[] = []
+              for (const strat of c.strategies) {
+                const symKey = `${strat}|${c.symbol}`
+                const regKey = `${strat}|${c.regime}`
+                const symStat = detailedStats.strategySymbol[symKey]
+                const regStat = detailedStats.strategyRegime[regKey]
+                const w = scanResult?.strategyWeights?.[strat]
+
+                let line = `     ${strat}`
+                if (symStat) {
+                  line += ` on ${c.symbol}: ${symStat.winRate}% winRate (${symStat.wins + symStat.losses} trades)`
+                  if (symStat.lastOutcome) line += `, last=${symStat.lastOutcome}${symStat.lastPnl != null ? ` ${symStat.lastPnl > 0 ? '+' : ''}${symStat.lastPnl}%` : ''}`
+                }
+                if (regStat) {
+                  line += ` | in ${c.regime}: ${regStat.winRate}% winRate`
+                }
+                if (w && w.weight !== 1.0) {
+                  line += ` | weight=${w.weight}${w.muted ? ' MUTED' : ''}`
+                }
+                if (symStat || regStat) contextLines.push(line)
+              }
+              if (contextLines.length > 0) {
+                parts.push('   [AI Judge Context]')
+                parts.push(...contextLines)
+              }
+            }
           }
         } else {
           parts.push('(no confluence signals — no multi-strategy agreement found)')
@@ -592,6 +650,43 @@ async function main() {
           '--- SIGNAL STATS (historical performance) ---',
           ...lines,
         ].join('\n')
+      }
+
+      // Build strategy weights block (dynamic, auto-adjusted by win rate)
+      let weightsBlock = ''
+      const weights = scanResult?.strategyWeights
+      if (weights && Object.keys(weights).length > 0) {
+        const wLines = Object.values(weights).map((w: StrategyWeight) => {
+          if (w.muted) return `${w.strategy}: MUTED (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← AUTO-DISABLED`
+          if (w.weight < 0.8) return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← UNDERWEIGHT`
+          if (w.weight > 1.1) return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← BOOSTED`
+          return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades)`
+        })
+        weightsBlock = [
+          '',
+          '--- STRATEGY WEIGHTS (auto-adjusted by win rate) ---',
+          ...wLines,
+        ].join('\n')
+      }
+
+      // Build trade memory block (structured lessons from past trades)
+      let memoryBlock = ''
+      if (tradeMemory && (tradeMemory.patterns.length > 0 || tradeMemory.recentLessons.length > 0)) {
+        const mLines: string[] = []
+        // Show top patterns (most samples first, max 5)
+        const topPatterns = [...tradeMemory.patterns]
+          .sort((a, b) => b.samples - a.samples)
+          .slice(0, 5)
+        for (const p of topPatterns) {
+          mLines.push(`- ${p.id}: ${p.winRate}% winRate (${p.samples} trades, avgPnl ${p.avgPnl > 0 ? '+' : ''}${p.avgPnl}%) — "${p.lesson}"`)
+        }
+        if (tradeMemory.recentLessons.length > 0) {
+          mLines.push('Recent lessons:')
+          for (const l of tradeMemory.recentLessons.slice(0, 5)) {
+            mLines.push(`  - ${l}`)
+          }
+        }
+        memoryBlock = ['', '--- TRADE MEMORY (learned patterns) ---', ...mLines].join('\n')
       }
 
       // Build Freqtrade bot status + entry/exit stats block
@@ -712,6 +807,8 @@ async function main() {
         regimeBlock,
         strategyBlock,
         statsBlock,
+        weightsBlock,
+        memoryBlock,
         '',
         '--- END LIVE DATA ---',
       ].join('\n')

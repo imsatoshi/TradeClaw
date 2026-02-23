@@ -190,3 +190,151 @@ export async function computeSignalStats(): Promise<Record<string, {
     }])
   )
 }
+
+// ==================== Dynamic Strategy Weights ====================
+
+export interface StrategyWeight {
+  strategy: string
+  winRate: number        // 0-1
+  sampleSize: number     // resolved trades (wins + losses)
+  weight: number         // 0.0 - 1.5 (0 if muted)
+  muted: boolean         // true if winRate < 35% and sampleSize >= 8
+}
+
+/**
+ * Compute dynamic weights per strategy based on rolling win rates.
+ *
+ * Weight formula:
+ *   sampleSize < 5        → 1.0 (insufficient data, neutral)
+ *   winRate >= 60%         → 1.0 + (winRate - 0.6) * 2 (max 1.5)
+ *   winRate 40-60%         → 1.0 (neutral)
+ *   winRate < 40%          → 0.3 + winRate (min 0.3)
+ *   winRate < 35% && n>=8  → muted (weight = 0)
+ */
+export async function computeStrategyWeights(): Promise<Record<string, StrategyWeight>> {
+  const entries = await loadLog()
+  const buckets: Record<string, { wins: number; losses: number }> = {}
+
+  for (const entry of entries) {
+    if (!entry.outcome || (entry.outcome !== 'win' && entry.outcome !== 'loss')) continue
+    const key = entry.signal.strategy
+    if (!buckets[key]) buckets[key] = { wins: 0, losses: 0 }
+    if (entry.outcome === 'win') buckets[key].wins++
+    else buckets[key].losses++
+  }
+
+  const result: Record<string, StrategyWeight> = {}
+
+  for (const [strategy, b] of Object.entries(buckets)) {
+    const sampleSize = b.wins + b.losses
+    const winRate = sampleSize > 0 ? b.wins / sampleSize : 0.5
+
+    let weight: number
+    let muted = false
+
+    if (sampleSize < 5) {
+      weight = 1.0
+    } else if (winRate >= 0.6) {
+      weight = Math.min(1.5, 1.0 + (winRate - 0.6) * 2)
+    } else if (winRate >= 0.4) {
+      weight = 1.0
+    } else if (winRate < 0.35 && sampleSize >= 8) {
+      weight = 0
+      muted = true
+    } else {
+      weight = Math.max(0.3, 0.3 + winRate)
+    }
+
+    result[strategy] = {
+      strategy,
+      winRate: Math.round(winRate * 100) / 100,
+      sampleSize,
+      weight: Math.round(weight * 100) / 100,
+      muted,
+    }
+  }
+
+  return result
+}
+
+// ==================== Detailed Stats (for AI Judge) ====================
+
+export interface DetailedSignalStats {
+  /** Per strategy+symbol: "rsi_divergence|BTC/USDT" */
+  strategySymbol: Record<string, {
+    wins: number
+    losses: number
+    winRate: number
+    avgPnl: number
+    lastOutcome?: 'win' | 'loss'
+    lastPnl?: number
+  }>
+  /** Per strategy+regime: "rsi_divergence|ranging" */
+  strategyRegime: Record<string, {
+    wins: number
+    losses: number
+    winRate: number
+  }>
+}
+
+/**
+ * Compute granular win-rate stats broken down by strategy+symbol and strategy+regime.
+ * Used by AI Judge to evaluate each signal with full historical context.
+ */
+export async function computeDetailedStats(): Promise<DetailedSignalStats> {
+  const entries = await loadLog()
+
+  const symBuckets: Record<string, { wins: number; losses: number; pnls: number[]; lastOutcome?: 'win' | 'loss'; lastPnl?: number }> = {}
+  const regBuckets: Record<string, { wins: number; losses: number }> = {}
+
+  for (const entry of entries) {
+    if (!entry.outcome || (entry.outcome !== 'win' && entry.outcome !== 'loss')) continue
+
+    // Strategy + Symbol
+    const symKey = `${entry.signal.strategy}|${entry.signal.symbol}`
+    if (!symBuckets[symKey]) symBuckets[symKey] = { wins: 0, losses: 0, pnls: [] }
+    const sb = symBuckets[symKey]
+    if (entry.outcome === 'win') sb.wins++
+    else sb.losses++
+    if (entry.pnlPercent != null) sb.pnls.push(entry.pnlPercent)
+    // Track most recent outcome (entries are newest-first)
+    if (sb.lastOutcome == null) {
+      sb.lastOutcome = entry.outcome
+      sb.lastPnl = entry.pnlPercent
+    }
+
+    // Strategy + Regime (from signal details if available)
+    const regime = entry.signal.details?.regime as string | undefined
+    if (regime) {
+      const regKey = `${entry.signal.strategy}|${regime}`
+      if (!regBuckets[regKey]) regBuckets[regKey] = { wins: 0, losses: 0 }
+      if (entry.outcome === 'win') regBuckets[regKey].wins++
+      else regBuckets[regKey].losses++
+    }
+  }
+
+  const strategySymbol: DetailedSignalStats['strategySymbol'] = {}
+  for (const [key, b] of Object.entries(symBuckets)) {
+    const total = b.wins + b.losses
+    strategySymbol[key] = {
+      wins: b.wins,
+      losses: b.losses,
+      winRate: total > 0 ? Math.round((b.wins / total) * 100) : 0,
+      avgPnl: b.pnls.length > 0 ? Math.round((b.pnls.reduce((a, c) => a + c, 0) / b.pnls.length) * 100) / 100 : 0,
+      lastOutcome: b.lastOutcome,
+      lastPnl: b.lastPnl,
+    }
+  }
+
+  const strategyRegime: DetailedSignalStats['strategyRegime'] = {}
+  for (const [key, b] of Object.entries(regBuckets)) {
+    const total = b.wins + b.losses
+    strategyRegime[key] = {
+      wins: b.wins,
+      losses: b.losses,
+      winRate: total > 0 ? Math.round((b.wins / total) * 100) : 0,
+    }
+  }
+
+  return { strategySymbol, strategyRegime }
+}

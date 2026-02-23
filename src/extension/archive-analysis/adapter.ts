@@ -10,6 +10,9 @@ import { runBacktest, optimizeParams, batchOptimize } from '../analysis-kit/tool
 import { fetchFundingRates } from './data/FundingRateClient.js';
 import { readSignalLog, computeSignalStats, syncOutcomesFromTrades } from '../analysis-kit/tools/strategy-scanner/signal-log.js';
 import { appendFundingRateLog, readFundingRateHistory, computeFundingRateStats } from './data/funding-rate-log.js';
+import { getRelevantPatterns, updatePattern, addLesson } from '../brain/TradeMemory.js';
+import { renderChart } from '../analysis-kit/tools/chart-renderer/index.js';
+import { fetchExchangeOHLCV } from './data/ExchangeClient.js';
 import { storePendingProposal, generateProposalId } from '../../core/pending-actions.js';
 import { sendTelegramMessage } from '../../connectors/telegram/telegram-api.js';
 
@@ -607,6 +610,84 @@ Run this during heartbeat or daily P&L report to keep win/loss stats up to date.
         })),
       }),
       execute: async ({ closedTrades }) => await syncOutcomesFromTrades(closedTrades),
+    }),
+
+    // ==================== Trade Memory ====================
+
+    tradeMemoryQuery: tool({
+      description: `Query structured trade memory for patterns and lessons.
+Use after reviewing a signal to check historical context — e.g. "how has rsi_divergence performed on BTC in ranging markets?"
+Returns matching patterns with win rates, avg PnL, and AI-written lessons, plus recent global lessons.`,
+      inputSchema: z.object({
+        strategy: z.string().optional().describe('Strategy name filter, e.g. "rsi_divergence"'),
+        symbol: z.string().optional().describe('Symbol filter, e.g. "BTC/USDT"'),
+        regime: z.string().optional().describe('Market regime filter, e.g. "ranging"'),
+      }),
+      execute: async ({ strategy, symbol, regime }) => {
+        return await getRelevantPatterns(strategy, symbol, regime);
+      },
+    }),
+
+    tradeMemoryUpdate: tool({
+      description: `Record a lesson learned from a closed trade outcome.
+Call after reviewing resolved signals (via syncSignalOutcomes) to build structured trade memory.
+Write a SPECIFIC, ACTIONABLE lesson — not generic advice.
+Good: "SOL breakout_volume in Asian session: 3 losses in a row, avoid low-volume hours"
+Bad: "需要更好的入场时机"`,
+      inputSchema: z.object({
+        strategy: z.string().describe('Strategy name, e.g. "rsi_divergence"'),
+        symbol: z.string().describe('Trading pair, e.g. "BTC/USDT"'),
+        regime: z.string().describe('Market regime at trade time, e.g. "ranging"'),
+        outcome: z.enum(['win', 'loss']).describe('Trade outcome'),
+        pnlPercent: z.number().describe('PnL as percentage, e.g. 2.1 or -1.3'),
+        lesson: z.string().max(200).describe('1-2 sentence specific lesson learned'),
+      }),
+      execute: async (params) => {
+        const pattern = await updatePattern(params);
+        await addLesson(`[${params.strategy}|${params.symbol}|${params.regime}] ${params.lesson}`);
+        return { saved: true, patternId: pattern.id, winRate: pattern.winRate, samples: pattern.samples };
+      },
+    }),
+
+    // ==================== Chart Analysis (AI Vision) ====================
+
+    analyzeChart: tool({
+      description: `Generate a price chart with indicators for visual pattern analysis.
+Returns a PNG chart image for Claude vision to analyze. Use when evaluating confluence signals
+to spot patterns that rule-based strategies might miss (wedges, flags, H&S, volume divergences).
+
+Only call this for symbols with active confluence signals — not every symbol on every heartbeat.`,
+      inputSchema: z.object({
+        symbol: z.string().describe('Trading pair, e.g. "BTC/USDT"'),
+        timeframe: z.enum(['15m', '1h', '4h']).default('15m').describe('Chart timeframe'),
+        bars: z.number().default(100).describe('Number of bars to display (max 200)'),
+      }),
+      execute: async ({ symbol, timeframe, bars: barCount }) => {
+        const safeCount = Math.min(barCount, 200)
+        const ohlcv = await fetchExchangeOHLCV([symbol], timeframe, safeCount)
+        const data = ohlcv[symbol]
+        if (!data || data.length < 10) {
+          return { error: `Insufficient data for ${symbol} ${timeframe}: ${data?.length ?? 0} bars` }
+        }
+        const chartBuffer = await renderChart({
+          symbol,
+          bars: data,
+          indicators: { ema9: true, ema21: true, bb20: true, volume: true },
+        })
+        return {
+          content: [
+            {
+              type: 'image' as const,
+              image: chartBuffer.toString('base64'),
+              mimeType: 'image/png' as const,
+            },
+            {
+              type: 'text' as const,
+              text: `${symbol} ${timeframe} chart (${data.length} bars) with EMA9 (cyan), EMA21 (red), BB20 (yellow), and volume. Analyze for: support/resistance levels, chart patterns (wedges, flags, H&S), volume divergences, and overall price structure.`,
+            },
+          ],
+        }
+      },
     }),
 
     // ==================== Trade proposal with confirmation buttons ====================

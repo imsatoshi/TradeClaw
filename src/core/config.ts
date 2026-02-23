@@ -53,6 +53,7 @@ const modelSchema = z.object({
   provider: z.string().default('anthropic'),
   model: z.string().default('claude-sonnet-4-5-20250929'),
   baseUrl: z.string().optional(),
+  enableVision: z.boolean().default(true),
 })
 
 const agentSchema = z.object({

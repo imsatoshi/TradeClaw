@@ -17,7 +17,8 @@ import { scanBreakoutVolume } from './strategies/breakout-volume.js'
 import { scanFundingFade } from './strategies/funding-fade.js'
 import { scanBBMeanRevert } from './strategies/bb-mean-revert.js'
 import { scanStructureBreak } from './strategies/structure-break.js'
-import { appendSignalLog } from './signal-log.js'
+import { appendSignalLog, computeStrategyWeights } from './signal-log.js'
+import type { StrategyWeight } from './signal-log.js'
 import { getStrategyParams } from './config.js'
 import { detectMarketRegime, applyRegimeFilter } from './regime.js'
 import type { MarketRegime } from './regime.js'
@@ -285,8 +286,16 @@ export async function runStrategyScan(
   // Sort by confidence descending
   allSignals.sort((a, b) => b.confidence - a.confidence)
 
-  // Compute confluence — multi-strategy agreement
-  const compositeSignals = computeConfluence(allSignals, regimeMap)
+  // Compute dynamic strategy weights from historical win rates
+  const weights = await computeStrategyWeights().catch(() => ({} as Record<string, StrategyWeight>))
+
+  const mutedStrategies = Object.values(weights).filter(w => w.muted).map(w => w.strategy)
+  if (mutedStrategies.length > 0) {
+    log.info('muted strategies', { muted: mutedStrategies })
+  }
+
+  // Compute confluence — multi-strategy agreement (with dynamic weights)
+  const compositeSignals = computeConfluence(allSignals, regimeMap, weights)
 
   log.info('scan complete', {
     signals: allSignals.length,
@@ -307,5 +316,6 @@ export async function runStrategyScan(
     errors,
     sessionInfo: getSessionInfo(),
     ohlcv4h,
+    strategyWeights: weights,
   }
 }

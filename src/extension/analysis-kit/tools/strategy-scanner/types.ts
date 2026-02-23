@@ -61,6 +61,8 @@ export interface ScanResult {
   }
   /** 4H OHLCV data used internally — exposed for regime detection reuse. */
   ohlcv4h?: Record<string, import('../../../archive-analysis/data/interfaces.js').MarketData[]>
+  /** Dynamic strategy weights based on rolling win rates. */
+  strategyWeights?: Record<string, import('./signal-log.js').StrategyWeight>
 }
 
 export interface FundingRateInfo {
