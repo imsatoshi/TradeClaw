@@ -58,6 +58,9 @@
     "ws": "^8.19.0",
     "zod": "^4.3.6"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["canvas", "esbuild", "sharp"]
+  },
   "devDependencies": {
     "@ai-sdk/provider": "^3.0.8",
     "@types/express": "^5.0.6",
