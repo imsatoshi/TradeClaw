@@ -1,9 +1,16 @@
 /**
- * RSI Divergence + Volume Exhaustion strategy
+ * RSI Divergence + Volume Exhaustion strategy (15m-native)
  *
- * Mean-reversion strategy (win rate ~60-65%):
- * - Bullish divergence: price makes lower low, RSI makes higher low, volume declining
- * - Bearish divergence: price makes higher high, RSI makes lower high, volume declining
+ * Mean-reversion strategy:
+ * - Bullish divergence: price makes lower low, RSI makes higher low
+ * - Bearish divergence: price makes higher high, RSI makes lower high
+ * - Swing recency filter ensures only fresh, actionable divergences fire
+ * - Volume exhaustion used as a strength/confidence upgrade
+ *
+ * 15m parameters tuned per industry best practices:
+ *   - Tighter OB/OS thresholds (75/25 vs 65/35) to filter 15m noise
+ *   - Wider swing window (3 vs 2) for more reliable pivots
+ *   - Max swing age, min/max spacing to avoid stale or noisy divergences
  */
 
 import type { MarketData } from '../../../../archive-analysis/data/interfaces.js'
@@ -11,26 +18,38 @@ import type { StrategySignal } from '../types.js'
 import { rsiSeries, findSwingLows, findSwingHighs, atrSeries } from '../helpers.js'
 import { getStrategyParamsFor } from '../config.js'
 
-export async function scanRsiDivergence(symbol: string, bars: MarketData[], bars15m?: MarketData[]): Promise<StrategySignal[]> {
+export async function scanRsiDivergence(
+  symbol: string,
+  bars4h: MarketData[],
+  bars15m?: MarketData[],
+): Promise<StrategySignal[]> {
+  // 15m-native: require 15m data
+  if (!bars15m || bars15m.length < 50) return []
+
   const p = await getStrategyParamsFor('rsi_divergence', symbol)
 
   const RSI_PERIOD = p.rsiPeriod ?? 14
   const ATR_PERIOD = p.atrPeriod ?? 14
-  const SWING_WINDOW = p.swingWindow ?? 2
-  const OVERSOLD = p.oversoldThreshold ?? 35
-  const OVERBOUGHT = p.overboughtThreshold ?? 65
-  const VOL_EXHAUSTION_RATIO = p.volumeExhaustionRatio ?? 0.5
+  const SWING_WINDOW = p.swingWindow ?? 3
+  const OVERSOLD = p.oversoldThreshold ?? 25
+  const OVERBOUGHT = p.overboughtThreshold ?? 75
+  const VOL_EXHAUSTION_RATIO = p.volumeExhaustionRatio ?? 0.7
   const SL_MULT = p.slMultiplier ?? 1.5
   const TP_MULT = p.tpMultiplier ?? 2.5
   const STRONG_CONF = p.strongConfidence ?? 78
   const MOD_CONF = p.moderateConfidence ?? 62
 
-  if (bars.length < RSI_PERIOD + SWING_WINDOW * 2 + 10) return []
+  // Swing recency parameters (15m-tuned)
+  const MAX_SWING_AGE = p.maxSwingAge ?? 20          // latest swing within 20 bars (5h)
+  const MIN_SWING_SPACING = p.minSwingSpacing ?? 5   // min 5 bars between swings (1.25h)
+  const MAX_SWING_SPACING = p.maxSwingSpacing ?? 40  // max 40 bars between swings (10h)
 
-  const closes = bars.map(b => b.close)
-  const highs = bars.map(b => b.high)
-  const lows = bars.map(b => b.low)
-  const volumes = bars.map(b => b.volume)
+  if (bars15m.length < RSI_PERIOD + SWING_WINDOW * 2 + 10) return []
+
+  const closes = bars15m.map(b => b.close)
+  const volumes = bars15m.map(b => b.volume)
+  const highs = bars15m.map(b => b.high)
+  const lows = bars15m.map(b => b.low)
 
   const rsi = rsiSeries(closes, RSI_PERIOD)
   if (rsi.length < SWING_WINDOW * 2 + 5) return []
@@ -46,12 +65,8 @@ export async function scanRsiDivergence(symbol: string, bars: MarketData[], bars
   const rv = rsi.slice(0, len)
   const av = alignedVolumes.slice(0, len)
 
-  // SL/TP uses 15m ATR when available (tighter, more appropriate for 15m execution)
-  const slTpBars = bars15m && bars15m.length >= ATR_PERIOD + 2 ? bars15m : bars
-  const slTpHighs = slTpBars.map(b => b.high)
-  const slTpLows = slTpBars.map(b => b.low)
-  const slTpCloses = slTpBars.map(b => b.close)
-  const atrArr = atrSeries(slTpHighs, slTpLows, slTpCloses, ATR_PERIOD)
+  // ATR from 15m for SL/TP
+  const atrArr = atrSeries(highs, lows, closes, ATR_PERIOD)
   const atr = atrArr[atrArr.length - 1]
   if (!atr || atr <= 0) return []
 
@@ -65,42 +80,49 @@ export async function scanRsiDivergence(symbol: string, bars: MarketData[], bars
     const prev = swingLows[swingLows.length - 2]
     const latest = swingLows[swingLows.length - 1]
 
-    // Price lower low + RSI higher low = bullish divergence
-    const priceLowerLow = latest.price <= prev.price
-    const rsiHigherLow = latest.rsi > prev.rsi
-    const oversold = latest.rsi < OVERSOLD
-    const volumeExhaustion = latest.volume < prev.volume * VOL_EXHAUSTION_RATIO
+    // Swing recency + spacing filters
+    const latestAge = len - 1 - latest.index
+    const spacing = latest.index - prev.index
 
-    if (priceLowerLow && rsiHigherLow && oversold) {
-      const sl = currentClose - SL_MULT * atr
-      const tp = currentClose + TP_MULT * atr
-      const rr = (tp - currentClose) / (currentClose - sl)
+    if (latestAge <= MAX_SWING_AGE && spacing >= MIN_SWING_SPACING && spacing <= MAX_SWING_SPACING) {
+      // Price lower low + RSI higher low = bullish divergence
+      const priceLowerLow = latest.price <= prev.price
+      const rsiHigherLow = latest.rsi > prev.rsi
+      const oversold = latest.rsi < OVERSOLD
+      const volumeExhaustion = latest.volume < prev.volume * VOL_EXHAUSTION_RATIO
 
-      const strength = volumeExhaustion ? 'strong' : 'moderate'
-      const confidence = volumeExhaustion ? STRONG_CONF : MOD_CONF
+      if (priceLowerLow && rsiHigherLow && oversold) {
+        const sl = currentClose - SL_MULT * atr
+        const tp = currentClose + TP_MULT * atr
+        const rr = (tp - currentClose) / (currentClose - sl)
 
-      signals.push({
-        strategy: 'rsi_divergence',
-        symbol,
-        direction: 'long',
-        strength,
-        confidence,
-        timeframe: '4h',
-        entry: currentClose,
-        stopLoss: sl,
-        takeProfit: tp,
-        riskRewardRatio: Math.round(rr * 100) / 100,
-        details: {
-          prevSwingPrice: prev.price,
-          latestSwingPrice: latest.price,
-          prevSwingRSI: Math.round(prev.rsi * 100) / 100,
-          latestSwingRSI: Math.round(latest.rsi * 100) / 100,
-          volumeRatio: Math.round((latest.volume / prev.volume) * 100) / 100,
-          atr: Math.round(atr * 100) / 100,
-          slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
-        },
-        reason: `Bullish RSI divergence: price lower low (${latest.price.toFixed(2)} vs ${prev.price.toFixed(2)}) but RSI higher low (${latest.rsi.toFixed(1)} vs ${prev.rsi.toFixed(1)})${volumeExhaustion ? ' with volume exhaustion' : ''}`,
-      })
+        const strength = volumeExhaustion ? 'strong' : 'moderate'
+        const confidence = volumeExhaustion ? STRONG_CONF : MOD_CONF
+
+        signals.push({
+          strategy: 'rsi_divergence',
+          symbol,
+          direction: 'long',
+          strength,
+          confidence,
+          timeframe: '15m',
+          entry: currentClose,
+          stopLoss: round(sl),
+          takeProfit: round(tp),
+          riskRewardRatio: round(rr),
+          details: {
+            prevSwingPrice: round(prev.price),
+            latestSwingPrice: round(latest.price),
+            prevSwingRSI: round(prev.rsi),
+            latestSwingRSI: round(latest.rsi),
+            volumeRatio: round(latest.volume / prev.volume),
+            latestSwingAge: latestAge,
+            swingSpacing: spacing,
+            atr: round(atr),
+          },
+          reason: `Bullish RSI divergence (15m): price lower low ($${latest.price.toFixed(2)} vs $${prev.price.toFixed(2)}) but RSI higher low (${latest.rsi.toFixed(1)} vs ${prev.rsi.toFixed(1)}), swing age ${latestAge} bars${volumeExhaustion ? ', volume exhaustion' : ''}`,
+        })
+      }
     }
   }
 
@@ -110,44 +132,55 @@ export async function scanRsiDivergence(symbol: string, bars: MarketData[], bars
     const prev = swingHighs[swingHighs.length - 2]
     const latest = swingHighs[swingHighs.length - 1]
 
-    // Price higher high + RSI lower high = bearish divergence
-    const priceHigherHigh = latest.price >= prev.price
-    const rsiLowerHigh = latest.rsi < prev.rsi
-    const overbought = latest.rsi > OVERBOUGHT
-    const volumeExhaustion = latest.volume < prev.volume * VOL_EXHAUSTION_RATIO
+    // Swing recency + spacing filters
+    const latestAge = len - 1 - latest.index
+    const spacing = latest.index - prev.index
 
-    if (priceHigherHigh && rsiLowerHigh && overbought) {
-      const sl = currentClose + SL_MULT * atr
-      const tp = currentClose - TP_MULT * atr
-      const rr = (currentClose - tp) / (sl - currentClose)
+    if (latestAge <= MAX_SWING_AGE && spacing >= MIN_SWING_SPACING && spacing <= MAX_SWING_SPACING) {
+      // Price higher high + RSI lower high = bearish divergence
+      const priceHigherHigh = latest.price >= prev.price
+      const rsiLowerHigh = latest.rsi < prev.rsi
+      const overbought = latest.rsi > OVERBOUGHT
+      const volumeExhaustion = latest.volume < prev.volume * VOL_EXHAUSTION_RATIO
 
-      const strength = volumeExhaustion ? 'strong' : 'moderate'
-      const confidence = volumeExhaustion ? STRONG_CONF : MOD_CONF
+      if (priceHigherHigh && rsiLowerHigh && overbought) {
+        const sl = currentClose + SL_MULT * atr
+        const tp = currentClose - TP_MULT * atr
+        const rr = (currentClose - tp) / (sl - currentClose)
 
-      signals.push({
-        strategy: 'rsi_divergence',
-        symbol,
-        direction: 'short',
-        strength,
-        confidence,
-        timeframe: '4h',
-        entry: currentClose,
-        stopLoss: sl,
-        takeProfit: tp,
-        riskRewardRatio: Math.round(rr * 100) / 100,
-        details: {
-          prevSwingPrice: prev.price,
-          latestSwingPrice: latest.price,
-          prevSwingRSI: Math.round(prev.rsi * 100) / 100,
-          latestSwingRSI: Math.round(latest.rsi * 100) / 100,
-          volumeRatio: Math.round((latest.volume / prev.volume) * 100) / 100,
-          atr: Math.round(atr * 100) / 100,
-          slTpTimeframe: bars15m && bars15m.length >= ATR_PERIOD + 2 ? '15m' : '4h',
-        },
-        reason: `Bearish RSI divergence: price higher high (${latest.price.toFixed(2)} vs ${prev.price.toFixed(2)}) but RSI lower high (${latest.rsi.toFixed(1)} vs ${prev.rsi.toFixed(1)})${volumeExhaustion ? ' with volume exhaustion' : ''}`,
-      })
+        const strength = volumeExhaustion ? 'strong' : 'moderate'
+        const confidence = volumeExhaustion ? STRONG_CONF : MOD_CONF
+
+        signals.push({
+          strategy: 'rsi_divergence',
+          symbol,
+          direction: 'short',
+          strength,
+          confidence,
+          timeframe: '15m',
+          entry: currentClose,
+          stopLoss: round(sl),
+          takeProfit: round(tp),
+          riskRewardRatio: round(rr),
+          details: {
+            prevSwingPrice: round(prev.price),
+            latestSwingPrice: round(latest.price),
+            prevSwingRSI: round(prev.rsi),
+            latestSwingRSI: round(latest.rsi),
+            volumeRatio: round(latest.volume / prev.volume),
+            latestSwingAge: latestAge,
+            swingSpacing: spacing,
+            atr: round(atr),
+          },
+          reason: `Bearish RSI divergence (15m): price higher high ($${latest.price.toFixed(2)} vs $${prev.price.toFixed(2)}) but RSI lower high (${latest.rsi.toFixed(1)} vs ${prev.rsi.toFixed(1)}), swing age ${latestAge} bars${volumeExhaustion ? ', volume exhaustion' : ''}`,
+        })
+      }
     }
   }
 
   return signals
+}
+
+function round(v: number): number {
+  return Math.round(v * 100) / 100
 }

@@ -211,12 +211,22 @@ export interface StrategyWeight {
  *   winRate < 40%          → 0.3 + winRate (min 0.3)
  *   winRate < 35% && n>=8  → muted (weight = 0)
  */
+/**
+ * Clean data cutoff — only count outcomes from after strategy bug fixes
+ * (ema_trend EMA alignment fix + regime soft filter) deployed 2026-02-24.
+ * Outcomes before this date were produced under buggy strategies and would
+ * pollute weight calculations. As clean data accumulates, weights will
+ * naturally diverge from the default 1.0.
+ */
+const CLEAN_DATA_CUTOFF_MS = new Date('2026-02-24T00:00:00Z').getTime()
+
 export async function computeStrategyWeights(): Promise<Record<string, StrategyWeight>> {
   const entries = await loadLog()
   const buckets: Record<string, { wins: number; losses: number }> = {}
 
   for (const entry of entries) {
     if (!entry.outcome || (entry.outcome !== 'win' && entry.outcome !== 'loss')) continue
+    if (new Date(entry.timestamp).getTime() < CLEAN_DATA_CUTOFF_MS) continue
     const key = entry.signal.strategy
     if (!buckets[key]) buckets[key] = { wins: 0, losses: 0 }
     if (entry.outcome === 'win') buckets[key].wins++
@@ -289,6 +299,7 @@ export async function computeDetailedStats(): Promise<DetailedSignalStats> {
 
   for (const entry of entries) {
     if (!entry.outcome || (entry.outcome !== 'win' && entry.outcome !== 'loss')) continue
+    if (new Date(entry.timestamp).getTime() < CLEAN_DATA_CUTOFF_MS) continue
 
     // Strategy + Symbol
     const symKey = `${entry.signal.strategy}|${entry.signal.symbol}`

@@ -10,15 +10,8 @@ import type { StrategySignal, CompositeSignal, StrategyName } from './types.js'
 import type { MarketRegime } from './regime.js'
 import type { StrategyWeight } from './signal-log.js'
 
-/** Strategy category for regime alignment bonus. */
-const TREND_FOLLOWING: StrategyName[] = ['ema_trend', 'breakout_volume', 'structure_break']
-const MEAN_REVERSION: StrategyName[] = ['rsi_divergence', 'funding_fade', 'bb_mean_revert']
-
 /** Minimum composite score to surface a signal. */
 const MIN_COMPOSITE_SCORE = 60
-
-/** Bonus when all agreeing strategies match the regime type. */
-const REGIME_ALIGNMENT_BONUS = 15
 
 /**
  * Compute confluence signals from individual strategy outputs.
@@ -87,21 +80,11 @@ export function computeConfluence(
     }
 
     // Weighted composite score — base = weighted average confidence
+    // Note: regime alignment is already handled by regime filter's confidence
+    // adjustments (+/-10), so no additional bonus is applied here.
     let compositeScore = avgConfidence
-
-    // Regime alignment bonus
     const regime = regimeMap[symbol]
     const regimeName = regime?.regime ?? 'ranging'
-    if (regime) {
-      const allTrend = strategies.every(s => TREND_FOLLOWING.includes(s))
-      const allMeanRev = strategies.every(s => MEAN_REVERSION.includes(s))
-      const regimeAligned =
-        (allTrend && (regimeName === 'uptrend' || regimeName === 'downtrend')) ||
-        (allMeanRev && regimeName === 'ranging')
-      if (regimeAligned) {
-        compositeScore = Math.min(100, compositeScore + REGIME_ALIGNMENT_BONUS)
-      }
-    }
 
     // Strategy count bonus: +5 per strategy beyond 2
     compositeScore = Math.min(100, compositeScore + (uniqueSignals.length - 2) * 5)
