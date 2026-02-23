@@ -4,84 +4,195 @@
 
 <h1 align="center">TradeClaw</h1>
 
-<p align="center">AI 投资组合经理 — 管理算法策略的交易范围、监控风险、分析信号表现，24/7 守护你的投资组合。</p>
+<p align="center">AI-native 加密货币交易系统 — AI 做策略决策，TradeManager 自动执行多级止盈止损，24/7 全自动管理交易生命周期。</p>
 
 ---
 
-- **文件驱动** — Markdown 定义人格，JSON 定义配置，JSONL 存储对话，HEARTBEAT.md 定义自主监控行为。没有数据库，只有文件。
-- **推理驱动** — 每个交易决策都来自实时工具调用+信号混合，不依赖缓存状态。幻觉检测和工具放弃检测防止模型声称行动却未实际执行。
-- **平台原生** — 构建于 OpenClaw 基础平台之上：完整的 Playwright/CDP 浏览器自动化、Tailscale 组网、设备认证、TLS 管理。
+- **AI 是大脑** — 分析市场、生成信号、制定交易计划。不做机械性执行。
+- **TradeManager 是双手** — 10 秒轮询自动执行交易计划：逐级下止盈、管理止损、追踪盈亏、自动保本。
+- **Freqtrade 是基础设施** — 订单路由、K 线数据、白名单管理。不做任何自主决策。
 
-## 功能
+## 核心架构
 
-- **双 AI 引擎** — 运行时通过 Telegram `/settings` 切换 Claude Code CLI 和 Vercel AI SDK（支持任意 OpenAI 兼容服务商）
-- **加密货币交易** — CCXT（直连交易所）或 [Freqtrade](https://www.freqtrade.io/) 订单执行层，AI 是唯一决策者
-- **证券交易** — Alpaca 美股集成，暂存→提交→推送三段式操作流
-- **策略自动扫描** — 一次调用扫描全仓位品种，内置 RSI 背离、EMA 趋势、N 周期突破、资金费率反转四套 4H 策略 + 1H 多时间框架过滤，心跳自动触发
-- **市场状态检测** — 4H EMA9/21/55 三线排列自动识别趋势/震荡，作为信号上下文注入心跳
-- **Freqtrade 健康监控** — 心跳自动注入 Freqtrade 服务状态（ping + 最后处理时间），异常时告警
-- **风控硬限** — 最大并发仓位、单笔最大 40% 权益、可用余额 < 30% 禁止开仓，代码层面强制执行
-- **市场分析** — 技术指标（RSI、MACD、布林带、ATR 等）、新闻搜索、Binance 公开 API 行情
-- **A 股行情** — 东方财富免费 API，搜索、实时行情、K 线、技术指标（只分析，不交易）
-- **认知状态** — 持久化"大脑"：前额叶记忆、情绪追踪、提交历史
-- **浏览器自动化** — 完整 OpenClaw 浏览器引擎：16 种操作、Chrome 配置文件、CDP 直连、沙盒 Docker 模式
-- **调度系统** — 心跳循环 + 定时任务，Transcript 修剪防止无效心跳污染会话，投递队列保证消息不丢失
-- **连接器** — Telegram 机器人、HTTP Webhook、MCP Server
-
-## 架构
+```
+AI (策略大脑) → TradePlan (TP/SL 计划) → TradeManager (自动执行) → Freqtrade (交易所)
+```
 
 ```mermaid
 graph LR
-  subgraph 输入
+  subgraph 用户
     TG[Telegram]
     HTTP[HTTP Webhook]
-    MCP[MCP Server]
-    HB[HEARTBEAT.md]
   end
 
-  subgraph 核心
-    SC[Scheduler 调度器]
-    E[Engine 引擎]
+  subgraph AI 引擎
+    E[Engine]
     PR[ProviderRouter]
-  end
-
-  subgraph AI 后端
     VS[Vercel AI SDK]
     CC[Claude Code CLI]
   end
 
-  subgraph 工具层
-    AK[Analysis Kit]
-    CT[Crypto Trading<br/>Freqtrade = Execution Layer]
-    ST[Securities Trading]
-    BR[Brain 大脑]
-    BW[Browser 浏览器]
-    AS[A-Share A股]
-    CR[Cron 定时]
+  subgraph 交易系统
+    TM[TradeManager<br/>10s 轮询引擎]
+    FT[Freqtrade<br/>订单执行]
+    CCXT[CCXT 直连<br/>止损单]
+    W[Wallet<br/>暂存/提交/推送]
   end
 
-  subgraph OpenClaw 平台
-    OB[Browser Engine]
-    OG[Gateway / Protocol]
-    OI[Infra: Tailscale / TLS]
+  subgraph 分析
+    AK[Analysis Kit<br/>指标 / 信号 / 扫描]
+    BR[Brain 认知状态]
+    SC[Scheduler<br/>心跳 + 定时]
   end
 
-  HB --> SC --> E
-  TG & HTTP & MCP --> E
-  E --> PR
-  PR --> VS & CC
-  AK & CT & ST & BR & BW & AS & CR -.工具注入.-> E
-  OB --> BW
-  OG & OI -.基础设施.-> E
+  TG & HTTP --> E
+  E --> PR --> VS & CC
+  AK & BR -.工具.-> E
+  SC --> E
+
+  E --创建 TradePlan--> TM
+  TM --下 TP 单--> FT
+  TM --下 SL 单--> CCXT
+  TM --状态变化--> SC
+  W --> FT
 ```
 
-**输入** — Telegram/HTTP/MCP 接收用户消息转发给 Engine；Scheduler 定时读取 HEARTBEAT.md 触发自主心跳。
+## TradeManager — 交易计划自动执行
 
-**核心** — `Engine` 管理 AI 对话，内置幻觉检测（模型声称交易但未调工具）和工具放弃检测（工具失败后模型拒绝重试）。`ProviderRouter` 在 Vercel AI SDK 和 Claude Code 之间切换，两者共享同一套工具和会话。会话以 JSONL 持久化，自动压缩。
+每笔交易由 AI 创建一个 **TradePlan**，TradeManager 负责自动执行：
 
-**工具层** — 按领域划分的扩展集，组合注入到 Engine。每个扩展独立管理工具、状态和持久化。
+```
+TradePlan 生命周期: pending → active → partial → completed
+```
 
-**OpenClaw 平台** — 底层基础设施：完整的 Playwright/CDP 浏览器引擎（含 Chrome 配置文件、Extension Relay、代理）；Gateway 协议层（TypeBox schema、设备认证）；Infra 层（Tailscale 组网、TLS 证书管理、端口检测）。
+| 功能 | 说明 |
+|------|------|
+| **多级止盈** | 1-5 个 TP 级别，按比例逐级平仓（Freqtrade 限制每笔交易只能有一个挂单，TradeManager 自动逐级下单） |
+| **止损管理** | 通过 CCXT 直连交易所下 STOP_MARKET 单，不占用 Freqtrade 挂单配额 |
+| **自动保本** | TP1 成交后自动将 SL 移到入场价（默认开启，可关闭） |
+| **Trailing Stop** | SL 跟随价格移动，支持固定距离或百分比模式，只朝有利方向移动 |
+| **实时 P&L** | 每 10s 计算：浮动盈亏、已实现盈亏、风险回报比、最大回撤 |
+| **动态调整** | AI 可随时通过 `cryptoUpdateTradePlan` 修改 TP/SL/trailing 参数 |
+| **事件通知** | TP 成交、SL 触发、计划完成等状态变化自动注入 AI 下次心跳 |
+| **持久化** | 活跃计划保存到 JSON，重启后自动恢复 |
+
+**心跳中的展示效果：**
+
+```
+📋 Active Trade Plans:
+- BTC/USDT LONG: entry $65000 | TP1 $67000 (50%, placed) | TP2 $70000 (50%, pending) | SL $63500 (placed) | 📈 uPnL: +$120.50 (+1.8%) | R:R 2.1 | maxDD: -0.5% [auto-BE, trail 1.5%] | active
+```
+
+## AI 交易工具
+
+### 交易计划管理
+
+| 工具 | 说明 |
+|------|------|
+| `cryptoCreateTradePlan` | 创建交易计划 — 多级 TP、SL、自动保本、trailing stop |
+| `cryptoGetTradePlans` | 查询活跃计划 — 含实时 P&L、R:R、最大回撤 |
+| `cryptoUpdateTradePlan` | 动态调整 — 修改 TP 目标/比例、SL 价格、trailing 参数 |
+| `cryptoCancelTradePlan` | 取消计划 — 自动撤销所有挂单 |
+
+### 订单执行
+
+| 工具 | 说明 |
+|------|------|
+| `cryptoPlaceOrder` | 下单（AI 入场决策 → Freqtrade forceentry） |
+| `cryptoClosePosition` | 紧急平仓（绕过 TradePlan，仅用于突发情况） |
+| `cryptoGetPositions` | 实时持仓查询 |
+| `cryptoGetAccount` | 账户余额查询 |
+| `cryptoGetOrders` | 订单历史查询 |
+
+### 组合管理
+
+| 工具 | 说明 |
+|------|------|
+| `cryptoManageBlacklist` | 黑名单管理 |
+| `cryptoLockPair` | 临时锁定币对 |
+| `cryptoGetStrategyStats` | 入场标签/退出原因胜率统计 |
+| `cryptoReloadConfig` | 重载配置 |
+| `cryptoGetWhitelist` | 白名单查询 |
+
+### 分析 & 信号
+
+| 工具 | 说明 |
+|------|------|
+| `strategyScan` | 全白名单策略扫描（RSI 背离、EMA 趋势、突破、资金费率反转） |
+| `proposeTradeWithButtons` | Telegram 交易提案（用户按钮确认） |
+| `calculatePositionSize` | 仓位计算（2% 权益风险 + 4 项风控检查） |
+| `syncSignalOutcomes` | 从已关闭交易同步信号结果 |
+
+## AI 交易工作流
+
+每 15 分钟心跳触发：
+
+```
+1. 扫描机会
+   strategyScan → 过滤 confidence >= 70 + 市场状态对齐
+   → calculatePositionSize → proposeTradeWithButtons → 用户确认
+   → cryptoPlaceOrder → commit → push → cryptoCreateTradePlan
+
+2. 管理持仓（基于心跳注入的实时数据）
+   - 查看 P&L、R:R、最大回撤
+   - 市场结构变化？→ cryptoUpdateTradePlan 调整 TP/SL
+   - 自动保本和 trailing stop 无需干预
+
+3. 日常维护
+   - syncSignalOutcomes — 更新策略胜率
+   - 每日 UTC 00:00 自动生成 P&L 日报
+```
+
+### 风控硬限
+
+- 单笔最大风险：2% 权益
+- 单笔最大仓位：40% 权益
+- 可用余额 < 30% 禁止开仓
+- 最大并发仓位：由 Freqtrade max_open_trades 控制
+- SL 距离合理性检查（不能太远导致风控失效）
+- Freqtrade 安全网 stoploss: -20%（TradeManager 失效时的最后防线）
+
+## 策略扫描
+
+心跳自动触发，四套 4H 策略 + 1H 多时间框架确认：
+
+| 策略 | 类型 | 触发条件 |
+|------|------|----------|
+| RSI 背离 + 成交量耗尽 | 均值回归 | 价格新低/高但 RSI 背离，成交量萎缩 |
+| EMA 趋势动量 | 趋势跟随 | EMA9/21/55 三线顺序排列 + RSI 过滤 |
+| N 周期突破 + 成交量 | 突破 | 突破 N 根 K 线高/低点 + 成交量 > 1.5x |
+| 资金费率反转 | 逆向 | 极端资金费率 + RSI 加分 |
+
+**增强机制：** 多时间框架过滤、4H EMA 市场状态检测、OHLCV 缓存、信号持久化。
+
+## 心跳注入数据
+
+每次心跳自动注入以下实时数据供 AI 决策：
+
+| 数据 | 说明 |
+|------|------|
+| 账户 & 持仓 | 余额、持仓详情、资金费率 |
+| 交易计划 | 所有活跃 TradePlan + 实时 P&L |
+| 市场状态 | 每个币对的趋势分类（uptrend / downtrend / ranging） |
+| 策略信号 | 四套策略扫描结果，带市场状态对齐标签 |
+| Freqtrade 状态 | 健康检查、入场/退出统计、待处理订单 |
+| 每日 P&L | 最近 7 天收益曲线 |
+| 币对表现 | 按利润排序的币对表现（top 5 + worst 3） |
+
+## Freqtrade 策略：TradeClaw.py
+
+薄策略 — 不产生任何交易信号，AI 通过 forceentry/forceexit 控制所有进出场。
+
+提供的技术指标：
+
+| 类别 | 指标 |
+|------|------|
+| 趋势 | EMA9/21/55、SMA200 |
+| 动量 | RSI14、MACD（线 + 信号 + 柱状图） |
+| 波动率 | ATR14、布林带（上/中/下轨 + 带宽） |
+| 成交量 | Volume SMA20 |
+
+安全网 stoploss = -20%（仅在 TradeManager 完全失效时触发）。
 
 ## 快速开始
 
@@ -89,6 +200,7 @@ graph LR
 
 - Node.js 20+
 - pnpm 10+
+- Freqtrade 实例（推荐）或 CCXT 支持的交易所
 
 ### 安装
 
@@ -96,222 +208,127 @@ graph LR
 git clone https://github.com/imsatoshi/TradeClaw.git
 cd TradeClaw
 pnpm install
-cp .env.example .env    # 然后填入你的 API 密钥
+cp .env.example .env    # 填入 API 密钥
 ```
 
-### AI 服务商
+### 配置交易后端
 
-提供两种模式：
-
-- **Vercel AI SDK**（默认）— 在进程内运行代理。在 `data/config/model.json` 中配置：
-
-  ```json
-  { "provider": "anthropic", "model": "claude-sonnet-4-20250514" }
-  ```
-
-  也支持 OpenAI 兼容服务（DeepSeek、Kimi 等）：
-
-  ```json
-  { "provider": "openai", "model": "deepseek-chat", "baseUrl": "https://api.deepseek.com/v1" }
-  ```
-
-  > DeepSeek 等模型会触发额外的幻觉检测和工具放弃检测（Claude 足够可靠，不需要这些防护）。
-
-- **Claude Code** — 以子进程方式启动 `claude -p`，赋予代理完整的 Claude Code 能力。需要在宿主机上安装并认证 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)。
-
-### 加密货币交易
-
-支持两种执行后端：
-
-**CCXT（直连交易所）** — 连接任何 [CCXT 支持的交易所](https://docs.ccxt.com/)：
-
-```bash
-cp data/config/crypto.binance.example.json data/config/crypto.json
-```
-
-**Freqtrade（订单执行层）** — 通过 REST API 连接 [Freqtrade](https://www.freqtrade.io/) 实例。AI 是唯一决策者，Freqtrade 仅作为订单执行基础设施（forceentry/forceexit），不运行自主策略：
+**Freqtrade（推荐）** — 通过 REST API 连接：
 
 ```bash
 cp data/config/crypto.freqtrade.example.json data/config/crypto.json
 ```
 
-**AI 自主交易工具：**
+**CCXT 直连** — 连接任何 CCXT 支持的交易所：
 
-| 工具 | 说明 |
-|------|------|
-| `cryptoPlaceOrder` | 下单 — AI 决定入场后通过 forceentry 执行 |
-| `cryptoClosePosition` | 平仓 — AI 决定退场后通过 forceexit 执行 |
-| `cryptoGetPositions` | 持仓监控 — 显示入场标签、DCA 层数、利润率 |
-| `cryptoGetOrders` | 订单查询 — 查看所有订单（含已关闭），用于信号结果同步 |
+```bash
+cp data/config/crypto.binance.example.json data/config/crypto.json
+```
 
-**组合管理工具：**
+### AI 服务商
 
-| 工具 | 说明 |
-|------|------|
-| `cryptoManageBlacklist` | 黑名单管理 — 控制哪些币对可以交易 |
-| `cryptoLockPair` | 临时锁定 — 短期暂停某个币对的交易 |
-| `cryptoGetStrategyStats` | 信号分析 — 按入场标签/退出原因查看胜率和收益 |
-| `cryptoReloadConfig` | 重载配置 — 黑名单/白名单修改后刷新 |
-| `cryptoGetWhitelist` | 白名单查询 — 查看当前可交易的币对列表 |
+`data/config/model.json` 配置：
 
-**分析 & 信号工具：**
+```json
+{ "provider": "anthropic", "model": "claude-sonnet-4-20250514" }
+```
 
-| 工具 | 说明 |
-|------|------|
-| `strategyScan` | 一次性扫描所有白名单品种的四套策略信号 |
-| `proposeTradeWithButtons` | 向 Telegram 发送交易提案，用户通过按钮确认/拒绝 |
-| `calculatePositionSize` | 固定风险比例仓位计算（默认 2% 权益风险） |
-| `cryptoGetFundingRate` | 查询当前资金费率 |
-| `getFundingRateHistory` | 查看资金费率历史趋势 |
-| `getSignalHistory` | 查看信号历史和策略胜率统计 |
-| `syncSignalOutcomes` | 从 Freqtrade 已关闭交易同步信号结果（胜/负） |
+也支持 OpenAI 兼容服务：
 
-Freqtrade HTTP 请求内置自动重试（最多 2 次，间隔 1s），瞬态网络错误在引擎层消化，不暴露给 AI 模型。
+```json
+{ "provider": "openai", "model": "deepseek-chat", "baseUrl": "https://api.deepseek.com/v1" }
+```
 
-### 策略自动扫描
+支持运行时通过 Telegram `/settings` 切换 Vercel AI SDK 和 Claude Code CLI。
 
-每次心跳，AI 调用 `strategyScan` 一次性扫描所有白名单品种，内置四套 4H 策略 + 1H 多时间框架确认：
+### 运行
 
-| 策略 | 类型 | 触发条件 |
-|------|------|----------|
-| RSI 背离 + 成交量耗尽 | 均值回归 | 价格新低/高但 RSI 背离，成交量萎缩确认 |
-| EMA 趋势动量 | 趋势跟随 | EMA9/21/55 三线顺序排列 + RSI 过滤（多头 40-70，空头 30-60） |
-| N 周期突破 + 成交量 | 突破 | 收盘价突破 N 根 K 线高/低点 + 成交量 > 1.5x 均值 |
-| 资金费率反转 | 逆向 | 极端资金费率（>0.08%/8h 或 <-0.04%/8h），RSI 作为加分项而非硬条件 |
+```bash
+pnpm dev        # 开发模式
+pnpm build      # 生产构建
+```
 
-**增强机制：**
+### 部署 Freqtrade 策略
 
-- **多时间框架过滤** — 1H SMA20 趋势方向与 4H 信号对齐时加分（+5），冲突时惩罚（-15），严重冲突降级为 weak
-- **市场状态检测** — 4H EMA9/21/55 排列 + 价格位置自动分类：downtrend / uptrend / ranging，作为上下文注入心跳
-- **OHLCV 缓存** — 25 分钟 TTL，避免跨心跳重复请求 Binance
-- **信号历史** — 所有信号自动持久化到 `data/signals/`，支持按策略查看胜率
+将策略文件复制到 Freqtrade 的策略目录：
 
-信号检测由确定性代码完成，AI 负责结合持仓/时段/账户状态/市场状态做最终决策。系统内置 UTC 交易时段感知（亚洲/伦敦/纽伦重叠/纽约/深夜），深夜时段只执行置信度 ≥ 80 的强信号。
-
-### 心跳自主监控
-
-心跳由 Scheduler 定时触发，每次心跳自动注入以下实时数据：
-
-| 数据 | 说明 |
-|------|------|
-| 市场状态 | 每个币对的 4H 趋势分类（downtrend / uptrend / ranging） |
-| 策略信号 | 四套策略的扫描结果（AI 主要信号源），带状态对齐标签 |
-| 入场/退出统计 | 入场信号标签胜率、退出原因分析 |
-| Freqtrade 健康 | 服务 ping + 最后 K 线处理时间，三级状态（OK / DEGRADED / DOWN） |
-| 待处理订单 | 未成交限价单，超时自动提醒取消 |
-| 仓位风险详情 | 止损价格、止损距离、累计资金费 |
-
-AI 根据 HEARTBEAT.md 中的规则解读这些数据并自主决策（告警、提议交易、锁定币对等）。
-
-### 证券交易
-
-基于 [Alpaca](https://alpaca.markets/)。支持模拟盘和实盘 — 在 `data/config/securities.json` 中切换。
-
-### A 股行情分析
-
-内置东方财富免费 API，**无需配置**，开箱即用。只做分析，不做交易。
-
-| 工具 | 说明 |
-|------|------|
-| `searchAShare` | 搜索股票（代码或中文名） |
-| `getAShareQuote` | 批量实时行情 |
-| `getAShareKline` | K 线数据（日/周/月/分钟线） |
-| `calculateAShareIndicator` | 技术指标计算，复用 Analysis Kit 引擎 |
+```bash
+cp freqtrade/strategies/TradeClaw.py /path/to/freqtrade/user_data/strategies/
+```
 
 ### 环境变量
 
 | 变量 | 说明 |
 |------|------|
 | `ANTHROPIC_API_KEY` | Anthropic API 密钥 |
-| `OPENAI_API_KEY` | OpenAI 兼容 API 密钥（DeepSeek、Kimi 等） |
-| `OPENAI_BASE_URL` | OpenAI 兼容服务的自定义端点 |
+| `OPENAI_API_KEY` | OpenAI 兼容 API 密钥 |
+| `OPENAI_BASE_URL` | OpenAI 兼容服务端点 |
 | `EXCHANGE_API_KEY` | 交易所 API 密钥（CCXT 模式） |
-| `EXCHANGE_API_SECRET` | 交易所 API Secret（CCXT 模式） |
-| `EXCHANGE_PASSWORD` | 交易所口令（OKX 等） |
+| `EXCHANGE_API_SECRET` | 交易所 API Secret |
 | `TELEGRAM_BOT_TOKEN` | Telegram 机器人 Token |
-| `TELEGRAM_CHAT_ID` | 允许的聊天 ID，逗号分隔 |
-| `ALPACA_API_KEY` | Alpaca 美股 API 密钥 |
-| `ALPACA_SECRET_KEY` | Alpaca 美股 Secret 密钥 |
+| `TELEGRAM_CHAT_ID` | 允许的聊天 ID（逗号分隔） |
 
-### 运行
+## 其他功能
 
-```bash
-pnpm dev        # 开发模式（热重载）
-pnpm build      # 生产构建
-pnpm test       # 运行测试
-```
+- **双 AI 引擎** — Vercel AI SDK（进程内）+ Claude Code CLI（子进程），运行时切换
+- **认知状态** — 持久化大脑：前额叶记忆、情绪追踪、提交历史
+- **A 股行情** — 东方财富免费 API，搜索/行情/K 线/指标分析
+- **浏览器自动化** — Playwright/CDP 浏览器引擎
+- **调度系统** — 心跳循环 + 定时任务 + 消息投递队列
+- **连接器** — Telegram 机器人、HTTP Webhook、MCP Server
 
 ## 配置
 
-所有配置位于 `data/config/`，JSON 格式 + Zod 校验。缺少的文件使用默认值。
+所有配置位于 `data/config/`，JSON 格式 + Zod 校验。
 
 | 文件 | 用途 |
 |------|------|
-| `engine.json` | 交易对、轮询间隔、HTTP/MCP 端口、时间框架 |
-| `model.json` | AI 模型服务商、模型名称、可选 base URL |
-| `ai-provider.json` | AI 引擎选择 — `vercel-ai-sdk` 或 `claude-code` |
-| `agent.json` | 最大代理步数、Claude Code 允许/禁止的工具 |
-| `crypto.json` | 加密交易 — CCXT（交易所、交易对）或 Freqtrade（URL、凭证） |
-| `securities.json` | 证券交易、Alpaca 账户、模拟盘开关 |
-| `strategy-params.json` | 策略扫描参数 — 各策略阈值、MTF 加分/惩罚、缓存 TTL，修改后下次扫描生效 |
-| `compaction.json` | 上下文窗口限制、自动压缩阈值 |
-| `scheduler.json` | 心跳间隔、定时任务开关、消息投递队列 |
-| `mcp.json` | MCP Server 配置 |
-| `persona.md` | 系统提示词人格（自由格式 Markdown） |
+| `engine.json` | 交易对、轮询间隔、HTTP/MCP 端口 |
+| `model.json` | AI 模型、服务商 |
+| `crypto.json` | 交易后端（Freqtrade 或 CCXT） |
+| `strategy-params.json` | 策略扫描参数（阈值、MTF 权重） |
+| `scheduler.json` | 心跳间隔、定时任务 |
+| `persona.md` | 系统人格提示词 |
 
 ## 项目结构
 
 ```
 src/
-  main.ts                    # 组合根 — 连接所有模块
-  core/                      # Engine、Session、Scheduler、Cron、Delivery、ProviderRouter、Guards
+  main.ts                        # 组合根
+  core/                          # Engine、Scheduler、Cron、Delivery、ProviderRouter
   providers/
-    claude-code/             # Claude Code CLI 子进程封装
-    vercel-ai-sdk/           # Vercel AI SDK ToolLoopAgent 封装
+    vercel-ai-sdk/               # Vercel AI SDK 封装
+    claude-code/                 # Claude Code CLI 封装
   extension/
-    analysis-kit/            # 行情数据、指标计算、新闻、沙盒、策略扫描
-    ashare/                  # A 股行情分析（东方财富 API）
-    crypto-trading/          # 交易引擎工厂 + 钱包
+    analysis-kit/                # 行情、指标、策略扫描
+    crypto-trading/
+      trade-manager/             # TradeManager — 交易计划自动执行引擎
+        TradeManager.ts          # 核心轮询引擎（10s tick）
+        types.ts                 # TradePlan、P&L、TrailingStop 类型
+        store.ts                 # 内存 + JSON 持久化
+        adapter.ts               # AI 工具（4 个）
       providers/
-        ccxt/                # 直连交易所（CCXT）
-        freqtrade/           # Freqtrade REST API 集成
-    securities-trading/      # Alpaca 集成、钱包、工具
-    brain/                   # 认知状态（前额叶记忆、情绪追踪）
-    browser/                 # OpenClaw 浏览器桥接（Vercel AI SDK 格式适配）
-    cron/                    # 定时任务管理工具
+        freqtrade/               # Freqtrade REST API
+        ccxt/                    # CCXT 直连
+    brain/                       # 认知状态
+    ashare/                      # A 股行情
+    browser/                     # 浏览器自动化
+    cron/                        # 定时任务
   connectors/
-    telegram/                # Telegram 机器人（轮询、命令、设置）
+    telegram/                    # Telegram 机器人
   plugins/
-    http.ts                  # HTTP Webhook 端点
-    mcp.ts                   # MCP Server 工具暴露
-  openclaw/                  # 底层基础平台（来自 OpenClaw 项目）
-    agents/                  # Agent 沙盒、工具策略、Glob 模式匹配
-    browser/                 # 完整浏览器引擎：Playwright/CDP、Chrome 配置文件、Extension Relay
-    channels/                # 插件/频道注册表
-    cli/                     # CLI 工具
-    gateway/                 # 认证、协议层、TypeBox schema 定义
-    infra/                   # Tailscale 组网、设备认证、TLS、端口检测
-    logging/                 # 结构化日志子系统
-    media/                   # 图片处理（sharp）
-    plugins/                 # 插件注册表和运行时
-    process/                 # 进程管理
-    routing/                 # 路由层
-    security/                # 安全工具
-    sessions/                # 会话管理工具
-    terminal/                # ANSI 终端 UI
+    http.ts                      # HTTP Webhook
+    mcp.ts                       # MCP Server
 data/
-  config/                    # JSON 配置文件（含 strategy-params.json 热更新策略参数）
-  sessions/                  # JSONL 对话历史
-  brain/                     # 前额叶记忆、情绪日志
-  signals/                   # 信号历史和结果跟踪
-  cron/                      # 定时任务持久化（jobs.json）
-  delivery-queue/            # 出站消息持久化队列（指数退避重试）
-  crypto-trading/            # 加密钱包提交历史
-  securities-trading/        # 证券钱包提交历史
-HEARTBEAT.md                 # 自主心跳监控指令（AI 每次心跳读取并执行）
+  config/                        # JSON 配置
+  trade-plans/                   # 交易计划持久化（active.json + history.json）
+  sessions/                      # JSONL 对话历史
+  brain/                         # 认知状态
+  signals/                       # 信号历史
 freqtrade/
   strategies/
-    TradeClaw.py             # 薄策略 — 不产生信号，AI 通过 forceentry/forceexit 控制
+    TradeClaw.py                 # Freqtrade 策略（无信号，AI 完全控制）
+HEARTBEAT.md                     # 自主心跳监控指令
 ```
 
 ## 许可证
