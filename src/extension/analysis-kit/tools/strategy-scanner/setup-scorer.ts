@@ -1,13 +1,15 @@
 /**
- * Multi-factor setup scorer — replaces independent strategy confluence.
+ * Multi-factor setup scorer v2 — 8-dimension scoring system.
  *
- * Scores each (symbol, direction) pair on 6 dimensions (0-100 total):
- *   1. Trend Alignment (25) — 4H regime + 1H SMA20
- *   2. Momentum (20)        — 15m RSI + MACD histogram
- *   3. Structure (20)       — swing proximity + break of structure
- *   4. Volume (15)          — volume ratio (trend vs mean-reversion)
- *   5. Volatility (10)      — BBWP + absolute bandwidth
- *   6. Funding (10)         — funding rate alignment
+ * Scores each (symbol, direction) pair on 8 dimensions (0-100 total):
+ *   1. Trend Strength  (15) — EMA spread + 1H SMA20
+ *   2. Momentum        (15) — 15m RSI + MACD + 1H RSI MTF gate
+ *   3. Acceleration    (10) — ROC delta (rate of change of rate of change)
+ *   4. Structure       (20) — FVG + validated BOS sequence + CHoCH
+ *   5. Candle Quality  (10) — body ratio + wick rejection + engulfing
+ *   6. Volume          (10) — volume ratio (trend vs mean-reversion)
+ *   7. Volatility      (10) — BBWP + absolute bandwidth
+ *   8. Funding         (10) — funding rate alignment
  *
  * All indicator functions are reused from helpers.ts.
  */
@@ -16,9 +18,10 @@ import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import type { MarketRegime } from './regime.js'
 import type { SetupScore, DimensionScore, SignalDirection, FundingRateInfo } from './types.js'
 import {
-  rsiSeries, macdHistogramSeries, emaSeries,
-  findSwingHighs, findSwingLows, atrSeries,
-  bandwidthSeries, sma,
+  rsiSeries, macdHistogramSeries,
+  findSwingHighs, findSwingLows,
+  bandwidthSeries, sma, rocSeries,
+  detectFVGs, validateBOSSequence,
 } from './helpers.js'
 import { getStrategyParamsFor } from './config.js'
 
@@ -29,46 +32,55 @@ function scoreTrend(
   regime: MarketRegime,
   bars1h: MarketData[],
 ): DimensionScore {
-  // 4H regime match (0-15)
-  let regimeScore = 0
-  if (
-    (regime.regime === 'uptrend' && direction === 'long') ||
-    (regime.regime === 'downtrend' && direction === 'short')
-  ) {
-    regimeScore = 15
-  } else if (regime.regime === 'ranging') {
-    regimeScore = 8
-  }
-  // counter-trend already filtered by Stage 1, but just in case:
-  // regimeScore = 0 for uptrend+short or downtrend+long
+  // EMA spread strength (0-10): continuous measure of trend strength
+  let spreadScore = 0
+  const spread = regime.emaSlow !== 0
+    ? ((regime.emaFast - regime.emaSlow) / regime.emaSlow) * 100
+    : 0
 
-  // 1H SMA20 trend match (0-10)
-  let trendScore = 5 // neutral default
+  if (regime.regime === 'ranging') {
+    spreadScore = 5 // neutral for ranging
+  } else if (direction === 'long') {
+    if (spread > 2) spreadScore = 10
+    else if (spread > 1) spreadScore = 7
+    else if (spread > 0.5) spreadScore = 4
+    else spreadScore = 2
+  } else {
+    // SHORT: negative spread is good
+    if (spread < -2) spreadScore = 10
+    else if (spread < -1) spreadScore = 7
+    else if (spread < -0.5) spreadScore = 4
+    else spreadScore = 2
+  }
+
+  // 1H SMA20 confirmation (0-5)
+  let trendScore = 3 // neutral default
   if (bars1h.length >= 20) {
     const closes1h = bars1h.map(b => b.close)
     const last1h = closes1h[closes1h.length - 1]
     const sma20 = closes1h.slice(-20).reduce((a, b) => a + b, 0) / 20
 
     if (direction === 'long') {
-      if (last1h > sma20 * 1.005) trendScore = 10
+      if (last1h > sma20 * 1.005) trendScore = 5
       else if (last1h < sma20 * 0.995) trendScore = 0
     } else {
-      if (last1h < sma20 * 0.995) trendScore = 10
+      if (last1h < sma20 * 0.995) trendScore = 5
       else if (last1h > sma20 * 1.005) trendScore = 0
     }
   }
 
-  const score = regimeScore + trendScore
-  const detail = `4H ${regime.regime} (${regimeScore}/15), 1H SMA20 (${trendScore}/10)`
-  return { score, max: 25, detail }
+  const score = spreadScore + trendScore
+  const detail = `EMA spread ${spread >= 0 ? '+' : ''}${spread.toFixed(2)}% (${spreadScore}/10), 1H SMA20 (${trendScore}/5)`
+  return { score, max: 15, detail }
 }
 
 function scoreMomentum(
   direction: SignalDirection,
   closes15m: number[],
+  bars1h: MarketData[],
   rsiPeriod: number,
 ): DimensionScore {
-  // RSI component (0-12)
+  // 15m RSI component (0-8)
   const rsiArr = rsiSeries(closes15m, rsiPeriod)
   let rsiScore = 0
   let rsiVal = 50
@@ -77,27 +89,25 @@ function scoreMomentum(
     rsiVal = rsiArr[rsiArr.length - 1]
 
     if (direction === 'long') {
-      if (rsiVal >= 30 && rsiVal < 45) rsiScore = 12      // oversold recovery (ideal)
-      else if (rsiVal >= 45 && rsiVal < 55) rsiScore = 8   // neutral
-      else if (rsiVal >= 55 && rsiVal < 65) rsiScore = 5   // mildly overbought
-      else if (rsiVal >= 65 && rsiVal < 70) rsiScore = 2   // approaching overbought
-      else if (rsiVal >= 70) rsiScore = 0                   // overbought — no long
-      else if (rsiVal >= 25 && rsiVal < 30) rsiScore = 6   // deeply oversold, bounce likely
-      else rsiScore = 3                                      // < 25: extreme oversold
+      if (rsiVal >= 30 && rsiVal < 45) rsiScore = 8        // oversold recovery (ideal)
+      else if (rsiVal >= 45 && rsiVal < 55) rsiScore = 5   // neutral
+      else if (rsiVal >= 55 && rsiVal < 65) rsiScore = 3   // mildly overbought
+      else if (rsiVal >= 65) rsiScore = 0                    // overbought — no long
+      else if (rsiVal >= 25) rsiScore = 4                    // deeply oversold, bounce likely
+      else rsiScore = 2                                       // < 25: extreme oversold
     } else {
-      if (rsiVal > 55 && rsiVal <= 70) rsiScore = 12       // overbought recovery (ideal)
-      else if (rsiVal > 45 && rsiVal <= 55) rsiScore = 8   // neutral
-      else if (rsiVal > 35 && rsiVal <= 45) rsiScore = 5   // mildly oversold
-      else if (rsiVal > 30 && rsiVal <= 35) rsiScore = 2   // approaching oversold
-      else if (rsiVal <= 30) rsiScore = 0                   // oversold — no short
-      else if (rsiVal > 70 && rsiVal <= 75) rsiScore = 6   // deeply overbought, drop likely
-      else rsiScore = 3                                      // > 75: extreme overbought
+      if (rsiVal > 55 && rsiVal <= 70) rsiScore = 8        // overbought recovery (ideal)
+      else if (rsiVal > 45 && rsiVal <= 55) rsiScore = 5   // neutral
+      else if (rsiVal > 35 && rsiVal <= 45) rsiScore = 3   // mildly oversold
+      else if (rsiVal <= 35) rsiScore = 0                    // oversold — no short
+      else if (rsiVal <= 75) rsiScore = 4                    // deeply overbought, drop likely
+      else rsiScore = 2                                       // > 75: extreme overbought
     }
   }
 
-  // MACD histogram component (0-8)
+  // MACD histogram component (0-5)
   const macdHist = macdHistogramSeries(closes15m)
-  let macdScore = 2 // neutral default
+  let macdScore = 1 // neutral default
   let macdDetail = 'neutral'
 
   if (macdHist.length >= 2) {
@@ -108,28 +118,76 @@ function scoreMomentum(
       ? current > prev
       : current < prev
 
-    // Zero-line reference: average absolute value of recent 10 bars
-    const recentSlice = macdHist.slice(-Math.min(10, macdHist.length))
-    const avgAbsHist = recentSlice.reduce((s, v) => s + Math.abs(v), 0) / recentSlice.length
-
     if (inDirection && accelerating) {
-      macdScore = 8
+      macdScore = 5
       macdDetail = 'in direction + accelerating'
     } else if (inDirection) {
-      macdScore = 5
+      macdScore = 3
       macdDetail = 'in direction, decelerating'
-    } else if (avgAbsHist > 0 && Math.abs(current) < avgAbsHist * 0.2) {
-      macdScore = 2
-      macdDetail = 'near zero'
     } else {
       macdScore = 0
       macdDetail = 'against direction'
     }
   }
 
-  const score = rsiScore + macdScore
-  const detail = `RSI ${rsiVal.toFixed(0)} (${rsiScore}/12), MACD ${macdDetail} (${macdScore}/8)`
-  return { score, max: 20, detail }
+  // 1H RSI MTF penalty (0 to -3)
+  let mtfPenalty = 0
+  let mtfDetail = ''
+  if (bars1h.length >= 15) {
+    const closes1h = bars1h.map(b => b.close)
+    const rsi1h = rsiSeries(closes1h, 14)
+    if (rsi1h.length > 0) {
+      const rsi1hVal = rsi1h[rsi1h.length - 1]
+      if (direction === 'long' && rsi1hVal > 70) {
+        mtfPenalty = -3
+        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OB penalty`
+      } else if (direction === 'long' && rsi1hVal > 60) {
+        mtfPenalty = -1
+        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} mild OB`
+      } else if (direction === 'short' && rsi1hVal < 30) {
+        mtfPenalty = -3
+        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OS penalty`
+      } else if (direction === 'short' && rsi1hVal < 40) {
+        mtfPenalty = -1
+        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} mild OS`
+      }
+    }
+  }
+
+  const score = Math.max(0, rsiScore + macdScore + mtfPenalty)
+  const detail = `RSI ${rsiVal.toFixed(0)} (${rsiScore}/8), MACD ${macdDetail} (${macdScore}/5)${mtfDetail}`
+  return { score, max: 15, detail }
+}
+
+function scoreAcceleration(
+  direction: SignalDirection,
+  closes15m: number[],
+): DimensionScore {
+  const roc5 = rocSeries(closes15m, 5)
+
+  if (roc5.length < 10) {
+    return { score: 5, max: 10, detail: 'insufficient data' }
+  }
+
+  // Acceleration = change in ROC over last 5 bars
+  const rocDelta = roc5[roc5.length - 1] - roc5[roc5.length - 6]
+
+  let score: number
+  if (direction === 'long') {
+    if (rocDelta > 0.5) score = 10
+    else if (rocDelta > 0.2) score = 7
+    else if (rocDelta > 0) score = 4
+    else score = 1
+  } else {
+    // SHORT: negative acceleration (momentum accelerating down) is good
+    if (rocDelta < -0.5) score = 10
+    else if (rocDelta < -0.2) score = 7
+    else if (rocDelta < 0) score = 4
+    else score = 1
+  }
+
+  const detail = `ROC delta ${rocDelta >= 0 ? '+' : ''}${rocDelta.toFixed(3)}`
+  return { score, max: 10, detail }
 }
 
 function scoreStructure(
@@ -148,7 +206,6 @@ function scoreStructure(
   const offset = rsiPeriod
   const aHighs = highs15m.slice(offset)
   const aLows = lows15m.slice(offset)
-  const aCloses = closes15m.slice(offset)
   const aVols = volumes15m.slice(offset)
   const len = Math.min(aHighs.length, rsiArr.length, aVols.length)
 
@@ -157,77 +214,152 @@ function scoreStructure(
   const rSlice = rsiArr.slice(0, len)
   const vSlice = aVols.slice(0, len)
 
-  // Swing proximity (0-12)
-  let proximityScore = 4 // default: no nearby level
-  let proximityDetail = 'no nearby level'
+  const swingHighs = findSwingHighs(hSlice, rSlice, vSlice, swingWindow)
+  const swingLows = findSwingLows(lSlice, rSlice, vSlice, swingWindow)
 
-  if (direction === 'long') {
-    const swingLows = findSwingLows(lSlice, rSlice, vSlice, swingWindow)
-    if (swingLows.length > 0) {
-      const nearest = swingLows[swingLows.length - 1]
-      const distPct = ((currentPrice - nearest.price) / nearest.price) * 100
-      if (distPct >= 0 && distPct <= 1) {
-        proximityScore = 12
-        proximityDetail = `at support $${nearest.price.toFixed(2)} (${distPct.toFixed(1)}%)`
-      } else if (distPct >= 0 && distPct <= 2) {
-        proximityScore = 8
-        proximityDetail = `near support $${nearest.price.toFixed(2)} (${distPct.toFixed(1)}%)`
-      }
-    }
-  } else {
-    const swingHighs = findSwingHighs(hSlice, rSlice, vSlice, swingWindow)
-    if (swingHighs.length > 0) {
-      const nearest = swingHighs[swingHighs.length - 1]
-      const distPct = ((nearest.price - currentPrice) / nearest.price) * 100
-      if (distPct >= 0 && distPct <= 1) {
-        proximityScore = 12
-        proximityDetail = `at resistance $${nearest.price.toFixed(2)} (${distPct.toFixed(1)}%)`
-      } else if (distPct >= 0 && distPct <= 2) {
-        proximityScore = 8
-        proximityDetail = `near resistance $${nearest.price.toFixed(2)} (${distPct.toFixed(1)}%)`
+  // --- FVG proximity (0-6) ---
+  let fvgScore = 0
+  let fvgDetail = 'no FVG'
+
+  // Use full aligned highs/lows for FVG detection
+  const fvgs = detectFVGs(hSlice, lSlice, direction)
+  if (fvgs.length > 0) {
+    // Find the nearest FVG to current price (look at last 30 bars)
+    const recentFVGs = fvgs.filter(f => len - 1 - f.index <= 30)
+    for (const fvg of recentFVGs.reverse()) {
+      const gapMid = (fvg.gapHigh + fvg.gapLow) / 2
+      const distPct = Math.abs((currentPrice - gapMid) / gapMid) * 100
+
+      // Check if price is within or near the FVG
+      const inGap = currentPrice >= fvg.gapLow && currentPrice <= fvg.gapHigh
+      if (inGap || distPct <= 0.5) {
+        fvgScore = 6
+        fvgDetail = `in FVG $${fvg.gapLow.toFixed(2)}-$${fvg.gapHigh.toFixed(2)}`
+        break
+      } else if (distPct <= 1.0) {
+        fvgScore = 3
+        fvgDetail = `near FVG $${fvg.gapLow.toFixed(2)}-$${fvg.gapHigh.toFixed(2)} (${distPct.toFixed(1)}%)`
+        break
       }
     }
   }
 
-  // Break of Structure (0-8)
+  // --- BOS validation (0-10) ---
   let bosScore = 0
   let bosDetail = 'no BOS'
 
-  if (direction === 'long') {
-    const swingHighs = findSwingHighs(hSlice, rSlice, vSlice, swingWindow)
-    if (swingHighs.length > 0) {
-      const recentHigh = swingHighs[swingHighs.length - 1]
-      const age = len - 1 - recentHigh.index
-      const breakPct = ((currentPrice - recentHigh.price) / recentHigh.price) * 100
+  const bosResult = validateBOSSequence(swingHighs, swingLows, direction)
+  if (bosResult.bosConfirmed) {
+    // Check recency: latest swing should be within 20 bars
+    const relevantSwing = direction === 'long'
+      ? swingHighs[swingHighs.length - 1]
+      : swingLows[swingLows.length - 1]
+    const age = relevantSwing ? len - 1 - relevantSwing.index : 999
 
-      if (breakPct > 0 && age <= 30) {
-        bosScore = 8
-        bosDetail = `BOS above $${recentHigh.price.toFixed(2)} (+${breakPct.toFixed(1)}%, ${age} bars ago)`
-      } else if (breakPct > -0.5 && breakPct <= 0) {
-        bosScore = 4
-        bosDetail = `approaching swing high $${recentHigh.price.toFixed(2)} (${breakPct.toFixed(1)}%)`
-      }
+    if (age <= 20) {
+      bosScore = 10
+      bosDetail = bosResult.detail
+    } else {
+      bosScore = 6
+      bosDetail = `${bosResult.detail} (${age} bars ago)`
     }
-  } else {
-    const swingLows = findSwingLows(lSlice, rSlice, vSlice, swingWindow)
-    if (swingLows.length > 0) {
-      const recentLow = swingLows[swingLows.length - 1]
-      const age = len - 1 - recentLow.index
-      const breakPct = ((recentLow.price - currentPrice) / recentLow.price) * 100
+  } else if (bosResult.detail.includes('HH') || bosResult.detail.includes('LL')) {
+    // Partial BOS (e.g. HH but no HL)
+    bosScore = 3
+    bosDetail = bosResult.detail
+  }
 
-      if (breakPct > 0 && age <= 30) {
-        bosScore = 8
-        bosDetail = `BOS below $${recentLow.price.toFixed(2)} (-${breakPct.toFixed(1)}%, ${age} bars ago)`
-      } else if (breakPct > -0.5 && breakPct <= 0) {
-        bosScore = 4
-        bosDetail = `approaching swing low $${recentLow.price.toFixed(2)} (${breakPct.toFixed(1)}%)`
+  // --- CHoCH bonus (0-4) ---
+  let chochScore = 0
+  let chochDetail = ''
+
+  if (bosResult.choch) {
+    chochScore = 4
+    chochDetail = `, CHoCH +4`
+  }
+
+  const score = fvgScore + bosScore + chochScore
+  const detail = `${fvgDetail} (${fvgScore}/6), ${bosDetail} (${bosScore}/10)${chochDetail}`
+  return { score, max: 20, detail }
+}
+
+function scoreCandleQuality(
+  direction: SignalDirection,
+  bars15m: MarketData[],
+): DimensionScore {
+  if (bars15m.length < 2) return { score: 5, max: 10, detail: 'insufficient data' }
+
+  const current = bars15m[bars15m.length - 1]
+  const prev = bars15m[bars15m.length - 2]
+
+  const body = Math.abs(current.close - current.open)
+  const range = current.high - current.low
+  const isBullish = current.close > current.open
+
+  // Body-to-range ratio (0-4)
+  let bodyScore = 0
+  const bodyRatio = range > 0 ? body / range : 0
+  if (bodyRatio > 0.7) bodyScore = 4
+  else if (bodyRatio > 0.5) bodyScore = 2
+  // < 0.3 or doji = 0
+
+  // Wick rejection (0-3)
+  let wickScore = 0
+  let wickDetail = ''
+  if (range > 0) {
+    const upperWick = current.high - Math.max(current.close, current.open)
+    const lowerWick = Math.min(current.close, current.open) - current.low
+    const closePos = (current.close - current.low) / range // 0 = bottom, 1 = top
+
+    if (direction === 'long') {
+      // Lower wick rejection: strong buying pressure from below
+      if (body > 0 && lowerWick > body * 2 && closePos > 0.66) {
+        wickScore = 3
+        wickDetail = 'strong lower wick rejection'
+      } else if (body > 0 && lowerWick > body && closePos > 0.5) {
+        wickScore = 1
+        wickDetail = 'lower wick'
+      }
+    } else {
+      // Upper wick rejection: strong selling pressure from above
+      if (body > 0 && upperWick > body * 2 && closePos < 0.33) {
+        wickScore = 3
+        wickDetail = 'strong upper wick rejection'
+      } else if (body > 0 && upperWick > body && closePos < 0.5) {
+        wickScore = 1
+        wickDetail = 'upper wick'
       }
     }
   }
 
-  const score = proximityScore + bosScore
-  const detail = `${proximityDetail} (${proximityScore}/12), ${bosDetail} (${bosScore}/8)`
-  return { score, max: 20, detail }
+  // Engulfing pattern (0-3)
+  let engulfScore = 0
+  let engulfDetail = ''
+  const prevBullish = prev.close > prev.open
+  const prevBody = Math.abs(prev.close - prev.open)
+
+  if (direction === 'long' && isBullish && !prevBullish && prevBody > 0) {
+    // Bullish engulfing: current close > prev open, current open < prev close
+    if (current.close > prev.open && current.open < prev.close) {
+      engulfScore = 3
+      engulfDetail = 'bullish engulfing'
+    }
+  } else if (direction === 'short' && !isBullish && prevBullish && prevBody > 0) {
+    // Bearish engulfing: current close < prev open, current open > prev close
+    if (current.close < prev.open && current.open > prev.close) {
+      engulfScore = 3
+      engulfDetail = 'bearish engulfing'
+    }
+  }
+
+  const score = bodyScore + wickScore + engulfScore
+  const details = [
+    `body ${(bodyRatio * 100).toFixed(0)}% (${bodyScore}/4)`,
+    wickDetail || 'no wick signal',
+    engulfDetail || 'no engulfing',
+  ].join(', ')
+
+  return { score, max: 10, detail: details }
 }
 
 function scoreVolume(
@@ -246,19 +378,19 @@ function scoreVolume(
 
   if (regime === 'uptrend' || regime === 'downtrend') {
     // Trend mode: high volume = strong confirmation
-    if (volRatio > 1.5) { score = 15; detail = `${volRatio.toFixed(1)}x avg (strong trend confirm)` }
-    else if (volRatio > 1.2) { score = 10; detail = `${volRatio.toFixed(1)}x avg (confirm)` }
-    else if (volRatio >= 0.8) { score = 5; detail = `${volRatio.toFixed(1)}x avg (normal)` }
-    else { score = 2; detail = `${volRatio.toFixed(1)}x avg (weak)` }
+    if (volRatio > 1.5) { score = 10; detail = `${volRatio.toFixed(1)}x avg (strong trend confirm)` }
+    else if (volRatio > 1.2) { score = 7; detail = `${volRatio.toFixed(1)}x avg (confirm)` }
+    else if (volRatio >= 0.8) { score = 4; detail = `${volRatio.toFixed(1)}x avg (normal)` }
+    else { score = 1; detail = `${volRatio.toFixed(1)}x avg (weak)` }
   } else {
     // Ranging mode: low volume = exhaustion (mean-reversion)
-    if (volRatio < 0.7) { score = 12; detail = `${volRatio.toFixed(1)}x avg (exhaustion)` }
-    else if (volRatio < 0.9) { score = 8; detail = `${volRatio.toFixed(1)}x avg (low)` }
-    else if (volRatio <= 1.3) { score = 5; detail = `${volRatio.toFixed(1)}x avg (normal)` }
-    else { score = 2; detail = `${volRatio.toFixed(1)}x avg (too high for ranging)` }
+    if (volRatio < 0.7) { score = 8; detail = `${volRatio.toFixed(1)}x avg (exhaustion)` }
+    else if (volRatio < 0.9) { score = 6; detail = `${volRatio.toFixed(1)}x avg (low)` }
+    else if (volRatio <= 1.3) { score = 4; detail = `${volRatio.toFixed(1)}x avg (normal)` }
+    else { score = 1; detail = `${volRatio.toFixed(1)}x avg (too high for ranging)` }
   }
 
-  return { score, max: 15, detail }
+  return { score, max: 10, detail }
 }
 
 function scoreVolatility(
@@ -363,14 +495,16 @@ export async function scoreSetup(
   const rsiArr = rsiSeries(closes, RSI_PERIOD)
 
   const trend = scoreTrend(direction, regime, bars1h)
-  const momentum = scoreMomentum(direction, closes, RSI_PERIOD)
+  const momentum = scoreMomentum(direction, closes, bars1h, RSI_PERIOD)
+  const acceleration = scoreAcceleration(direction, closes)
   const structure = scoreStructure(direction, closes, highs, lows, rsiArr, volumes, SWING_WINDOW)
+  const candle = scoreCandleQuality(direction, bars15m)
   const volume = scoreVolume(regime.regime, volumes, VOL_AVG_PERIOD)
   const volatility = scoreVolatility(closes, BB_PERIOD, BB_MULT, BBWP_LOOKBACK)
   const fundingScore = scoreFunding(direction, funding)
 
-  const totalScore = trend.score + momentum.score + structure.score
-    + volume.score + volatility.score + fundingScore.score
+  const totalScore = trend.score + momentum.score + acceleration.score + structure.score
+    + candle.score + volume.score + volatility.score + fundingScore.score
 
   return {
     symbol,
@@ -380,7 +514,9 @@ export async function scoreSetup(
     dimensions: {
       trend,
       momentum,
+      acceleration,
       structure,
+      candle,
       volume,
       volatility,
       funding: fundingScore,

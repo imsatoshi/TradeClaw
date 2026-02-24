@@ -48,7 +48,7 @@ const ohlcvCache = new Map<string, CacheEntry>()
 
 // Signal dedup — prevent logging identical triggered signals within cooldown window
 const signalCooldown = new Map<string, number>()  // key → timestamp of last log
-const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000  // 30 minutes
+const SIGNAL_COOLDOWN_MS = 2 * 60 * 60 * 1000  // 2 hours
 let CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes (overridden by config)
 
 function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
@@ -260,7 +260,9 @@ export async function runStrategyScan(
       regime: ps.regime,
       trend: ps.dimensions.trend.score,
       momentum: ps.dimensions.momentum.score,
+      acceleration: ps.dimensions.acceleration.score,
       structure: ps.dimensions.structure.score,
+      candle: ps.dimensions.candle.score,
       volume: ps.dimensions.volume.score,
       volatility: ps.dimensions.volatility.score,
       funding: ps.dimensions.funding.score,

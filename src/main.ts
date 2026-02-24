@@ -243,7 +243,7 @@ async function main() {
     '### AI Trading Workflow (every heartbeat):',
     '',
     '**Step 1: Evaluate setup scores (multi-factor pipeline)**',
-    '- Check SETUP SCORES — each symbol is scored on 6 dimensions (Trend, Momentum, Structure, Volume, Volatility, Funding)',
+    '- Check SETUP SCORES — each symbol is scored on 8 dimensions (Trend, Momentum, Acceleration, Structure, Candle, Volume, Volatility, Funding)',
     '- Decision framework based on setup score grade:',
     '  → Grade A (score ≥ 70) with ENTRY ✓: propose via proposeTradeWithButtons',
     '  → Grade A without entry trigger: alert user — setup is strong but waiting for 15m confirmation',
@@ -594,7 +594,9 @@ async function main() {
             parts.push(
               `   Trend: ${d.trend.score}/${d.trend.max} (${d.trend.detail})`,
               `   Momentum: ${d.momentum.score}/${d.momentum.max} (${d.momentum.detail})`,
+              `   Acceleration: ${d.acceleration.score}/${d.acceleration.max} (${d.acceleration.detail})`,
               `   Structure: ${d.structure.score}/${d.structure.max} (${d.structure.detail})`,
+              `   Candle: ${d.candle.score}/${d.candle.max} (${d.candle.detail})`,
               `   Volume: ${d.volume.score}/${d.volume.max} (${d.volume.detail})`,
               `   Volatility: ${d.volatility.score}/${d.volatility.max} (${d.volatility.detail})`,
               `   Funding: ${d.funding.score}/${d.funding.max} (${d.funding.detail})`,

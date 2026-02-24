@@ -45,14 +45,20 @@ export function checkEntryTrigger(
   const aLows = lows.slice(offset, offset + len)
   const aVols = volumes.slice(offset, offset + len)
 
+  // Minimum body filter — reject doji/noise candles
+  const minBody = 0.3 * atr
+  const currentBody = Math.abs(current.close - current.open)
+  if (currentBody < minBody) return null
+
   let triggered = false
   let reason = ''
 
   if (direction === 'long') {
-    // Trigger 1: Bullish confirmation — current close > previous high + volume above average
-    if (current.close > prev.high && currentVol > avgVol20) {
+    // Trigger 1: Bullish confirmation — current close > previous high + break margin + volume above average
+    const breakMargin = 0.15 * atr
+    if (current.close > prev.high + breakMargin && currentVol > avgVol20) {
       triggered = true
-      reason = `bullish confirm: close $${current.close.toFixed(4)} > prev high $${prev.high.toFixed(4)}, vol ${(currentVol / avgVol20).toFixed(1)}x`
+      reason = `bullish confirm: close $${current.close.toFixed(4)} > prev high $${prev.high.toFixed(4)} +margin, vol ${(currentVol / avgVol20).toFixed(1)}x`
     }
 
     // Trigger 2: Support bounce — at swing low + bullish candle with meaningful lower wick
@@ -77,9 +83,9 @@ export function checkEntryTrigger(
       if (swingHighs.length > 0) {
         const recentHigh = swingHighs[swingHighs.length - 1]
         const age = len - 1 - recentHigh.index
-        // Check if we're near the swing high level (within ±0.5%) and above it
+        // Check if we're near the swing high level (within ±0.3%) and above it
         const distPct = ((entry - recentHigh.price) / recentHigh.price) * 100
-        if (age <= 20 && distPct >= -0.5 && distPct <= 1.0 && current.close > current.open) {
+        if (age <= 12 && distPct >= -0.3 && distPct <= 1.0 && current.close > current.open) {
           triggered = true
           reason = `BOS pullback: retesting swing high $${recentHigh.price.toFixed(2)} (${distPct.toFixed(1)}%, ${age} bars ago)`
         }
@@ -96,6 +102,10 @@ export function checkEntryTrigger(
       sl = Math.max(sl, nearestLow - 0.1 * atr)
     }
 
+    // Enforce minimum SL distance of 0.5×ATR
+    const minSlDist = 0.5 * atr
+    if (entry - sl < minSlDist) sl = entry - minSlDist
+
     // 3-tier TP
     const tp1 = entry + 1.5 * atr
     const tp2 = entry + 3.0 * atr
@@ -105,7 +115,7 @@ export function checkEntryTrigger(
     if (slDist <= 0) return null
 
     const weightedTP = tp1 * 0.4 + tp2 * 0.3 + tp3 * 0.3
-    const rr = (weightedTP - entry) / slDist
+    const rr = Math.min((weightedTP - entry) / slDist, 5.0) // cap R:R at 5.0
 
     if (rr < 1.8) return null // minimum R:R requirement
 
@@ -124,10 +134,11 @@ export function checkEntryTrigger(
   } else {
     // SHORT triggers (mirror logic)
 
-    // Trigger 1: Bearish confirmation — current close < previous low + volume above average
-    if (current.close < prev.low && currentVol > avgVol20) {
+    // Trigger 1: Bearish confirmation — current close < previous low - break margin + volume above average
+    const breakMargin = 0.15 * atr
+    if (current.close < prev.low - breakMargin && currentVol > avgVol20) {
       triggered = true
-      reason = `bearish confirm: close $${current.close.toFixed(4)} < prev low $${prev.low.toFixed(4)}, vol ${(currentVol / avgVol20).toFixed(1)}x`
+      reason = `bearish confirm: close $${current.close.toFixed(4)} < prev low $${prev.low.toFixed(4)} -margin, vol ${(currentVol / avgVol20).toFixed(1)}x`
     }
 
     // Trigger 2: Resistance rejection — at swing high + bearish candle with upper wick
@@ -153,7 +164,7 @@ export function checkEntryTrigger(
         const recentLow = swingLows[swingLows.length - 1]
         const age = len - 1 - recentLow.index
         const distPct = ((recentLow.price - entry) / recentLow.price) * 100
-        if (age <= 20 && distPct >= -0.5 && distPct <= 1.0 && current.close < current.open) {
+        if (age <= 12 && distPct >= -0.3 && distPct <= 1.0 && current.close < current.open) {
           triggered = true
           reason = `BOS pullback: retesting swing low $${recentLow.price.toFixed(2)} (${distPct.toFixed(1)}%, ${age} bars ago)`
         }
@@ -170,6 +181,10 @@ export function checkEntryTrigger(
       sl = Math.min(sl, nearestHigh + 0.1 * atr)
     }
 
+    // Enforce minimum SL distance of 0.5×ATR
+    const minSlDist = 0.5 * atr
+    if (sl - entry < minSlDist) sl = entry + minSlDist
+
     // 3-tier TP
     const tp1 = entry - 1.5 * atr
     const tp2 = entry - 3.0 * atr
@@ -179,9 +194,9 @@ export function checkEntryTrigger(
     if (slDist <= 0) return null
 
     const weightedTP = tp1 * 0.4 + tp2 * 0.3 + tp3 * 0.3
-    const rr = (entry - weightedTP) / slDist
+    const rr = Math.min((entry - weightedTP) / slDist, 5.0) // cap R:R at 5.0
 
-    if (rr < 1.5) return null
+    if (rr < 1.8) return null // match LONG min R:R
 
     return {
       triggered: true,
