@@ -495,6 +495,9 @@ async function main() {
       }
     }
 
+    // Detailed data (stats, weights, memory, pair perf) only on cron/manual ticks — saves ~40% tokens on regular heartbeats
+    const isDetailedTick = reason === 'cron' || reason === 'manual' || systemEvents.some(e => e.source === 'cron')
+
     // Pre-fetch live trading data + strategy scan — guaranteed fresh, no LLM dependency
     let liveDataBlock = ''
     try {
@@ -536,30 +539,17 @@ async function main() {
         : {}
       console.log('heartbeat: funding rates OK')
 
-      // Build market regime block (replaces strategy signals)
+      // Build market regime block — summary only (per-symbol regime is already in pipeline scores)
       let regimeBlock = ''
       if (regimeResults.length > 0) {
-        const regimeLines = regimeResults.map((r) => {
-          const icon = r.regime === 'downtrend' ? '\u26A0\uFE0F' // ⚠️
-            : r.regime === 'uptrend' ? '\u2713' // ✓
-            : '\u2014' // —
-          const label = r.regime.toUpperCase()
-          const directionNote = r.regime === 'downtrend' ? ' → prefer SHORT'
-            : r.regime === 'uptrend' ? ' → prefer LONG'
-            : ' → neutral, range-trade'
-          return `${r.symbol}: ${icon} ${label} — ${r.reason}${directionNote}`
-        })
-
         const downCount = regimeResults.filter((r) => r.regime === 'downtrend').length
         const upCount = regimeResults.filter((r) => r.regime === 'uptrend').length
         const rangingCount = regimeResults.filter((r) => r.regime === 'ranging').length
 
         regimeBlock = [
           '',
-          '--- MARKET REGIME (4H EMA9/21/55 trend detection) ---',
-          `Summary: ${downCount} downtrend, ${upCount} uptrend, ${rangingCount} ranging out of ${regimeResults.length} pairs`,
-          '',
-          ...regimeLines,
+          '--- MARKET REGIME (4H) ---',
+          `${upCount} uptrend, ${downCount} downtrend, ${rangingCount} ranging (${regimeResults.length} pairs)`,
         ].join('\n')
       }
 
@@ -584,11 +574,10 @@ async function main() {
         )
 
         if (pipeline.length > 0) {
-          // Show all scored setups (Grade A first, then B, then top C for context)
+          // Only show Grade A and B — C-grade adds tokens without aiding decisions
           const toShow = [
             ...pipeline.filter(s => s.grade === 'A'),
             ...pipeline.filter(s => s.grade === 'B'),
-            ...pipeline.filter(s => s.grade === 'C').slice(0, 3), // top 3 C-grade for context
           ]
 
           for (let i = 0; i < toShow.length; i++) {
@@ -643,54 +632,54 @@ async function main() {
         strategyBlock = parts.join('\n')
       }
 
-      // Build signal stats block
+      // Signal stats, strategy weights, trade memory — only on detailed ticks (changes slowly)
       let statsBlock = ''
-      if (signalStats && Object.keys(signalStats).length > 0) {
-        const lines = Object.entries(signalStats).map(([strategy, s]: [string, any]) =>
-          `${strategy}: ${s.total} signals, ${s.wins} wins, ${s.losses} losses, winRate=${s.winRate}, avgPnl=${s.avgPnl}`
-        )
-        statsBlock = [
-          '',
-          '--- SIGNAL STATS (historical performance) ---',
-          ...lines,
-        ].join('\n')
-      }
-
-      // Build strategy weights block (dynamic, auto-adjusted by win rate)
       let weightsBlock = ''
-      const weights = scanResult?.strategyWeights
-      if (weights && Object.keys(weights).length > 0) {
-        const wLines = Object.values(weights).map((w: StrategyWeight) => {
-          if (w.muted) return `${w.strategy}: MUTED (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← AUTO-DISABLED`
-          if (w.weight < 0.8) return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← UNDERWEIGHT`
-          if (w.weight > 1.1) return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← BOOSTED`
-          return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades)`
-        })
-        weightsBlock = [
-          '',
-          '--- STRATEGY WEIGHTS (auto-adjusted by win rate) ---',
-          ...wLines,
-        ].join('\n')
-      }
-
-      // Build trade memory block (structured lessons from past trades)
       let memoryBlock = ''
-      if (tradeMemory && (tradeMemory.patterns.length > 0 || tradeMemory.recentLessons.length > 0)) {
-        const mLines: string[] = []
-        // Show top patterns (most samples first, max 5)
-        const topPatterns = [...tradeMemory.patterns]
-          .sort((a, b) => b.samples - a.samples)
-          .slice(0, 5)
-        for (const p of topPatterns) {
-          mLines.push(`- ${p.id}: ${p.winRate}% winRate (${p.samples} trades, avgPnl ${p.avgPnl > 0 ? '+' : ''}${p.avgPnl}%) — "${p.lesson}"`)
+
+      if (isDetailedTick) {
+        if (signalStats && Object.keys(signalStats).length > 0) {
+          const lines = Object.entries(signalStats).map(([strategy, s]: [string, any]) =>
+            `${strategy}: ${s.total} signals, ${s.wins} wins, ${s.losses} losses, winRate=${s.winRate}, avgPnl=${s.avgPnl}`
+          )
+          statsBlock = [
+            '',
+            '--- SIGNAL STATS (historical performance) ---',
+            ...lines,
+          ].join('\n')
         }
-        if (tradeMemory.recentLessons.length > 0) {
-          mLines.push('Recent lessons:')
-          for (const l of tradeMemory.recentLessons.slice(0, 5)) {
-            mLines.push(`  - ${l}`)
+
+        const weights = scanResult?.strategyWeights
+        if (weights && Object.keys(weights).length > 0) {
+          const wLines = Object.values(weights).map((w: StrategyWeight) => {
+            if (w.muted) return `${w.strategy}: MUTED (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← AUTO-DISABLED`
+            if (w.weight < 0.8) return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← UNDERWEIGHT`
+            if (w.weight > 1.1) return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades) ← BOOSTED`
+            return `${w.strategy}: weight=${w.weight} (winRate=${Math.round(w.winRate * 100)}%, ${w.sampleSize} trades)`
+          })
+          weightsBlock = [
+            '',
+            '--- STRATEGY WEIGHTS (auto-adjusted by win rate) ---',
+            ...wLines,
+          ].join('\n')
+        }
+
+        if (tradeMemory && (tradeMemory.patterns.length > 0 || tradeMemory.recentLessons.length > 0)) {
+          const mLines: string[] = []
+          const topPatterns = [...tradeMemory.patterns]
+            .sort((a, b) => b.samples - a.samples)
+            .slice(0, 5)
+          for (const p of topPatterns) {
+            mLines.push(`- ${p.id}: ${p.winRate}% winRate (${p.samples} trades, avgPnl ${p.avgPnl > 0 ? '+' : ''}${p.avgPnl}%) — "${p.lesson}"`)
           }
+          if (tradeMemory.recentLessons.length > 0) {
+            mLines.push('Recent lessons:')
+            for (const l of tradeMemory.recentLessons.slice(0, 5)) {
+              mLines.push(`  - ${l}`)
+            }
+          }
+          memoryBlock = ['', '--- TRADE MEMORY (learned patterns) ---', ...mLines].join('\n')
         }
-        memoryBlock = ['', '--- TRADE MEMORY (learned patterns) ---', ...mLines].join('\n')
       }
 
       // Build Freqtrade bot status + entry/exit stats block
@@ -721,27 +710,30 @@ async function main() {
           )
         }
 
-        // Entry tag performance
-        if (ftData.entryStats && Array.isArray(ftData.entryStats)) {
-          parts.push('', '--- ENTRY SIGNAL PERFORMANCE ---')
-          for (const tag of ftData.entryStats) {
-            const winRate = tag.trades > 0 ? ((tag.wins / tag.trades) * 100).toFixed(0) : '0'
-            const flag = tag.trades >= 10 && (tag.wins / tag.trades) < 0.4 ? ' ← UNDERPERFORMING' : ''
-            parts.push(
-              `Tag "${tag.enter_tag}": ${tag.trades} trades, ${tag.wins} wins, winRate=${winRate}%, avgProfit=${tag.profit_mean != null ? (tag.profit_mean > 0 ? '+' : '') + (tag.profit_mean * 100).toFixed(1) + '%' : 'N/A'}${flag}`
-            )
+        // Entry/exit stats — only on detailed ticks (cron/manual) to save tokens
+        if (isDetailedTick) {
+          // Entry tag performance
+          if (ftData.entryStats && Array.isArray(ftData.entryStats)) {
+            parts.push('', '--- ENTRY SIGNAL PERFORMANCE ---')
+            for (const tag of ftData.entryStats) {
+              const winRate = tag.trades > 0 ? ((tag.wins / tag.trades) * 100).toFixed(0) : '0'
+              const flag = tag.trades >= 10 && (tag.wins / tag.trades) < 0.4 ? ' ← UNDERPERFORMING' : ''
+              parts.push(
+                `Tag "${tag.enter_tag}": ${tag.trades} trades, ${tag.wins} wins, winRate=${winRate}%, avgProfit=${tag.profit_mean != null ? (tag.profit_mean > 0 ? '+' : '') + (tag.profit_mean * 100).toFixed(1) + '%' : 'N/A'}${flag}`
+              )
+            }
           }
-        }
 
-        // Exit reason distribution
-        if (ftData.exitStats && Array.isArray(ftData.exitStats)) {
-          const totalExits = ftData.exitStats.reduce((s: number, e: any) => s + (e.trades || 0), 0)
-          parts.push('', '--- EXIT REASON DISTRIBUTION ---')
-          for (const reason of ftData.exitStats) {
-            const pct = totalExits > 0 ? ((reason.trades / totalExits) * 100).toFixed(0) : '0'
-            parts.push(
-              `${reason.exit_reason}: ${reason.trades} trades (${pct}%), avg profit=${reason.profit_mean != null ? (reason.profit_mean > 0 ? '+' : '') + (reason.profit_mean * 100).toFixed(1) + '%' : 'N/A'}`
-            )
+          // Exit reason distribution
+          if (ftData.exitStats && Array.isArray(ftData.exitStats)) {
+            const totalExits = ftData.exitStats.reduce((s: number, e: any) => s + (e.trades || 0), 0)
+            parts.push('', '--- EXIT REASON DISTRIBUTION ---')
+            for (const reason of ftData.exitStats) {
+              const pct = totalExits > 0 ? ((reason.trades / totalExits) * 100).toFixed(0) : '0'
+              parts.push(
+                `${reason.exit_reason}: ${reason.trades} trades (${pct}%), avg profit=${reason.profit_mean != null ? (reason.profit_mean > 0 ? '+' : '') + (reason.profit_mean * 100).toFixed(1) + '%' : 'N/A'}`
+              )
+            }
           }
         }
 
@@ -756,29 +748,30 @@ async function main() {
           parts.push('(no pending orders)')
         }
 
-        // Daily P&L (last 7 days)
-        if (ftData.dailyStats && ftData.dailyStats.data) {
-          parts.push('', '--- DAILY P&L (last 7 days) ---')
-          for (const day of ftData.dailyStats.data) {
-            const pnl = day.abs_profit ?? 0
-            const icon = pnl > 0 ? '📈' : pnl < 0 ? '📉' : '➖'
-            parts.push(`${day.date}: ${icon} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT (${day.trade_count ?? 0} trades)`)
+        // Daily P&L + pair performance — only on detailed ticks
+        if (isDetailedTick) {
+          if (ftData.dailyStats && ftData.dailyStats.data) {
+            parts.push('', '--- DAILY P&L (last 7 days) ---')
+            for (const day of ftData.dailyStats.data) {
+              const pnl = day.abs_profit ?? 0
+              const icon = pnl > 0 ? '📈' : pnl < 0 ? '📉' : '➖'
+              parts.push(`${day.date}: ${icon} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT (${day.trade_count ?? 0} trades)`)
+            }
           }
-        }
 
-        // Per-pair performance (top 5 best + worst 3)
-        if (ftData.pairPerformance && Array.isArray(ftData.pairPerformance) && ftData.pairPerformance.length > 0) {
-          const sorted = [...ftData.pairPerformance].sort((a: any, b: any) => (b.profit ?? 0) - (a.profit ?? 0))
-          parts.push('', '--- PAIR PERFORMANCE (sorted by profit) ---')
-          const top5 = sorted.slice(0, 5)
-          const worst3 = sorted.slice(-3).reverse()
-          for (const p of top5) {
-            parts.push(`🟢 ${p.pair}: ${p.profit >= 0 ? '+' : ''}${p.profit?.toFixed(2) ?? '?'}% (${p.count ?? '?'} trades)`)
-          }
-          if (worst3.length > 0 && worst3[0] !== top5[top5.length - 1]) {
-            parts.push('...')
-            for (const p of worst3) {
-              parts.push(`🔴 ${p.pair}: ${p.profit >= 0 ? '+' : ''}${p.profit?.toFixed(2) ?? '?'}% (${p.count ?? '?'} trades)`)
+          if (ftData.pairPerformance && Array.isArray(ftData.pairPerformance) && ftData.pairPerformance.length > 0) {
+            const sorted = [...ftData.pairPerformance].sort((a: any, b: any) => (b.profit ?? 0) - (a.profit ?? 0))
+            parts.push('', '--- PAIR PERFORMANCE (sorted by profit) ---')
+            const top5 = sorted.slice(0, 5)
+            const worst3 = sorted.slice(-3).reverse()
+            for (const p of top5) {
+              parts.push(`🟢 ${p.pair}: ${p.profit >= 0 ? '+' : ''}${p.profit?.toFixed(2) ?? '?'}% (${p.count ?? '?'} trades)`)
+            }
+            if (worst3.length > 0 && worst3[0] !== top5[top5.length - 1]) {
+              parts.push('...')
+              for (const p of worst3) {
+                parts.push(`🔴 ${p.pair}: ${p.profit >= 0 ? '+' : ''}${p.profit?.toFixed(2) ?? '?'}% (${p.count ?? '?'} trades)`)
+              }
             }
           }
         }
