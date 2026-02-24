@@ -826,8 +826,8 @@ async function main() {
       const eventLines = systemEvents.map((evt) => `- ${evt.text}`)
       fullPrompt = [
         'A scheduled reminder has been triggered. The reminder content is shown below.',
-        'Please relay this reminder to the user in a helpful and friendly way.',
-        'Do NOT reply with HEARTBEAT_OK — this is a cron event that must be delivered.',
+        'All live trading data is ALREADY provided below — do NOT call cryptoGetAccount/cryptoGetPositions/strategyScan again.',
+        'Write a CONCISE report. Do NOT reply with HEARTBEAT_OK — this is a cron event that must be delivered.',
         '',
         ...eventLines,
         liveDataBlock,
@@ -947,7 +947,7 @@ async function main() {
       await cronEngine.add({
         name: 'daily-pnl',
         schedule: { kind: 'cron', cron: '0 0 * * *' },  // UTC 00:00 daily
-        payload: 'Run the daily P&L report now. Call cryptoGetAccount, cryptoGetPositions, and getSignalHistory(statsOnly=true). Also call cryptoGetOrders to get closed trades and run syncSignalOutcomes. Summarize all data and send to user.',
+        payload: 'Daily P&L report. All live data is already provided below — do NOT call tools to re-fetch. Write a CONCISE summary (under 800 chars) covering: 1) account P&L one-liner, 2) open positions status (1 line each), 3) top risk alert if any. Skip tables, skip emoji spam, skip 7-day history.',
         sessionTarget: 'main',
         enabled: true,
       })
