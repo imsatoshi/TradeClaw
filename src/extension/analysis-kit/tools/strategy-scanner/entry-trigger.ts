@@ -30,6 +30,10 @@ export function checkEntryTrigger(
   const prev = bars15m[bars15m.length - 2]
   const entry = current.close
 
+  // Volume context for trigger confirmation
+  const avgVol20 = volumes.slice(-21, -1).reduce((s, v) => s + v, 0) / 20
+  const currentVol = current.volume
+
   // RSI for swing detection
   const rsiArr = rsiSeries(closes, 14)
   if (rsiArr.length < 10) return null
@@ -45,21 +49,24 @@ export function checkEntryTrigger(
   let reason = ''
 
   if (direction === 'long') {
-    // Trigger 1: Bullish confirmation — current close > previous high
-    if (current.close > prev.high) {
+    // Trigger 1: Bullish confirmation — current close > previous high + volume above average
+    if (current.close > prev.high && currentVol > avgVol20) {
       triggered = true
-      reason = `bullish confirm: close $${current.close.toFixed(2)} > prev high $${prev.high.toFixed(2)}`
+      reason = `bullish confirm: close $${current.close.toFixed(4)} > prev high $${prev.high.toFixed(4)}, vol ${(currentVol / avgVol20).toFixed(1)}x`
     }
 
-    // Trigger 2: Support bounce — at swing low + bullish candle
+    // Trigger 2: Support bounce — at swing low + bullish candle with meaningful lower wick
     if (!triggered) {
       const swingLows = findSwingLows(aLows, rsiArr, aVols, 3)
       if (swingLows.length > 0) {
         const nearest = swingLows[swingLows.length - 1]
         const distPct = ((entry - nearest.price) / nearest.price) * 100
-        if (distPct >= 0 && distPct <= 1.0 && current.close > current.open) {
+        const body = Math.abs(current.close - current.open)
+        const lowerWick = Math.min(current.close, current.open) - current.low
+        const hasWick = body > 0 ? lowerWick >= body * 0.5 : lowerWick > 0
+        if (distPct >= 0 && distPct <= 1.0 && current.close > current.open && hasWick) {
           triggered = true
-          reason = `support bounce: at swing low $${nearest.price.toFixed(2)} (${distPct.toFixed(1)}%), bullish candle`
+          reason = `support bounce: at swing low $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection`
         }
       }
     }
@@ -100,7 +107,7 @@ export function checkEntryTrigger(
     const weightedTP = tp1 * 0.4 + tp2 * 0.3 + tp3 * 0.3
     const rr = (weightedTP - entry) / slDist
 
-    if (rr < 1.5) return null // minimum R:R requirement
+    if (rr < 1.8) return null // minimum R:R requirement
 
     return {
       triggered: true,
@@ -117,21 +124,24 @@ export function checkEntryTrigger(
   } else {
     // SHORT triggers (mirror logic)
 
-    // Trigger 1: Bearish confirmation — current close < previous low
-    if (current.close < prev.low) {
+    // Trigger 1: Bearish confirmation — current close < previous low + volume above average
+    if (current.close < prev.low && currentVol > avgVol20) {
       triggered = true
-      reason = `bearish confirm: close $${current.close.toFixed(2)} < prev low $${prev.low.toFixed(2)}`
+      reason = `bearish confirm: close $${current.close.toFixed(4)} < prev low $${prev.low.toFixed(4)}, vol ${(currentVol / avgVol20).toFixed(1)}x`
     }
 
-    // Trigger 2: Resistance rejection — at swing high + bearish candle
+    // Trigger 2: Resistance rejection — at swing high + bearish candle with upper wick
     if (!triggered) {
       const swingHighs = findSwingHighs(aHighs, rsiArr, aVols, 3)
       if (swingHighs.length > 0) {
         const nearest = swingHighs[swingHighs.length - 1]
         const distPct = ((nearest.price - entry) / nearest.price) * 100
-        if (distPct >= 0 && distPct <= 1.0 && current.close < current.open) {
+        const body = Math.abs(current.close - current.open)
+        const upperWick = current.high - Math.max(current.close, current.open)
+        const hasWick = body > 0 ? upperWick >= body * 0.5 : upperWick > 0
+        if (distPct >= 0 && distPct <= 1.0 && current.close < current.open && hasWick) {
           triggered = true
-          reason = `resistance reject: at swing high $${nearest.price.toFixed(2)} (${distPct.toFixed(1)}%), bearish candle`
+          reason = `resistance reject: at swing high $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection`
         }
       }
     }
@@ -188,6 +198,10 @@ export function checkEntryTrigger(
   }
 }
 
+/** Adaptive precision: high-price coins get 2dp, low-price coins get up to 6dp. */
 function round(v: number): number {
-  return Math.round(v * 100) / 100
+  const abs = Math.abs(v)
+  if (abs >= 100) return Math.round(v * 100) / 100       // 2 dp ($95200.12)
+  if (abs >= 1)   return Math.round(v * 10000) / 10000    // 4 dp ($0.1423)
+  return Math.round(v * 1000000) / 1000000                // 6 dp ($0.000142)
 }

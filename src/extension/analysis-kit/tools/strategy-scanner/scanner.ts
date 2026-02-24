@@ -45,6 +45,10 @@ interface CacheEntry {
 }
 
 const ohlcvCache = new Map<string, CacheEntry>()
+
+// Signal dedup — prevent logging identical triggered signals within cooldown window
+const signalCooldown = new Map<string, number>()  // key → timestamp of last log
+const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000  // 30 minutes
 let CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes (overridden by config)
 
 function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
@@ -232,9 +236,15 @@ export async function runStrategyScan(
     errors: errors.length,
   })
 
-  // Persist triggered signals to signal-log for outcome tracking
-  // Convert pipeline signals with entry triggers to StrategySignal format for logging
-  const loggableSignals: StrategySignal[] = triggered.map(ps => ({
+  // Persist triggered signals to signal-log — dedup to avoid logging identical signals within cooldown
+  const now = Date.now()
+  const newTriggers = triggered.filter(ps => {
+    const key = `${ps.symbol}|${ps.direction}`
+    const lastLogged = signalCooldown.get(key) ?? 0
+    return now - lastLogged >= SIGNAL_COOLDOWN_MS
+  })
+
+  const loggableSignals: StrategySignal[] = newTriggers.map(ps => ({
     strategy: 'pipeline',
     symbol: ps.symbol,
     direction: ps.direction,
@@ -257,7 +267,13 @@ export async function runStrategyScan(
     },
     reason: `Pipeline ${ps.direction.toUpperCase()}: score ${ps.setupScore}/100 [${ps.grade}] — ${ps.entry!.reason}`,
   }))
-  appendSignalLog(loggableSignals).catch(() => { /* already logged inside */ })
+
+  if (loggableSignals.length > 0) {
+    for (const ps of newTriggers) {
+      signalCooldown.set(`${ps.symbol}|${ps.direction}`, now)
+    }
+    appendSignalLog(loggableSignals).catch(() => { /* already logged inside */ })
+  }
 
   return {
     scannedAt,

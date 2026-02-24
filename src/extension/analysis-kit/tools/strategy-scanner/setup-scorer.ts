@@ -77,19 +77,21 @@ function scoreMomentum(
     rsiVal = rsiArr[rsiArr.length - 1]
 
     if (direction === 'long') {
-      if (rsiVal >= 30 && rsiVal < 45) rsiScore = 12
-      else if (rsiVal >= 45 && rsiVal < 55) rsiScore = 8
-      else if (rsiVal >= 55 && rsiVal < 65) rsiScore = 5
-      else if (rsiVal >= 70) rsiScore = 0
-      else if (rsiVal < 25) rsiScore = 3
-      else rsiScore = 3 // fallback for 25-30 or 65-70
+      if (rsiVal >= 30 && rsiVal < 45) rsiScore = 12      // oversold recovery (ideal)
+      else if (rsiVal >= 45 && rsiVal < 55) rsiScore = 8   // neutral
+      else if (rsiVal >= 55 && rsiVal < 65) rsiScore = 5   // mildly overbought
+      else if (rsiVal >= 65 && rsiVal < 70) rsiScore = 2   // approaching overbought
+      else if (rsiVal >= 70) rsiScore = 0                   // overbought — no long
+      else if (rsiVal >= 25 && rsiVal < 30) rsiScore = 6   // deeply oversold, bounce likely
+      else rsiScore = 3                                      // < 25: extreme oversold
     } else {
-      if (rsiVal > 55 && rsiVal <= 70) rsiScore = 12
-      else if (rsiVal > 45 && rsiVal <= 55) rsiScore = 8
-      else if (rsiVal > 35 && rsiVal <= 45) rsiScore = 5
-      else if (rsiVal <= 30) rsiScore = 0
-      else if (rsiVal > 75) rsiScore = 3
-      else rsiScore = 3 // fallback
+      if (rsiVal > 55 && rsiVal <= 70) rsiScore = 12       // overbought recovery (ideal)
+      else if (rsiVal > 45 && rsiVal <= 55) rsiScore = 8   // neutral
+      else if (rsiVal > 35 && rsiVal <= 45) rsiScore = 5   // mildly oversold
+      else if (rsiVal > 30 && rsiVal <= 35) rsiScore = 2   // approaching oversold
+      else if (rsiVal <= 30) rsiScore = 0                   // oversold — no short
+      else if (rsiVal > 70 && rsiVal <= 75) rsiScore = 6   // deeply overbought, drop likely
+      else rsiScore = 3                                      // > 75: extreme overbought
     }
   }
 
@@ -106,13 +108,17 @@ function scoreMomentum(
       ? current > prev
       : current < prev
 
+    // Zero-line reference: average absolute value of recent 10 bars
+    const recentSlice = macdHist.slice(-Math.min(10, macdHist.length))
+    const avgAbsHist = recentSlice.reduce((s, v) => s + Math.abs(v), 0) / recentSlice.length
+
     if (inDirection && accelerating) {
       macdScore = 8
       macdDetail = 'in direction + accelerating'
     } else if (inDirection) {
       macdScore = 5
       macdDetail = 'in direction, decelerating'
-    } else if (Math.abs(current) < Math.abs(macdHist[0]) * 0.1) {
+    } else if (avgAbsHist > 0 && Math.abs(current) < avgAbsHist * 0.2) {
       macdScore = 2
       macdDetail = 'near zero'
     } else {
@@ -229,8 +235,10 @@ function scoreVolume(
   volumes15m: number[],
   volAvgPeriod: number,
 ): DimensionScore {
-  const avgVol = sma(volumes15m, Math.min(volAvgPeriod, volumes15m.length))
-  const currentVol = volumes15m[volumes15m.length - 1]
+  const avgVol = sma(volumes15m.slice(0, -3), Math.min(volAvgPeriod, volumes15m.length - 3))
+  // Use average of last 3 candles to smooth single-bar noise
+  const recent3 = volumes15m.slice(-3)
+  const currentVol = recent3.reduce((s, v) => s + v, 0) / recent3.length
   const volRatio = avgVol > 0 ? currentVol / avgVol : 1
 
   let score: number
@@ -300,7 +308,7 @@ function scoreFunding(
   direction: SignalDirection,
   funding?: FundingRateInfo,
 ): DimensionScore {
-  if (!funding) return { score: 5, max: 10, detail: 'no data (neutral)' }
+  if (!funding) return { score: 3, max: 10, detail: 'no data (penalized)' }
 
   const rate = funding.fundingRate
   const ratePct = rate * 100 // e.g. 0.0001 → 0.01%
@@ -341,7 +349,7 @@ export async function scoreSetup(
   const p = await getStrategyParamsFor('pipeline', symbol)
 
   const RSI_PERIOD = p.rsiPeriod ?? 14
-  const SWING_WINDOW = p.swingWindow ?? 3
+  const SWING_WINDOW = p.swingWindow ?? 5
   const VOL_AVG_PERIOD = p.volAvgPeriod ?? 20
   const BB_PERIOD = p.bbPeriod ?? 20
   const BB_MULT = p.bbMultiplier ?? 2
