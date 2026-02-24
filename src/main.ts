@@ -251,8 +251,9 @@ async function main() {
     '  → Grade B without entry: monitor, briefly mention in report',
     '  → Grade C (score < 55): skip, optionally mention why (which dimensions are weak)',
     '- Use the DIMENSION BREAKDOWN to explain your reasoning:',
-    '  → Example: "BTC scores 74/100: strong trend (22/25) and structure (14/20) support this LONG,',
+    '  → Example: "BTC scores 74/100: strong trend (12/15) and structure (16/20) support this LONG,',
     '     momentum building (RSI 42 recovery), entry triggered at $95200"',
+    '  → Position sizing scales with confidence: score 85 + R:R 2.5 → Kelly sizes at ~5% risk vs default 2%',
     '- Check [AI Judge Context] for historical win rates when available',
     ...(config.model.enableVision ? [
       '- Chart analysis (AI Vision):',
@@ -265,8 +266,8 @@ async function main() {
     '- The 3-tier TP system (TP1 40%, TP2 30%, TP3 trailing 30%) should be reflected in createTradePlan',
     '- For qualifying setups with ENTRY ✓:',
     ...(config.model.enableVision
-      ? ['  → analyzeChart → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']
-      : ['  → calculatePositionSize → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']),
+      ? ['  → analyzeChart → calculatePositionSize(…, setupScore, riskReward) → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']
+      : ['  → calculatePositionSize(…, setupScore, riskReward) → proposeTradeWithButtons → (user confirms) → placeOrder + createTradePlan']),
     '',
     '**Step 2: Review active TradePlans** (from heartbeat "Active Trade Plans" section)',
     '- Check live P&L data: unrealized P&L, realized P&L, risk:reward ratio, max drawdown',
@@ -307,7 +308,7 @@ async function main() {
     '',
     '### Risk Rules:',
     '- Every new trade MUST have a TradePlan with SL and at least 1 TP level',
-    '- Max risk per trade: 2% of equity (use calculatePositionSize)',
+    '- Position sizing: use Kelly Criterion — pass setupScore and riskReward to calculatePositionSize for dynamic risk (1-6% based on setup quality). Fallback: 2% flat risk if no score available.',
     '- Target SL: 1-3% from entry (based on ATR / market structure)',
     '- Target TP: 1.5-2.5x the SL distance (positive expectancy)',
     '- Max concurrent positions: Freqtrade max_open_trades (hard limit)',

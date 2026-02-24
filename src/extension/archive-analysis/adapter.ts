@@ -33,6 +33,22 @@ import { sendTelegramMessage } from '../../connectors/telegram/telegram-api.js';
  * NOTE: getLogs was moved to trading.adapter.ts (backtest-only, depends on historicalSnapshots)
  * NOTE: Cognition tools (getFrontalLobe, updateFrontalLobe) are in cognition.adapter.ts
  */
+// Kelly Criterion helper — maps setup score + R:R to optimal risk%.
+function computeKellyRiskPercent(setupScore: number, riskReward: number) {
+  const p = Math.min(0.65, Math.max(0.42, 0.40 + (setupScore - 50) * 0.005));
+  const q = 1 - p;
+  const b = riskReward;
+  const kellyFull = Math.max(0, (p * b - q) / b);
+  const kellyQuarter = kellyFull * 0.25;
+  const riskPct = Math.min(6, Math.max(1, kellyQuarter * 100));
+  return {
+    estimatedWinRate: Math.round(p * 1000) / 1000,
+    kellyFull: Math.round(kellyFull * 10000) / 10000,
+    kellyQuarter: Math.round(kellyQuarter * 10000) / 10000,
+    riskPercent: Math.round(riskPct * 100) / 100,
+  };
+}
+
 export function createAnalysisToolsImpl(sandbox: IAnalysisContext) {
   return {
     // ==================== Market data ====================
@@ -844,24 +860,26 @@ IMPORTANT: After completion, report the full summary to the user, especially:
 
     calculatePositionSize: tool({
       description: `
-Calculate optimal position size with built-in risk management checks.
+Calculate optimal position size with Kelly Criterion and risk management checks.
 
-Computes position size based on fixed risk percentage, then validates against
-account limits before returning the result.
+When setupScore and riskReward are provided, uses Kelly Criterion (quarter-Kelly)
+to dynamically size the position based on setup quality (1-6% risk).
+Falls back to flat riskPercent when Kelly params are not provided.
 
 Returns:
 - riskAmount: dollars you're willing to lose if stop is hit
 - positionValue: total leveraged exposure
 - stakeAmount: actual margin required (positionValue / leverage)
 - size: coin quantity
+- kellyInfo: Kelly sizing details (when setupScore + riskReward provided)
 - warnings: any risk limit violations detected
 - approved: true if all checks pass, false if any limit exceeded
 
 You MUST check the 'approved' field before placing the order.
 If approved=false, do NOT proceed — adjust parameters or skip the trade.
 
-Example: $500 equity, 2% risk, entry $8.50, stop $8.00
-→ riskAmount=$10, stakeAmount=$56.7, size=20 coins, approved=true
+Example: $500 equity, score 75, R:R 2.0, entry $8.50, stop $8.00
+→ Kelly: 52.5% win rate → 2.81% risk → riskAmount=$14, approved=true
       `.trim(),
       inputSchema: z.object({
         accountEquity: z.number().positive().describe('Total account equity in USDT (from cryptoGetAccount)'),
@@ -870,10 +888,21 @@ Example: $500 equity, 2% risk, entry $8.50, stop $8.00
         entryPrice: z.number().positive().describe('Planned entry price'),
         stopLossPrice: z.number().positive().describe('Stop-loss price'),
         currentOpenPositions: z.number().int().min(0).optional().describe('Number of currently open positions (from cryptoGetPositions). Used for max-trades check.'),
+        setupScore: z.number().min(0).max(100).optional().describe('Pipeline setup score (0-100). When provided with riskReward, enables Kelly-optimal sizing instead of flat riskPercent.'),
+        riskReward: z.number().positive().max(10).optional().describe('Risk:Reward ratio from entry trigger (e.g. 2.5). Used with setupScore for Kelly sizing.'),
       }),
-      execute: ({ accountEquity, availableBalance, riskPercent, entryPrice, stopLossPrice, currentOpenPositions }) => {
+      execute: ({ accountEquity, availableBalance, riskPercent, entryPrice, stopLossPrice, currentOpenPositions, setupScore, riskReward }) => {
         const leverage = CRYPTO_DEFAULT_LEVERAGE;
-        const riskAmount = accountEquity * (riskPercent / 100);
+
+        // Kelly-optimal sizing when setup score + R:R are provided
+        let effectiveRiskPercent = riskPercent;
+        let kellyInfo: ReturnType<typeof computeKellyRiskPercent> | undefined;
+        if (setupScore !== undefined && riskReward !== undefined) {
+          kellyInfo = computeKellyRiskPercent(setupScore, riskReward);
+          effectiveRiskPercent = kellyInfo.riskPercent;
+        }
+
+        const riskAmount = accountEquity * (effectiveRiskPercent / 100);
         const priceRiskPercent = Math.abs(entryPrice - stopLossPrice) / entryPrice;
 
         if (priceRiskPercent === 0) {
@@ -930,8 +959,12 @@ Example: $500 equity, 2% risk, entry $8.50, stop $8.00
           stakePercentOfEquity: `${(stakePercentOfEquity * 100).toFixed(1)}%`,
           approved,
           warnings: warnings.length > 0 ? warnings : undefined,
+          kellyInfo: kellyInfo ? {
+            ...kellyInfo,
+            note: `Kelly: score ${setupScore} → ${(kellyInfo.estimatedWinRate * 100).toFixed(1)}% win rate, R:R ${riskReward} → ${kellyInfo.riskPercent.toFixed(2)}% risk (quarter Kelly)`,
+          } : undefined,
           note: approved
-            ? `✅ Risking ${riskPercent}% of equity ($${riskAmount.toFixed(2)}) with ${leverage}x leverage`
+            ? `✅ Risking ${effectiveRiskPercent.toFixed(2)}% of equity ($${riskAmount.toFixed(2)}) with ${leverage}x leverage${kellyInfo ? ' [Kelly]' : ''}`
             : `⚠️ Trade BLOCKED: ${warnings.join('; ')}`,
         };
       },
