@@ -49,7 +49,7 @@ const ohlcvCache = new Map<string, CacheEntry>()
 // Signal dedup — prevent logging identical triggered signals within cooldown window
 const signalCooldown = new Map<string, number>()  // key → timestamp of last log
 const SIGNAL_COOLDOWN_MS = 2 * 60 * 60 * 1000  // 2 hours
-let CACHE_TTL_MS = 25 * 60 * 1000  // 25 minutes (overridden by config)
+let CACHE_TTL_MS = 20 * 60 * 1000  // 20 minutes (overridden by config)
 
 function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
   return `${[...symbols].sort().join(',')}|${timeframe}|${limit}`
