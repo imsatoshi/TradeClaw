@@ -71,7 +71,7 @@ function scoreTrend(
 
   const score = spreadScore + trendScore
   const detail = `EMA spread ${spread >= 0 ? '+' : ''}${spread.toFixed(2)}% (${spreadScore}/10), 1H SMA20 (${trendScore}/5)`
-  return { score, max: 15, detail }
+  return { score, max: 15, detail, raw: { emaSpreadPct: Math.round(spread * 1000) / 1000, regime: regime.regime } }
 }
 
 function scoreMomentum(
@@ -154,9 +154,10 @@ function scoreMomentum(
     }
   }
 
+  const macdCurrent = macdHist.length > 0 ? macdHist[macdHist.length - 1] : 0
   const score = Math.max(0, rsiScore + macdScore + mtfPenalty)
   const detail = `RSI ${rsiVal.toFixed(0)} (${rsiScore}/8), MACD ${macdDetail} (${macdScore}/5)${mtfDetail}`
-  return { score, max: 15, detail }
+  return { score, max: 15, detail, raw: { rsi15m: Math.round(rsiVal * 10) / 10, macdHist: Math.round(macdCurrent * 10000) / 10000, macdAccelerating: macdHist.length >= 2 ? (direction === 'long' ? macdCurrent > macdHist[macdHist.length - 2] : macdCurrent < macdHist[macdHist.length - 2]) : false } }
 }
 
 function scoreAcceleration(
@@ -187,7 +188,7 @@ function scoreAcceleration(
   }
 
   const detail = `ROC delta ${rocDelta >= 0 ? '+' : ''}${rocDelta.toFixed(3)}`
-  return { score, max: 10, detail }
+  return { score, max: 10, detail, raw: { rocDelta: Math.round(rocDelta * 10000) / 10000 } }
 }
 
 function scoreStructure(
@@ -280,7 +281,7 @@ function scoreStructure(
 
   const score = fvgScore + bosScore + chochScore
   const detail = `${fvgDetail} (${fvgScore}/6), ${bosDetail} (${bosScore}/10)${chochDetail}`
-  return { score, max: 20, detail }
+  return { score, max: 20, detail, raw: { hasFVG: fvgScore > 0, bosConfirmed: bosScore >= 6, hasCHoCH: chochScore > 0 } }
 }
 
 function scoreCandleQuality(
@@ -359,7 +360,7 @@ function scoreCandleQuality(
     engulfDetail || 'no engulfing',
   ].join(', ')
 
-  return { score, max: 10, detail: details }
+  return { score, max: 10, detail: details, raw: { bodyRatio: Math.round(bodyRatio * 100) / 100, hasWickRejection: wickScore > 0, hasEngulfing: engulfScore > 0 } }
 }
 
 function scoreVolume(
@@ -390,7 +391,7 @@ function scoreVolume(
     else { score = 1; detail = `${volRatio.toFixed(1)}x avg (too high for ranging)` }
   }
 
-  return { score, max: 10, detail }
+  return { score, max: 10, detail, raw: { volumeRatio: Math.round(volRatio * 100) / 100 } }
 }
 
 function scoreVolatility(
@@ -433,7 +434,7 @@ function scoreVolatility(
   else { score = 0 } // > 80
 
   const detail = `BBWP ${bbwp.toFixed(0)}, BW ${bandwidth.toFixed(1)}%`
-  return { score, max: 10, detail }
+  return { score, max: 10, detail, raw: { bbwp: Math.round(bbwp), bandwidthPct: Math.round(bandwidth * 10) / 10 } }
 }
 
 function scoreFunding(
@@ -464,7 +465,7 @@ function scoreFunding(
     score = 2; detail = `${ratePct.toFixed(3)}% (against direction)`
   }
 
-  return { score, max: 10, detail }
+  return { score, max: 10, detail, raw: { fundingRate: funding ? Math.round(funding.fundingRate * 1000000) / 1000000 : 0 } }
 }
 
 // ==================== Main Scorer ====================

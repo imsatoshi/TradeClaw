@@ -15,6 +15,8 @@ import { renderChart } from '../analysis-kit/tools/chart-renderer/index.js';
 import { fetchExchangeOHLCV } from './data/ExchangeClient.js';
 import { storePendingProposal, generateProposalId } from '../../core/pending-actions.js';
 import { sendTelegramMessage } from '../../connectors/telegram/telegram-api.js';
+import { rsiSeries, macdHistogramSeries, bandwidthSeries, sma, rocSeries, atrSeries } from '../analysis-kit/tools/strategy-scanner/helpers.js';
+import type { MarketData } from './data/interfaces.js';
 
 /**
  * Create analysis-only AI tools from Sandbox
@@ -446,6 +448,165 @@ Example use cases:
         return {
           approved: true,
           message: 'Approved automatically',
+        };
+      },
+    }),
+
+    // ==================== Raw market context (hybrid AI mode) ====================
+
+    getMarketContext: tool({
+      description: `
+Get raw technical indicator values for a symbol across multiple timeframes.
+
+This gives you DIRECT ACCESS to raw indicator data — not just scanner scores.
+Use this to form your OWN independent judgment about a trade setup.
+
+Returns: RSI, MACD histogram, EMA spread, Bollinger Band width, ATR, volume ratio,
+recent price action (last 5 candles summary), and support/resistance levels.
+
+Use alongside strategyScan for hybrid decision-making:
+1. strategyScan gives you the quantitative pipeline score
+2. getMarketContext gives you raw data to validate, override, or refine the scanner's opinion
+
+Call this for Grade A/B setups to double-check, or for symbols you want to evaluate
+independently of the scanner.
+      `.trim(),
+      inputSchema: z.object({
+        symbol: z.string().describe('Trading pair, e.g. "BTC/USDT"'),
+      }),
+      execute: async ({ symbol }) => {
+        const [data15m, data1h, data4h] = await Promise.all([
+          fetchExchangeOHLCV([symbol], '15m', 100).catch(() => ({} as Record<string, MarketData[]>)),
+          fetchExchangeOHLCV([symbol], '1h', 50).catch(() => ({} as Record<string, MarketData[]>)),
+          fetchExchangeOHLCV([symbol], '4h', 60).catch(() => ({} as Record<string, MarketData[]>)),
+        ]);
+
+        const bars15m = data15m[symbol] ?? [];
+        const bars1h = data1h[symbol] ?? [];
+        const bars4h = data4h[symbol] ?? [];
+
+        if (bars15m.length < 30) {
+          return { error: `Insufficient 15m data for ${symbol}: ${bars15m.length} bars` };
+        }
+
+        const closes15m = bars15m.map(b => b.close);
+        const highs15m = bars15m.map(b => b.high);
+        const lows15m = bars15m.map(b => b.low);
+        const volumes15m = bars15m.map(b => b.volume);
+        const currentPrice = closes15m[closes15m.length - 1];
+
+        // RSI (14) across timeframes
+        const rsi15m = rsiSeries(closes15m, 14);
+        const rsi1h = bars1h.length >= 20 ? rsiSeries(bars1h.map(b => b.close), 14) : [];
+        const rsi4h = bars4h.length >= 20 ? rsiSeries(bars4h.map(b => b.close), 14) : [];
+
+        // MACD histogram
+        const macd15m = macdHistogramSeries(closes15m);
+        const macd1h = bars1h.length >= 30 ? macdHistogramSeries(bars1h.map(b => b.close)) : [];
+
+        // EMAs
+        const ema9 = sma(closes15m.slice(-9), 9);
+        const ema21 = sma(closes15m.slice(-21), 21);
+        const ema50 = closes15m.length >= 50 ? sma(closes15m.slice(-50), 50) : null;
+
+        // Bollinger Bands
+        const bbPeriod = 20;
+        const bbSlice = closes15m.slice(-bbPeriod);
+        const bbMiddle = bbSlice.reduce((s, v) => s + v, 0) / bbPeriod;
+        const bbStd = Math.sqrt(bbSlice.reduce((s, v) => s + (v - bbMiddle) ** 2, 0) / bbPeriod);
+        const bbUpper = bbMiddle + 2 * bbStd;
+        const bbLower = bbMiddle - 2 * bbStd;
+        const bbPosition = bbStd > 0 ? ((currentPrice - bbLower) / (bbUpper - bbLower)) * 100 : 50;
+
+        // ATR
+        const atr = atrSeries(highs15m, lows15m, closes15m, 14);
+        const currentATR = atr.length > 0 ? atr[atr.length - 1] : 0;
+        const atrPct = currentPrice > 0 ? (currentATR / currentPrice) * 100 : 0;
+
+        // Volume analysis
+        const avgVol = volumes15m.length >= 23 ? sma(volumes15m.slice(-23, -3), 20) : sma(volumes15m.slice(0, -3), Math.max(1, volumes15m.length - 3));
+        const recentVol = volumes15m.slice(-3).reduce((s, v) => s + v, 0) / 3;
+        const volRatio = avgVol > 0 ? recentVol / avgVol : 1;
+
+        // ROC (rate of change)
+        const roc5 = rocSeries(closes15m, 5);
+        const currentROC = roc5.length > 0 ? roc5[roc5.length - 1] : 0;
+
+        // Recent price action summary (last 5 candles)
+        const last5 = bars15m.slice(-5);
+        const priceAction = last5.map(b => ({
+          o: Math.round(b.open * 100) / 100,
+          h: Math.round(b.high * 100) / 100,
+          l: Math.round(b.low * 100) / 100,
+          c: Math.round(b.close * 100) / 100,
+          bullish: b.close > b.open,
+        }));
+
+        // Key levels: recent swing high/low from 15m
+        const recentHighs = highs15m.slice(-30);
+        const recentLows = lows15m.slice(-30);
+        const swingHigh = Math.max(...recentHighs);
+        const swingLow = Math.min(...recentLows);
+
+        // 1H trend: price vs SMA20
+        let trend1h: 'above' | 'below' | 'at' | 'n/a' = 'n/a';
+        if (bars1h.length >= 20) {
+          const closes1h = bars1h.map(b => b.close);
+          const sma20_1h = sma(closes1h.slice(-20), 20);
+          const last1h = closes1h[closes1h.length - 1];
+          trend1h = last1h > sma20_1h * 1.003 ? 'above' : last1h < sma20_1h * 0.997 ? 'below' : 'at';
+        }
+
+        return {
+          symbol,
+          currentPrice: Math.round(currentPrice * 100) / 100,
+          timestamp: new Date().toISOString(),
+          indicators: {
+            rsi: {
+              '15m': rsi15m.length > 0 ? Math.round(rsi15m[rsi15m.length - 1] * 10) / 10 : null,
+              '1h': rsi1h.length > 0 ? Math.round(rsi1h[rsi1h.length - 1] * 10) / 10 : null,
+              '4h': rsi4h.length > 0 ? Math.round(rsi4h[rsi4h.length - 1] * 10) / 10 : null,
+            },
+            macd: {
+              '15m': macd15m.length > 0 ? Math.round(macd15m[macd15m.length - 1] * 10000) / 10000 : null,
+              '15m_prev': macd15m.length > 1 ? Math.round(macd15m[macd15m.length - 2] * 10000) / 10000 : null,
+              '15m_trend': macd15m.length >= 3 ? (macd15m[macd15m.length - 1] > macd15m[macd15m.length - 2] ? 'rising' : 'falling') : 'n/a',
+              '1h': macd1h.length > 0 ? Math.round(macd1h[macd1h.length - 1] * 10000) / 10000 : null,
+            },
+            ema: {
+              ema9: Math.round(ema9 * 100) / 100,
+              ema21: Math.round(ema21 * 100) / 100,
+              ema50: ema50 !== null ? Math.round(ema50 * 100) / 100 : null,
+              priceVsEma9: currentPrice > ema9 ? 'above' : 'below',
+              priceVsEma21: currentPrice > ema21 ? 'above' : 'below',
+              emaAlignment: ema9 > ema21 ? 'bullish' : 'bearish',
+            },
+            bollingerBands: {
+              upper: Math.round(bbUpper * 100) / 100,
+              middle: Math.round(bbMiddle * 100) / 100,
+              lower: Math.round(bbLower * 100) / 100,
+              position: Math.round(bbPosition),
+              bandwidthPct: Math.round(((bbUpper - bbLower) / bbMiddle) * 10000) / 100,
+            },
+            atr: {
+              value: Math.round(currentATR * 100) / 100,
+              percent: Math.round(atrPct * 100) / 100,
+            },
+            volume: {
+              ratio: Math.round(volRatio * 100) / 100,
+              trend: volRatio > 1.3 ? 'high' : volRatio < 0.7 ? 'low' : 'normal',
+            },
+            roc5: Math.round(currentROC * 1000) / 1000,
+          },
+          trend1h,
+          keyLevels: {
+            swingHigh30: Math.round(swingHigh * 100) / 100,
+            swingLow30: Math.round(swingLow * 100) / 100,
+            distToHighPct: Math.round(((swingHigh - currentPrice) / currentPrice) * 10000) / 100,
+            distToLowPct: Math.round(((currentPrice - swingLow) / currentPrice) * 10000) / 100,
+          },
+          recentCandles: priceAction,
+          aiGuidance: 'Use these raw values to form your OWN opinion. Compare with strategyScan scores. If your analysis disagrees with the scanner, explain why and trust your judgment on clear patterns.',
         };
       },
     }),

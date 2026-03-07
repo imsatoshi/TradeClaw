@@ -1,0 +1,17 @@
+{
+  "allowedSymbols": [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "NVDA",
+    "META",
+    "TSLA",
+    "SPY",
+    "QQQ"
+  ],
+  "provider": {
+    "type": "alpaca",
+    "paper": true
+  }
+}

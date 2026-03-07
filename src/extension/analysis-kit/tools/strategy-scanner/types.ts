@@ -93,6 +93,8 @@ export interface DimensionScore {
   score: number
   max: number
   detail: string
+  /** Raw indicator values for AI independent judgment (hybrid mode). */
+  raw?: Record<string, number | string | boolean>
 }
 
 /** Multi-factor setup score — replaces independent strategy confluence. */
