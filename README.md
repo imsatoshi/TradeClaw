@@ -8,14 +8,15 @@
 
 ---
 
-- **AI 是大脑** — 分析市场、生成信号、制定交易计划。不做机械性执行。
-- **TradeManager 是双手** — 10 秒轮询自动执行交易计划：逐级下止盈、管理止损、追踪盈亏、自动保本。
+- **Scanner 是眼睛** — 计算 SL/TP（ATR + 结构），提供 regime 自适应的数字基础。
+- **AI 是大脑** — 分析市场、GO/NO-GO 决策、制定交易计划。判断而非计算。
+- **TradeManager 是双手** — 10 秒轮询自动执行：逐级止盈、价格监控止损、渐进保护、Chandelier 追踪。
 - **Freqtrade 是基础设施** — 订单路由、K 线数据、白名单管理。不做任何自主决策。
 
 ## 核心架构
 
 ```
-AI (策略大脑) → TradePlan (TP/SL 计划) → TradeManager (自动执行) → Freqtrade (交易所)
+Scanner (计算 SL/TP) → AI (决策大脑) → TradePlan (TP/SL 计划) → TradeManager (自动执行) → Freqtrade (交易所)
 ```
 
 ```mermaid
@@ -35,7 +36,6 @@ graph LR
   subgraph 交易系统
     TM[TradeManager<br/>10s 轮询引擎]
     FT[Freqtrade<br/>订单执行]
-    CCXT[CCXT 直连<br/>止损单]
     W[Wallet<br/>暂存/提交/推送]
   end
 
@@ -52,7 +52,7 @@ graph LR
 
   E --创建 TradePlan--> TM
   TM --下 TP 单--> FT
-  TM --下 SL 单--> CCXT
+  TM --SL 监控 + forceExit--> FT
   TM --状态变化--> SC
   W --> FT
 ```
@@ -68,11 +68,16 @@ TradePlan 生命周期: pending → active → partial → completed
 | 功能 | 说明 |
 |------|------|
 | **多级止盈** | 1-5 个 TP 级别，按比例逐级平仓（Freqtrade 限制每笔交易只能有一个挂单，TradeManager 自动逐级下单） |
-| **止损管理** | 通过 CCXT 直连交易所下 STOP_MARKET 单，不占用 Freqtrade 挂单配额 |
+| **止损监控** | TradeManager 每 10s 检查价格，突破 SL 时通过 Freqtrade forceExit 平仓（不再依赖 CCXT 止损单） |
+| **SL/TP 验证** | 入场时强制校验：SL 方向、距离 0.3%-15%、TP 方向、R:R ≥ 1.0，不合理的计划直接拒绝 |
+| **渐进保护** | ATR 阶梯式 SL 收紧：+1.0x → -0.5x ATR，+1.5x → 保本，+2.5x → 锁 +1x，+3.5x → 锁 +2x |
 | **自动保本** | TP1 成交后自动将 SL 移到入场价（默认开启，可关闭） |
-| **Trailing Stop** | SL 跟随价格移动，支持固定距离或百分比模式，只朝有利方向移动 |
+| **Chandelier 追踪止损** | SL 锚定周期高/低点 - ATR 倍数，优于简单固定/百分比追踪（推荐 2.5x ATR） |
+| **Regime 自适应 TP** | Scanner 根据市场状态动态调整 TP 比例：趋势 30/30/40、震荡 50/30/20、默认 40/30/30 |
+| **动态 SL 倍数** | ATR 倍数根据波动率分档 + 市场状态调整（趋势 ×1.2 放宽，震荡 ×0.85 收紧） |
 | **实时 P&L** | 每 10s 计算：浮动盈亏、已实现盈亏、风险回报比、最大回撤 |
 | **动态调整** | AI 可随时通过 `cryptoUpdateTradePlan` 修改 TP/SL/trailing 参数 |
+| **时间衰减** | 交易超时未触 TP1 时自动收紧 SL（默认 8 小时后收紧 50% 距离） |
 | **事件通知** | TP 成交、SL 触发、计划完成等状态变化自动注入 AI 下次心跳 |
 | **持久化** | 活跃计划保存到 JSON，重启后自动恢复 |
 
@@ -99,7 +104,7 @@ TradePlan 生命周期: pending → active → partial → completed
 | 工具 | 说明 |
 |------|------|
 | `cryptoPlaceOrder` | 下单（AI 入场决策 → Freqtrade forceentry） |
-| `cryptoClosePosition` | 紧急平仓（绕过 TradePlan，仅用于突发情况） |
+| `cryptoClosePosition` | 紧急平仓（绕过 TradePlan，TradeManager 通过 forceExit 执行） |
 | `cryptoGetPositions` | 实时持仓查询 |
 | `cryptoGetAccount` | 账户余额查询 |
 | `cryptoGetOrders` | 订单历史查询 |
@@ -149,7 +154,8 @@ TradePlan 生命周期: pending → active → partial → completed
 - 单笔最大仓位：40% 权益
 - 可用余额 < 30% 禁止开仓
 - 最大并发仓位：由 Freqtrade max_open_trades 控制
-- SL 距离合理性检查（不能太远导致风控失效）
+- **SL/TP 入场验证**：SL 方向正确、距离 0.3%-15%、TP 方向正确、R:R ≥ 1.0（不通过则拒绝开仓）
+- **渐进保护**：利润达 ATR 阶梯时自动收紧 SL，无需等 TP 成交
 - Freqtrade 安全网 stoploss: -20%（TradeManager 失效时的最后防线）
 
 ## 策略扫描
@@ -163,7 +169,7 @@ TradePlan 生命周期: pending → active → partial → completed
 | N 周期突破 + 成交量 | 突破 | 突破 N 根 K 线高/低点 + 成交量 > 1.5x |
 | 资金费率反转 | 逆向 | 极端资金费率 + RSI 加分 |
 
-**增强机制：** 多时间框架过滤、4H EMA 市场状态检测、OHLCV 缓存、信号持久化。
+**增强机制：** 多时间框架过滤、4H EMA 市场状态检测（regime）、regime 自适应 TP 比例与 SL 倍数、OHLCV 缓存、信号持久化。
 
 ## 心跳注入数据
 
@@ -192,7 +198,7 @@ TradePlan 生命周期: pending → active → partial → completed
 | 波动率 | ATR14、布林带（上/中/下轨 + 带宽） |
 | 成交量 | Volume SMA20 |
 
-安全网 stoploss = -20%（仅在 TradeManager 完全失效时触发）。
+安全网 stoploss = -20%（仅在 TradeManager 完全失效时触发）。TradeManager 通过价格监控 + forceExit 管理 SL，不再依赖 CCXT 止损单。
 
 ## 快速开始
 
@@ -200,7 +206,7 @@ TradePlan 生命周期: pending → active → partial → completed
 
 - Node.js 20+
 - pnpm 10+
-- Freqtrade 实例（推荐）或 CCXT 支持的交易所
+- Freqtrade 实例（推荐）— 所有仓位管理通过 Freqtrade API
 
 ### 安装
 
@@ -303,13 +309,13 @@ src/
     analysis-kit/                # 行情、指标、策略扫描
     crypto-trading/
       trade-manager/             # TradeManager — 交易计划自动执行引擎
-        TradeManager.ts          # 核心轮询引擎（10s tick）
-        types.ts                 # TradePlan、P&L、TrailingStop 类型
-        store.ts                 # 内存 + JSON 持久化
+        TradeManager.ts          # 核心轮询引擎（10s tick，价格监控 SL，渐进保护）
+        TradeManager.spec.ts     # 单元测试（验证、渐进保护、regime TP、SL 倍数）
+        types.ts                 # TradePlan、P&L、TrailingStop、渐进保护类型
+        store.ts                 # 内存 + JSON 持久化（含迁移）
         adapter.ts               # AI 工具（4 个）
       providers/
         freqtrade/               # Freqtrade REST API
-        ccxt/                    # CCXT 直连
     brain/                       # 认知状态
     ashare/                      # A 股行情
     browser/                     # 浏览器自动化
