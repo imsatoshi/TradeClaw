@@ -1,6 +1,6 @@
 # Scheduling Subsystem
 
-Open Alice's scheduling subsystem, designed from OpenClaw's heartbeat/cron/delivery architecture with a clean-room implementation.
+TradeClaw's scheduling subsystem, designed from OpenClaw's heartbeat/cron/delivery architecture with a clean-room implementation.
 
 ## Design Philosophy
 
@@ -416,7 +416,7 @@ npx vitest run src/core/*.spec.ts
 ## Design Decision Records
 
 ### Why not BullMQ?
-Open Alice is a single-process application and doesn't need a Redis-backed distributed task queue. Agent Events (84-line EventEmitter) + file persistence already meets the requirements.
+TradeClaw is a single-process application and doesn't need a Redis-backed distributed task queue. Agent Events (84-line EventEmitter) + file persistence already meets the requirements.
 
 ### Why do heartbeat and cron share the scheduler?
 OpenClaw's design: two independent trigger lines (cron timer + heartbeat interval) ultimately converge on the same execution entry point. Sharing the scheduler naturally supports wake coalescing — cron and heartbeat within the same 250ms window execute only once.

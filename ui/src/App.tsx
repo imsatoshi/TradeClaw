@@ -33,7 +33,7 @@ export function App() {
               <path d="M3 5h14M3 10h14M3 15h14" />
             </svg>
           </button>
-          <span className="text-sm font-semibold text-text">Open Alice</span>
+          <span className="text-sm font-semibold text-text">TradeClaw</span>
         </div>
         {page === 'chat' && <ChatPage onSSEStatus={setSseConnected} />}
         {page === 'events' && <EventsPage />}
