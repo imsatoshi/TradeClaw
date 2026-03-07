@@ -20,12 +20,33 @@ import {
  * Compute SL multiplier based on volatility profile.
  * High-volatility coins need wider stops to avoid noise wicks.
  */
-function dynamicSlMultiplier(atr: number, price: number): number {
+function dynamicSlMultiplier(atr: number, price: number, regime?: string): number {
   const volRatio = (atr / price) * 100 // ATR as % of price
-  if (volRatio > 3.0) return 2.5       // extreme vol (meme coins)
-  if (volRatio > 2.0) return 2.0       // high vol
-  if (volRatio > 1.0) return 1.5       // normal
-  return 1.2                           // low vol (BTC, stables)
+  let mult: number
+  if (volRatio > 3.0) mult = 2.5       // extreme vol (meme coins)
+  else if (volRatio > 2.0) mult = 2.0  // high vol
+  else if (volRatio > 1.0) mult = 1.8  // normal (was 1.5, widened to reduce noise wicks)
+  else mult = 1.3                      // low vol (was 1.2)
+
+  // Regime adjustment: trending needs wider stops, ranging tighter
+  if (regime === 'uptrend' || regime === 'downtrend') mult *= 1.2
+  else if (regime === 'ranging') mult *= 0.85
+
+  return mult
+}
+
+// ==================== Regime-Adaptive TP Ratios ====================
+
+/**
+ * TP split ratios adapt to market regime:
+ * - Trending: let the runner run (back-loaded)
+ * - Ranging: take profits early (front-loaded)
+ * - Default: balanced
+ */
+function tpRatios(regime?: string): [number, number, number] {
+  if (regime === 'uptrend' || regime === 'downtrend') return [0.3, 0.3, 0.4]
+  if (regime === 'ranging') return [0.5, 0.3, 0.2]
+  return [0.4, 0.3, 0.3]
 }
 
 // ==================== Structure-Based TP ====================
@@ -101,6 +122,7 @@ export function checkEntryTrigger(
   direction: SignalDirection,
   bars: MarketData[],
   atr: number,
+  regime?: string,
 ): EntryTrigger | null {
   if (bars.length < 30 || atr <= 0) return null
 
@@ -195,7 +217,7 @@ export function checkEntryTrigger(
     if (!triggered) return null
 
     // Dynamic SL
-    const slMult = dynamicSlMultiplier(atr, entry)
+    const slMult = dynamicSlMultiplier(atr, entry, regime)
     let sl = entry - slMult * atr
 
     // Improve SL using structure — place below nearest support
@@ -219,7 +241,8 @@ export function checkEntryTrigger(
     const slDist = entry - sl
     if (slDist <= 0) return null
 
-    const weightedTP = tp1 * 0.4 + tp2 * 0.3 + tp3 * 0.3
+    const [r1, r2, r3] = tpRatios(regime)
+    const weightedTP = tp1 * r1 + tp2 * r2 + tp3 * r3
     const rr = Math.min((weightedTP - entry) / slDist, 5.0)
 
     if (rr < 1.8) return null
@@ -229,9 +252,9 @@ export function checkEntryTrigger(
       entry: round(entry),
       stopLoss: round(sl),
       takeProfits: {
-        tp1: { price: round(tp1), ratio: 0.4 },
-        tp2: { price: round(tp2), ratio: 0.3 },
-        tp3: { price: round(tp3), ratio: 0.3 },
+        tp1: { price: round(tp1), ratio: r1 },
+        tp2: { price: round(tp2), ratio: r2 },
+        tp3: { price: round(tp3), ratio: r3 },
       },
       riskReward: round(rr),
       reason,
@@ -293,7 +316,7 @@ export function checkEntryTrigger(
     if (!triggered) return null
 
     // Dynamic SL
-    const slMult = dynamicSlMultiplier(atr, entry)
+    const slMult = dynamicSlMultiplier(atr, entry, regime)
     let sl = entry + slMult * atr
 
     // Improve SL using structure — place above nearest resistance
@@ -316,7 +339,8 @@ export function checkEntryTrigger(
     const slDist = sl - entry
     if (slDist <= 0) return null
 
-    const weightedTP = tp1 * 0.4 + tp2 * 0.3 + tp3 * 0.3
+    const [r1s, r2s, r3s] = tpRatios(regime)
+    const weightedTP = tp1 * r1s + tp2 * r2s + tp3 * r3s
     const rr = Math.min((entry - weightedTP) / slDist, 5.0)
 
     if (rr < 1.8) return null
@@ -326,9 +350,9 @@ export function checkEntryTrigger(
       entry: round(entry),
       stopLoss: round(sl),
       takeProfits: {
-        tp1: { price: round(tp1), ratio: 0.4 },
-        tp2: { price: round(tp2), ratio: 0.3 },
-        tp3: { price: round(tp3), ratio: 0.3 },
+        tp1: { price: round(tp1), ratio: r1s },
+        tp2: { price: round(tp2), ratio: r2s },
+        tp3: { price: round(tp3), ratio: r3s },
       },
       riskReward: round(rr),
       reason,
@@ -354,6 +378,7 @@ export function computePendingZone(
   bars: MarketData[],
   atr: number,
   ttlMs: number = 4 * 60 * 60 * 1000, // 4 hours default
+  regime?: string,
 ): PendingZone | null {
   if (bars.length < 30 || atr <= 0) return null
 
@@ -377,7 +402,7 @@ export function computePendingZone(
   const liquidityZones = detectLiquidityZones(swingHighs, swingLows)
   const { resistances, supports } = findStructuralLevels(swingHighs, swingLows, currentPrice, liquidityZones)
 
-  const slMult = dynamicSlMultiplier(atr, currentPrice)
+  const slMult = dynamicSlMultiplier(atr, currentPrice, regime)
   const now = Date.now()
 
   if (direction === 'long') {
@@ -394,9 +419,10 @@ export function computePendingZone(
     const sl = zoneLow - slMult * 0.5 * atr // tighter SL since we're entering at structure
 
     const { tps } = computeStructureTPs(direction, idealEntry, atr, resistances, supports)
+    const [zr1, zr2, zr3] = tpRatios(regime)
     const slDist = idealEntry - sl
     if (slDist <= 0) return null
-    const weightedTP = tps[0] * 0.4 + tps[1] * 0.3 + tps[2] * 0.3
+    const weightedTP = tps[0] * zr1 + tps[1] * zr2 + tps[2] * zr3
     const rr = Math.min((weightedTP - idealEntry) / slDist, 5.0)
     if (rr < 2.0) return null // higher bar for pending zones
 
@@ -409,9 +435,9 @@ export function computePendingZone(
       zoneLow: round(zoneLow),
       stopLoss: round(sl),
       takeProfits: {
-        tp1: { price: round(tps[0]), ratio: 0.4 },
-        tp2: { price: round(tps[1]), ratio: 0.3 },
-        tp3: { price: round(tps[2]), ratio: 0.3 },
+        tp1: { price: round(tps[0]), ratio: zr1 },
+        tp2: { price: round(tps[1]), ratio: zr2 },
+        tp3: { price: round(tps[2]), ratio: zr3 },
       },
       riskReward: round(rr),
       reason: `pullback zone at support $${targetLevel.toFixed(4)} (${distPct.toFixed(1)}% below)`,
@@ -431,9 +457,10 @@ export function computePendingZone(
     const sl = zoneHigh + slMult * 0.5 * atr
 
     const { tps } = computeStructureTPs(direction, idealEntry, atr, resistances, supports)
+    const [zr1s, zr2s, zr3s] = tpRatios(regime)
     const slDist = sl - idealEntry
     if (slDist <= 0) return null
-    const weightedTP = tps[0] * 0.4 + tps[1] * 0.3 + tps[2] * 0.3
+    const weightedTP = tps[0] * zr1s + tps[1] * zr2s + tps[2] * zr3s
     const rr = Math.min((idealEntry - weightedTP) / slDist, 5.0)
     if (rr < 2.0) return null
 
@@ -446,9 +473,9 @@ export function computePendingZone(
       zoneLow: round(zoneLow),
       stopLoss: round(sl),
       takeProfits: {
-        tp1: { price: round(tps[0]), ratio: 0.4 },
-        tp2: { price: round(tps[1]), ratio: 0.3 },
-        tp3: { price: round(tps[2]), ratio: 0.3 },
+        tp1: { price: round(tps[0]), ratio: zr1s },
+        tp2: { price: round(tps[1]), ratio: zr2s },
+        tp3: { price: round(tps[2]), ratio: zr3s },
       },
       riskReward: round(rr),
       reason: `pullback zone at resistance $${targetLevel.toFixed(4)} (${distPct.toFixed(1)}% above)`,

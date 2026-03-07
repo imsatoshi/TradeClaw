@@ -17,6 +17,8 @@ import { TradePlanStore } from './store.js'
 import { emit, enqueueSystemEvent } from '../../../core/agent-events.js'
 import { createLogger, getModeTag } from '../../../core/logger.js'
 import { isCryptoReadOnly } from '../safe-mode.js'
+import { fetchExchangeOHLCV } from '../../archive-analysis/data/ExchangeClient.js'
+import { atrSeries } from '../../analysis-kit/tools/strategy-scanner/helpers.js'
 
 const log = createLogger('trade-manager')
 
@@ -35,6 +37,10 @@ export class TradeManager {
   private ticking = false
   /** Live P&L snapshots, refreshed each tick (plan.id → PnL) */
   private pnlCache = new Map<string, TradePlanPnL>()
+  /** ATR cache per symbol — refreshed every 5 minutes */
+  private atrCache = new Map<string, { atr: number; updatedAt: number }>()
+  /** OHLCV cache for chandelier trailing — refreshed every 5 minutes */
+  private ohlcvCache = new Map<string, { highs: number[]; lows: number[]; updatedAt: number }>()
 
   constructor(
     engine: FreqtradeTradingEngine,
@@ -72,7 +78,7 @@ export class TradeManager {
     stopLossPrice: number
     reason?: string
     autoBreakeven?: boolean
-    trailingStop?: { distance: number; type: 'fixed' | 'percent' }
+    trailingStop?: { distance: number; type: 'fixed' | 'percent' | 'chandelier'; lookbackBars?: number }
   }): Promise<TradePlan> {
     const now = new Date().toISOString()
     const plan: TradePlan = {
@@ -118,9 +124,8 @@ export class TradeManager {
       }
     }
 
-    // Cancel SL order if placed via direct engine
-    if (plan.stopLoss.status === 'placed' && plan.stopLoss.orderId && this.directEngine) {
-      await this.directEngine.cancelOrder(plan.stopLoss.orderId).catch(() => {})
+    // Cancel SL monitoring
+    if (plan.stopLoss.status === 'monitoring' || plan.stopLoss.status === 'pending') {
       plan.stopLoss.status = 'cancelled'
     }
 
@@ -136,7 +141,7 @@ export class TradeManager {
     takeProfits?: { price: number; sizeRatio: number }[]
     stopLossPrice?: number
     autoBreakeven?: boolean
-    trailingStop?: { distance: number; type: 'fixed' | 'percent' } | null
+    trailingStop?: { distance: number; type: 'fixed' | 'percent' | 'chandelier'; lookbackBars?: number } | null
   }): Promise<{ success: boolean; error?: string; plan?: TradePlan }> {
     const plan = this.store.get(planId)
     if (!plan) return { success: false, error: 'Plan not found' }
@@ -182,20 +187,11 @@ export class TradeManager {
 
     // --- Update Stop-Loss ---
     if (updates.stopLossPrice !== undefined) {
-      // Cancel old SL if placed via direct engine
-      if (plan.stopLoss.status === 'placed' && plan.stopLoss.orderId && this.directEngine) {
-        await this.directEngine.cancelOrder(plan.stopLoss.orderId).catch(() => {})
-      }
-
       plan.stopLoss = {
         price: updates.stopLossPrice,
-        status: 'pending',
+        status: (plan.status === 'active' || plan.status === 'partial') ? 'monitoring' : 'pending',
       }
-
-      // Re-place SL if plan is active
-      if (plan.status === 'active' || plan.status === 'partial') {
-        await this.placeStopLoss(plan)
-      }
+      await this.store.save(plan)
     }
 
     // --- Update auto-SL features ---
@@ -348,6 +344,102 @@ export class TradeManager {
 
   // ==================== Auto SL Logic ====================
 
+  /** Fetch ATR(14, 1H) for a symbol with 5-minute cache. */
+  private async fetchAtr(symbol: string): Promise<number | null> {
+    const cached = this.atrCache.get(symbol)
+    if (cached && Date.now() - cached.updatedAt < 5 * 60 * 1000) {
+      return cached.atr
+    }
+
+    try {
+      const ohlcv = await fetchExchangeOHLCV([symbol], '1h', 30)
+      const bars = ohlcv[symbol]
+      if (!bars || bars.length < 20) return null
+
+      const highs = bars.map(b => b.high)
+      const lows = bars.map(b => b.low)
+      const closes = bars.map(b => b.close)
+      const atrArr = atrSeries(highs, lows, closes, 14)
+      if (atrArr.length === 0) return null
+
+      const atr = atrArr[atrArr.length - 1]
+      this.atrCache.set(symbol, { atr, updatedAt: Date.now() })
+      return atr
+    } catch (err) {
+      log.warn(`failed to fetch ATR for ${symbol}: ${err}`)
+      return null
+    }
+  }
+
+  /**
+   * Progressive SL protection — tighten SL based on unrealized profit
+   * measured in ATR multiples. Does NOT depend on TP fills.
+   *
+   * Stages (for long; inverted for short):
+   *   +1.0x ATR → SL to entry - 0.5x ATR (cut risk 50%)
+   *   +1.5x ATR → SL to entry (breakeven)
+   *   +2.5x ATR → SL to entry + 1.0x ATR (lock profit)
+   *   +3.5x ATR → SL to entry + 2.0x ATR
+   */
+  private async applyProgressiveProtection(plan: TradePlan, currentPrice: number): Promise<void> {
+    if (!plan.entryPrice) return
+
+    // Get ATR — either cached on plan or fetch fresh
+    let atr = plan.atrAtEntry
+    if (!atr) {
+      const fetched = await this.fetchAtr(plan.symbol)
+      if (!fetched) return // can't compute without ATR
+      atr = fetched
+      plan.atrAtEntry = atr
+      await this.store.save(plan)
+    }
+
+    const isLong = plan.direction === 'long'
+    const entry = plan.entryPrice
+    const sign = isLong ? 1 : -1
+
+    // Profit in ATR multiples
+    const profitAtr = isLong
+      ? (currentPrice - entry) / atr
+      : (entry - currentPrice) / atr
+
+    // Progressive stages: [profitThreshold in ATR, SL offset from entry in ATR]
+    const stages: [number, number][] = [
+      [3.5, 2.0],   // stage 4: lock 2x ATR profit
+      [2.5, 1.0],   // stage 3: lock 1x ATR profit
+      [1.5, 0.0],   // stage 2: breakeven
+      [1.0, -0.5],  // stage 1: cut risk 50%
+    ]
+
+    const currentStage = plan.progressiveStage ?? 0
+
+    for (let i = 0; i < stages.length; i++) {
+      const stageNum = stages.length - i // 4, 3, 2, 1
+      const [threshold, slOffset] = stages[i]
+
+      if (profitAtr >= threshold && currentStage < stageNum) {
+        const newSl = entry + sign * slOffset * atr
+
+        // Only move SL in favorable direction
+        const shouldMove = isLong
+          ? newSl > plan.stopLoss.price
+          : newSl < plan.stopLoss.price
+
+        if (shouldMove) {
+          const oldSl = plan.stopLoss.price
+          plan.stopLoss = { price: Number(newSl.toFixed(6)), status: 'monitoring' }
+          plan.progressiveStage = stageNum
+          await this.store.save(plan)
+
+          const label = slOffset > 0 ? `+${slOffset}x ATR` : slOffset === 0 ? 'breakeven' : `${slOffset}x ATR`
+          log.info(`${plan.symbol} progressive protection stage ${stageNum} — profit +${profitAtr.toFixed(1)}x ATR, SL $${oldSl} → $${plan.stopLoss.price} (${label})`)
+          this.emitEvent(plan, 'sl_moved', `${plan.symbol} SL auto-tightened to $${plan.stopLoss.price} (profit +${profitAtr.toFixed(1)}x ATR, ${label})`)
+        }
+        break // only apply highest qualifying stage
+      }
+    }
+  }
+
   /** After TP1 fills, auto-move SL to breakeven (entry price). */
   private async applyAutoBreakeven(plan: TradePlan): Promise<void> {
     if (!plan.autoBreakeven) return
@@ -365,18 +457,11 @@ export class TradeManager {
     if (!slShouldMove) return // already at or past breakeven
 
     const oldSl = plan.stopLoss.price
-    // Cancel existing SL
-    if (plan.stopLoss.status === 'placed' && plan.stopLoss.orderId && this.directEngine) {
-      await this.directEngine.cancelOrder(plan.stopLoss.orderId).catch(() => {})
-    }
 
     plan.stopLoss = {
       price: plan.entryPrice,
-      status: 'pending',
+      status: 'monitoring',
     }
-
-    // Re-place SL at breakeven
-    await this.placeStopLoss(plan)
     await this.store.save(plan)
 
     log.info(`${plan.symbol} auto-breakeven — SL moved $${oldSl} → $${plan.entryPrice}`)
@@ -391,14 +476,48 @@ export class TradeManager {
     const isLong = plan.direction === 'long'
     const { distance, type } = plan.trailingStop
 
-    // Calculate new SL based on trailing distance
-    const trailAmount = type === 'percent'
-      ? currentPrice * (distance / 100)
-      : distance
+    let newSlPrice: number
 
-    const newSlPrice = isLong
-      ? currentPrice - trailAmount
-      : currentPrice + trailAmount
+    if (type === 'chandelier') {
+      // Chandelier Exit: anchor to period high/low, trail by ATR * multiplier
+      const atr = plan.atrAtEntry ?? await this.fetchAtr(plan.symbol)
+      if (!atr) return
+
+      const lookback = plan.trailingStop.lookbackBars ?? 14
+
+      // Fetch OHLCV with 5-minute cache
+      let cached = this.ohlcvCache.get(plan.symbol)
+      if (!cached || Date.now() - cached.updatedAt > 5 * 60 * 1000) {
+        const ohlcv = await fetchExchangeOHLCV([plan.symbol], '1h', lookback + 2)
+        const bars = ohlcv[plan.symbol]
+        if (!bars || bars.length < lookback) return
+        cached = {
+          highs: bars.map(b => b.high),
+          lows: bars.map(b => b.low),
+          updatedAt: Date.now(),
+        }
+        this.ohlcvCache.set(plan.symbol, cached)
+      }
+
+      const recentHighs = cached.highs.slice(-lookback)
+      const recentLows = cached.lows.slice(-lookback)
+      if (isLong) {
+        const periodHigh = Math.max(...recentHighs)
+        newSlPrice = periodHigh - distance * atr
+      } else {
+        const periodLow = Math.min(...recentLows)
+        newSlPrice = periodLow + distance * atr
+      }
+    } else {
+      // Fixed or percent trailing
+      const trailAmount = type === 'percent'
+        ? currentPrice * (distance / 100)
+        : distance
+
+      newSlPrice = isLong
+        ? currentPrice - trailAmount
+        : currentPrice + trailAmount
+    }
 
     // Only move SL in the favorable direction (never move it backwards)
     const shouldMove = isLong
@@ -409,22 +528,13 @@ export class TradeManager {
 
     const oldSl = plan.stopLoss.price
 
-    // Cancel existing SL
-    if (plan.stopLoss.status === 'placed' && plan.stopLoss.orderId && this.directEngine) {
-      await this.directEngine.cancelOrder(plan.stopLoss.orderId).catch(() => {})
-    }
-
     plan.stopLoss = {
       price: Number(newSlPrice.toFixed(6)),
-      status: 'pending',
+      status: 'monitoring',
     }
-
-    // Re-place SL at new trailing level
-    await this.placeStopLoss(plan)
     await this.store.save(plan)
 
     log.info(`${plan.symbol} trailing stop — SL moved $${oldSl} → $${plan.stopLoss.price}`)
-    // Don't emit event for every trail tick — too noisy. Only log.
   }
 
   /** Time-decay: tighten SL after trade sits too long without TP1 fill. */
@@ -450,20 +560,123 @@ export class TradeManager {
       ? plan.stopLoss.price + tightenAmount
       : plan.stopLoss.price - tightenAmount
 
-    // Cancel existing SL
-    if (plan.stopLoss.status === 'placed' && plan.stopLoss.orderId && this.directEngine) {
-      await this.directEngine.cancelOrder(plan.stopLoss.orderId).catch(() => {})
-    }
-
     const oldSl = plan.stopLoss.price
-    plan.stopLoss = { price: Number(newSl.toFixed(6)), status: 'pending' }
+    plan.stopLoss = { price: Number(newSl.toFixed(6)), status: 'monitoring' }
     plan.timeDecayApplied = true
-
-    await this.placeStopLoss(plan)
     await this.store.save(plan)
 
     log.info(`${plan.symbol} time-decay — SL tightened $${oldSl} → $${plan.stopLoss.price} (${plan.timeDecay.hoursToTighten}h elapsed, TP1 unfilled)`)
     this.emitEvent(plan, 'sl_tightened', `${plan.symbol} SL auto-tightened to $${plan.stopLoss.price} — trade held ${plan.timeDecay.hoursToTighten}h without TP1 fill`)
+  }
+
+  /**
+   * Validate SL/TP sanity against actual entry price.
+   * Returns error string if invalid, null if OK.
+   */
+  private validateSlTp(plan: TradePlan): string | null {
+    const entry = plan.entryPrice
+    if (!entry) return 'no entry price'
+
+    const sl = plan.stopLoss.price
+    const isLong = plan.direction === 'long'
+
+    // 1. SL direction: long → SL < entry, short → SL > entry
+    if (isLong && sl >= entry) {
+      return `SL $${sl} is at or above entry $${entry} for LONG — must be below`
+    }
+    if (!isLong && sl <= entry) {
+      return `SL $${sl} is at or below entry $${entry} for SHORT — must be above`
+    }
+
+    // 2. SL distance: 0.3% ~ 15%
+    const slDistPct = (Math.abs(entry - sl) / entry) * 100
+    if (slDistPct < 0.3) {
+      return `SL too tight: ${slDistPct.toFixed(2)}% from entry (min 0.3%)`
+    }
+    if (slDistPct > 15) {
+      return `SL too wide: ${slDistPct.toFixed(2)}% from entry (max 15%)`
+    }
+
+    // 3. TP1 direction
+    const tp1 = plan.takeProfits.find(tp => tp.level === 1)
+    if (tp1) {
+      if (isLong && tp1.price <= entry) {
+        return `TP1 $${tp1.price} is at or below entry $${entry} for LONG — must be above`
+      }
+      if (!isLong && tp1.price >= entry) {
+        return `TP1 $${tp1.price} is at or above entry $${entry} for SHORT — must be below`
+      }
+
+      // 4. R:R >= 1.0 (TP1 distance / SL distance)
+      const tp1Dist = Math.abs(tp1.price - entry)
+      const slDist = Math.abs(entry - sl)
+      const rr = tp1Dist / slDist
+      if (rr < 1.0) {
+        return `R:R too low: ${rr.toFixed(2)} (TP1 dist ${tp1Dist.toFixed(4)} / SL dist ${slDist.toFixed(4)}, min 1.0)`
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Active SL enforcement: if current price has breached the SL level,
+   * force-exit via Freqtrade. This is critical in dry-run mode where
+   * CCXT STOP_MARKET orders don't actually execute, and serves as a
+   * safety net in live mode too.
+   */
+  private async checkSlBreach(plan: TradePlan, currentPrice: number): Promise<boolean> {
+    if (plan.stopLoss.status !== 'monitoring' && plan.stopLoss.status !== 'placed' && plan.stopLoss.status !== 'pending') return false
+    if (!plan.freqtradeTradeId) return false
+
+    const isLong = plan.direction === 'long'
+    const breached = isLong
+      ? currentPrice <= plan.stopLoss.price
+      : currentPrice >= plan.stopLoss.price
+
+    if (!breached) return false
+
+    log.warn(`${plan.symbol} SL BREACHED — price $${currentPrice} ${isLong ? '<=' : '>='} SL $${plan.stopLoss.price}. Force-exiting.`)
+
+    try {
+      const result = await this.engine.forceExit(String(plan.freqtradeTradeId))
+      if (result.success) {
+        plan.stopLoss.status = 'filled'
+        plan.stopLoss.filledPrice = currentPrice
+        plan.stopLoss.filledAt = new Date().toISOString()
+
+        // Cancel remaining TPs
+        for (const tp of plan.takeProfits) {
+          if (tp.status === 'pending' || tp.status === 'placed') {
+            tp.status = 'cancelled'
+          }
+        }
+
+        // Compute final unrealized loss
+        if (plan.entryPrice && plan.positionSize) {
+          const remainingRatio = plan.takeProfits
+            .filter(tp => tp.status !== 'filled')
+            .reduce((sum, tp) => sum + tp.sizeRatio, 0)
+          const priceDiff = isLong
+            ? (currentPrice - plan.entryPrice)
+            : (plan.entryPrice - currentPrice)
+          const slLoss = priceDiff * plan.positionSize * remainingRatio
+          plan.realizedPnl = (plan.realizedPnl ?? 0) + slLoss
+        }
+
+        plan.status = 'completed'
+        await this.store.archive(plan)
+        this.pnlCache.delete(plan.id)
+        this.emitEvent(plan, 'sl_triggered', `${plan.symbol} SL triggered at $${currentPrice} (SL $${plan.stopLoss.price}). Force-exited. PnL: $${(plan.realizedPnl ?? 0).toFixed(2)}`)
+        return true
+      } else {
+        log.error(`${plan.symbol} force-exit failed: ${result.error}`)
+        return false
+      }
+    } catch (err) {
+      log.error(`${plan.symbol} force-exit error: ${err}`)
+      return false
+    }
   }
 
   // ==================== Tick Logic ====================
@@ -522,12 +735,18 @@ export class TradeManager {
           await this.store.save(plan)
         }
 
-        // Apply auto SL behaviors
+        // Apply auto SL behaviors (progressive first, then breakeven, then trailing)
+        await this.applyProgressiveProtection(plan, trade.current_rate)
         await this.applyAutoBreakeven(plan)
         await this.applyTrailingStop(plan, trade.current_rate)
 
         // Apply time-decay SL tightening
         await this.applyTimeDecay(plan)
+
+        // Active SL enforcement — force-exit if price has breached SL
+        if (await this.checkSlBreach(plan, trade.current_rate)) {
+          return // plan already completed by force-exit
+        }
       }
 
       await this.handleActive(plan, trade)
@@ -559,6 +778,28 @@ export class TradeManager {
     plan.positionSize = trade.amount
     plan.leverage = trade.leverage ?? 1
     plan.peakPrice = trade.open_rate  // initialize peak at entry
+
+    // Fetch ATR at entry for progressive protection
+    const atr = await this.fetchAtr(plan.symbol)
+    if (atr) plan.atrAtEntry = atr
+
+    // Validate SL/TP sanity against actual entry price
+    const validationError = this.validateSlTp(plan)
+    if (validationError) {
+      log.error(`plan ${plan.id.slice(0, 8)} SL/TP validation failed: ${validationError}`)
+      // Force-exit the position since the plan is invalid
+      try {
+        await this.engine.forceExit(String(trade.trade_id))
+      } catch (err) {
+        log.error(`force-exit after validation failure: ${err}`)
+      }
+      plan.status = 'error'
+      plan.errorMessage = `SL/TP validation failed: ${validationError}`
+      await this.store.archive(plan)
+      this.emitEvent(plan, 'plan_rejected', `${plan.symbol} plan rejected — ${validationError}. Position force-exited.`)
+      return
+    }
+
     plan.status = 'active'
     await this.store.save(plan)
 
@@ -567,10 +808,10 @@ export class TradeManager {
     // Place first TP order
     await this.placeNextTp(plan, trade)
 
-    // Place SL via direct engine (STOP_MARKET)
+    // Activate SL price monitoring
     await this.placeStopLoss(plan)
 
-    this.emitEvent(plan, 'plan_activated', `${plan.symbol} ${plan.direction.toUpperCase()} entry filled at $${trade.open_rate}. TP1 and SL placed.`)
+    this.emitEvent(plan, 'plan_activated', `${plan.symbol} ${plan.direction.toUpperCase()} entry filled at $${trade.open_rate}. TP1 and SL monitoring.`)
   }
 
   /** Plan is active/partial — check for TP fills, SL triggers. */
@@ -581,9 +822,9 @@ export class TradeManager {
       return
     }
 
-    // Retry placing SL if it's still pending (may have failed on initial activation)
+    // Activate SL monitoring if still pending
     if (plan.stopLoss.status === 'pending') {
-      log.info(`${plan.symbol} SL still pending — retrying placement`)
+      log.info(`${plan.symbol} SL still pending — activating monitoring`)
       await this.placeStopLoss(plan)
     }
 
@@ -637,8 +878,8 @@ export class TradeManager {
       }
     }
 
-    // Mark SL as filled if it was placed
-    if (plan.stopLoss.status === 'placed' || plan.stopLoss.status === 'pending') {
+    // Mark SL as filled if it was monitoring/pending
+    if (plan.stopLoss.status === 'monitoring' || plan.stopLoss.status === 'placed' || plan.stopLoss.status === 'pending') {
       plan.stopLoss.status = 'filled'
       plan.stopLoss.filledAt = new Date().toISOString()
       if (trade?.close_rate) {
@@ -692,38 +933,15 @@ export class TradeManager {
     }
   }
 
-  /** Place a STOP_MARKET order via the direct exchange engine (CCXT). */
+  /**
+   * Activate SL monitoring. No exchange order is placed — TradeManager
+   * monitors the price every tick and will forceExit on breach via checkSlBreach().
+   */
   private async placeStopLoss(plan: TradePlan): Promise<void> {
-    if (await isCryptoReadOnly()) {
-      log.warn(`BLOCKED by readOnly: SL for ${plan.symbol}`)
-      return
-    }
-    if (!this.directEngine) {
-      log.info(`no direct engine, SL for ${plan.symbol} managed by Freqtrade built-in stoploss`)
-      return
-    }
-
-    try {
-      const result = await this.directEngine.placeOrder({
-        symbol: plan.symbol,
-        side: plan.direction === 'long' ? 'sell' : 'buy',
-        type: 'stoploss',
-        price: plan.stopLoss.price,
-        size: plan.positionSize,
-        reduceOnly: true,
-      })
-
-      if (result.success) {
-        plan.stopLoss.status = 'placed'
-        plan.stopLoss.orderId = result.orderId
-        await this.store.save(plan)
-        log.info(`placed SL for ${plan.symbol} — STOP_MARKET $${plan.stopLoss.price}`)
-      } else {
-        log.warn(`failed to place SL for ${plan.symbol}: ${result.error}`)
-      }
-    } catch (err) {
-      log.error(`SL placement error: ${err}`)
-    }
+    plan.stopLoss.status = 'monitoring'
+    delete plan.stopLoss.orderId
+    await this.store.save(plan)
+    log.info(`${plan.symbol} SL monitoring activated at $${plan.stopLoss.price}`)
   }
 
   // ==================== Detection Helpers ====================

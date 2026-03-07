@@ -19,13 +19,20 @@ export function createTradePlanTools(manager: TradeManager) {
 The TradeManager will automatically manage order execution:
 - Places TP orders sequentially (Freqtrade allows only 1 open order per trade)
 - When TP1 fills, automatically places TP2, etc.
-- Stop-loss is managed separately via direct exchange (STOP_MARKET) if available
+- Stop-loss is monitored by TradeManager every 10s — auto force-exits via Freqtrade when price breaches SL
 - Auto-breakeven: after TP1 fills, SL auto-moves to entry price (enabled by default)
 - Trailing stop: optional — SL follows price at a fixed distance as it moves favorably
 - All state changes + live P&L are reported in the next heartbeat
 
 IMPORTANT: The entry order must already be placed (via cryptoPlaceOrder + commit + push).
 The plan will detect the open trade by symbol and direction, then begin managing exits.
+
+SL/TP RULES (enforced — plan will be rejected if violated):
+1. SL must be BELOW entry for LONG, ABOVE entry for SHORT
+2. SL distance must be 0.3% ~ 15% from entry
+3. TP1 must be ABOVE entry for LONG, BELOW entry for SHORT
+4. R:R (TP1 distance / SL distance) must be >= 1.0
+5. Use Scanner signal's SL/TP as baseline — do NOT invent your own numbers
 
 Example: 2-level TP plan with trailing stop
 - TP1: close 50% at $9.00
@@ -44,9 +51,10 @@ Example: 2-level TP plan with trailing stop
         reason: z.string().optional().describe('Trade rationale'),
         autoBreakeven: z.boolean().optional().describe('Auto-move SL to entry price after TP1 fills (default: true)'),
         trailingStop: z.object({
-          distance: z.number().positive().describe('Trailing distance'),
-          type: z.enum(['fixed', 'percent']).describe('"fixed" = absolute $ distance, "percent" = % of price'),
-        }).optional().describe('Trailing stop config. SL follows price at this distance. Omit for no trailing.'),
+          distance: z.number().positive().describe('Trailing distance (for chandelier: ATR multiplier, e.g. 2.5)'),
+          type: z.enum(['fixed', 'percent', 'chandelier']).describe('"fixed" = absolute $ distance, "percent" = % of price, "chandelier" = ATR multiplier anchored to period high/low (recommended)'),
+          lookbackBars: z.number().int().min(5).max(50).optional().describe('Lookback bars for chandelier mode (default 14)'),
+        }).optional().describe('Trailing stop config. Recommended: chandelier with distance 2.5 (= 2.5x ATR from period high/low).'),
       }),
       execute: async ({ symbol, direction, takeProfits, stopLossPrice, reason, autoBreakeven, trailingStop }) => {
         // Validate sizeRatio sum
@@ -162,8 +170,9 @@ Already-filled TP levels are preserved — only pending levels are updated.`,
         stopLossPrice: z.number().optional().describe('New stop-loss price. Omit to keep current SL.'),
         autoBreakeven: z.boolean().optional().describe('Enable/disable auto-breakeven. Omit to keep current.'),
         trailingStop: z.object({
-          distance: z.number().positive().describe('Trailing distance'),
-          type: z.enum(['fixed', 'percent']).describe('"fixed" = absolute $ distance, "percent" = % of price'),
+          distance: z.number().positive().describe('Trailing distance (for chandelier: ATR multiplier)'),
+          type: z.enum(['fixed', 'percent', 'chandelier']).describe('"fixed" / "percent" / "chandelier" (recommended)'),
+          lookbackBars: z.number().int().min(5).max(50).optional().describe('Lookback bars for chandelier (default 14)'),
         }).nullable().optional().describe('Set trailing stop config, or null to disable. Omit to keep current.'),
       }),
       execute: async ({ planId, takeProfits, stopLossPrice, autoBreakeven, trailingStop }) => {

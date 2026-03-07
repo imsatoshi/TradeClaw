@@ -241,11 +241,11 @@ export async function runStrategyScan(
 
         // Stage 3b: Check immediate entry trigger if score qualifies
         if (score.totalScore >= threshold && atr > 0 && !score.entry) {
-          score.entry = checkEntryTrigger(direction, bars1h, atr)
+          score.entry = checkEntryTrigger(direction, bars1h, atr, regime.regime)
 
           // Stage 3c: If no immediate trigger, create pending zone for pullback entry
           if (!score.entry) {
-            const zone = computePendingZone(symbol, direction, score.totalScore, bars1h, atr)
+            const zone = computePendingZone(symbol, direction, score.totalScore, bars1h, atr, undefined, regime.regime)
             if (zone) {
               pendingZones.set(zoneKey, zone)
               pendingZone = zone

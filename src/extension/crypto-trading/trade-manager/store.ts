@@ -22,6 +22,11 @@ export class TradePlanStore {
       const raw = await readFile(ACTIVE_FILE, 'utf-8')
       const arr: TradePlan[] = JSON.parse(raw)
       for (const plan of arr) {
+        // Migrate legacy SL status: 'placed' via CCXT → 'monitoring' via price check
+        if (plan.stopLoss.status === 'placed') {
+          plan.stopLoss.status = 'monitoring'
+          delete plan.stopLoss.orderId
+        }
         this.plans.set(plan.id, plan)
       }
       console.log(`trade-plan-store: restored ${arr.length} active plan(s) from disk`)

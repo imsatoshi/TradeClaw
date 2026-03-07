@@ -25,7 +25,9 @@ export interface TakeProfitLevel {
 
 export interface StopLoss {
   price: number
-  status: 'pending' | 'placed' | 'filled' | 'cancelled'
+  /** 'monitoring' = TradeManager actively watches price and will forceExit on breach */
+  status: 'pending' | 'monitoring' | 'placed' | 'filled' | 'cancelled'
+  /** @deprecated SL no longer placed via exchange. Kept for history compatibility. */
   orderId?: string
   filledPrice?: number
   filledAt?: string
@@ -35,8 +37,14 @@ export interface StopLoss {
 export interface TrailingStopConfig {
   /** Trailing distance — SL follows price at this distance */
   distance: number
-  /** Distance type: 'fixed' = absolute price distance, 'percent' = % of price */
-  type: 'fixed' | 'percent'
+  /** Distance type:
+   * 'fixed'      = absolute price distance
+   * 'percent'    = % of price
+   * 'chandelier' = distance is ATR multiplier, anchored to period high/low
+   */
+  type: 'fixed' | 'percent' | 'chandelier'
+  /** Lookback bars for chandelier mode (default 14) */
+  lookbackBars?: number
 }
 
 /** P&L snapshot computed dynamically each tick (not persisted) */
@@ -91,6 +99,13 @@ export interface TradePlan {
   maxDrawdown?: number
   /** Realized P&L from filled TPs (accumulated, persisted) */
   realizedPnl?: number
+
+  // --- Progressive protection ---
+
+  /** ATR(14, 1H) at entry time — used for progressive SL stages */
+  atrAtEntry?: number
+  /** Current progressive protection stage reached (0-4) */
+  progressiveStage?: number
 
   // --- Time decay ---
 
