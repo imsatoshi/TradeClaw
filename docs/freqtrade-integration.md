@@ -1,18 +1,18 @@
-# OpenAlice + Freqtrade 集成指南
+# TradeClaw + Freqtrade 集成指南
 
-本文档记录如何将 OpenAlice 与 Freqtrade 集成，实现 AI 驱动的量化交易。
+本文档记录如何将 TradeClaw 与 Freqtrade 集成，实现 AI 驱动的量化交易。
 
 ## 概述
 
 **Freqtrade** 是一个开源的加密货币交易机器人，支持策略回测、风险管理和实盘交易。
 
-**OpenAlice** 通过 Freqtrade 的 REST API 连接到 Freqtrade，将 AI 决策能力与 Freqtrade 的交易执行能力结合。
+**TradeClaw** 通过 Freqtrade 的 REST API 连接到 Freqtrade，将 AI 决策能力与 Freqtrade 的交易执行能力结合。
 
 ## 架构
 
 ```
 ┌─────────────┐     ┌──────────────────────────┐     ┌─────────────┐
-│  Telegram   │────▶│   OpenAlice Engine       │────▶│  Freqtrade  │
+│  Telegram   │────▶│   TradeClaw Engine       │────▶│  Freqtrade  │
 │   用户      │     │  ┌────────────────────┐  │     │  REST API   │
 │             │◀────│  │ FreqtradeTrading   │  │◀────│  (端口8989)  │
 └─────────────┘     │  │ Engine             │  │     └─────────────┘
@@ -223,7 +223,7 @@ case 'freqtrade': {
 }
 ```
 
-### 4. 配置 OpenAlice
+### 4. 配置 TradeClaw
 
 创建 `data/config/crypto.json`：
 
@@ -250,7 +250,7 @@ case 'freqtrade': {
 #!/bin/bash
 
 echo "==============================================="
-echo "OpenAlice + Freqtrade Launcher"
+echo "TradeClaw + Freqtrade Launcher"
 echo "==============================================="
 
 # 禁用代理以直接连接 Freqtrade
@@ -268,7 +268,7 @@ pnpm dev
 
 ## API 映射
 
-| OpenAlice 方法 | Freqtrade API | 说明 |
+| TradeClaw 方法 | Freqtrade API | 说明 |
 |---------------|---------------|------|
 | `placeOrder()` | `POST /api/v1/trade` | 下单 |
 | `getPositions()` | `GET /api/v1/status` | 获取持仓 |
@@ -284,7 +284,7 @@ pnpm dev
 启动时自动同步流程：
 
 ```
-OpenAlice 启动
+TradeClaw 启动
     └── FreqtradeTradingEngine.init()
         ├── GET /api/v1/ping (验证连接)
         ├── GET /api/v1/whitelist (获取白名单)
@@ -357,7 +357,7 @@ Freqtrade API error 401: Unauthorized
 
 **原因**: 用户名或密码错误
 
-**解决**: 检查 Freqtrade 配置和 OpenAlice 配置是否一致
+**解决**: 检查 Freqtrade 配置和 TradeClaw 配置是否一致
 
 ### 端口占用
 
@@ -386,4 +386,4 @@ lsof -ti:13001 | xargs kill -9
 ## 参考
 
 - [Freqtrade REST API 文档](https://www.freqtrade.io/en/stable/rest-api/)
-- [OpenAlice 架构文档](./architecture.md)
+- [TradeClaw 架构文档](./architecture.md)

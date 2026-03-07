@@ -1,11 +1,11 @@
-# Freqtrade Provider for OpenAlice
+# Freqtrade Provider for TradeClaw
 
-This provider connects OpenAlice to a local [Freqtrade](https://www.freqtrade.io/) instance via its REST API, allowing OpenAlice to leverage Freqtrade's strategy execution, risk management, and position tracking while adding AI-driven decision making.
+This provider connects TradeClaw to a local [Freqtrade](https://www.freqtrade.io/) instance via its REST API, allowing TradeClaw to leverage Freqtrade's strategy execution, risk management, and position tracking while adding AI-driven decision making.
 
 ## Architecture
 
 ```
-OpenAlice ──▶ FreqtradeTradingEngine ──▶ Freqtrade REST API ──▶ Exchange
+TradeClaw ──▶ FreqtradeTradingEngine ──▶ Freqtrade REST API ──▶ Exchange
 ```
 
 ## Setup
@@ -26,7 +26,7 @@ Add the following to your Freqtrade `config.json`:
 }
 ```
 
-### 2. Configure OpenAlice
+### 2. Configure TradeClaw
 
 Update `data/config/crypto.json`:
 
@@ -50,7 +50,7 @@ Update `data/config/crypto.json`:
 freqtrade trade --config config.json
 ```
 
-### 4. Start OpenAlice
+### 4. Start TradeClaw
 
 ```bash
 pnpm dev
@@ -58,13 +58,13 @@ pnpm dev
 
 ## Whitelist Synchronization
 
-OpenAlice automatically syncs the trading pair whitelist from Freqtrade on startup:
+TradeClaw automatically syncs the trading pair whitelist from Freqtrade on startup:
 
-1. On `init()`, OpenAlice calls Freqtrade's `/api/v1/whitelist` endpoint
-2. The whitelist is synchronized to OpenAlice's global `CRYPTO_ALLOWED_SYMBOLS`
+1. On `init()`, TradeClaw calls Freqtrade's `/api/v1/whitelist` endpoint
+2. The whitelist is synchronized to TradeClaw's global `CRYPTO_ALLOWED_SYMBOLS`
 3. All subsequent operations use Freqtrade's whitelist for validation
 
-This ensures consistency between Freqtrade's configuration and OpenAlice's symbol validation.
+This ensures consistency between Freqtrade's configuration and TradeClaw's symbol validation.
 
 ## Differences from CCXT Provider
 
@@ -79,7 +79,7 @@ This ensures consistency between Freqtrade's configuration and OpenAlice's symbo
 
 ## API Mapping
 
-| OpenAlice | Freqtrade API |
+| TradeClaw | Freqtrade API |
 |-----------|---------------|
 | `placeOrder()` | `POST /api/v1/trade` |
 | `getPositions()` | `GET /api/v1/status` (open trades) |
@@ -109,7 +109,7 @@ await engine.forceExit('123');
 
 ## Usage with AI
 
-When using Freqtrade provider, OpenAlice can:
+When using Freqtrade provider, TradeClaw can:
 
 1. **Query portfolio state**: Check open positions, balance, and performance
 2. **Execute signals**: Use `forceEnter` for AI-generated entry signals
@@ -143,10 +143,10 @@ AI: [使用 cryptoClosePosition 工具部分平仓]
 
 ### Connection refused
 - Verify Freqtrade is running: `curl http://localhost:8080/api/v1/ping`
-- Check `listen_ip_address` matches OpenAlice's network
+- Check `listen_ip_address` matches TradeClaw's network
 
 ### Authentication failed
-- Verify username/password in both Freqtrade and OpenAlice config
+- Verify username/password in both Freqtrade and TradeClaw config
 - Check for URL encoding issues in password
 
 ### Orders rejected

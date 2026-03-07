@@ -1,12 +1,12 @@
 /**
  * MCP Ask Connector
  *
- * Exposes Alice's conversation ability via a standalone MCP server on a
+ * Exposes the agent's conversation ability via a standalone MCP server on a
  * dedicated port. External agents (e.g. OpenClaw) call `askWithSession`
- * to talk to Alice as an agent — not to use her tools directly.
+ * to talk to the agent — not to use her tools directly.
  *
  * Deliberately separated from the main MCP server (which exposes internal
- * tools) to prevent circular calls: Alice's own AI provider never sees
+ * tools) to prevent circular calls: the agent's own AI provider never sees
  * these tools because they are not registered in ToolCenter.
  */
 

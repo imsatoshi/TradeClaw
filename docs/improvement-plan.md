@@ -1,6 +1,6 @@
 # TradeClaw 改进计划
 
-基于 TradeClaw vs OpenAlice 全面对比，按优先级排列的改进方案。
+按优先级排列的改进方案。
 
 ---
 

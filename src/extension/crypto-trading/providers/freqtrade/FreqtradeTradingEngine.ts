@@ -3,7 +3,7 @@
  * Freqtrade Trading Engine
  *
  * Implementation of ICryptoTradingEngine that connects to a local Freqtrade instance
- * via its REST API. This allows OpenAlice to leverage Freqtrade's strategy execution,
+ * via its REST API. This allows TradeClaw to leverage Freqtrade's strategy execution,
  * risk management, and position tracking while adding AI-driven decision making.
  */
 
@@ -61,7 +61,7 @@ function isValidPair(pair: string): boolean {
 
 
 /**
- * Map Freqtrade order status to OpenAlice order status
+ * Map Freqtrade order status to TradeClaw order status
  */
 function mapOrderStatus(status: string): CryptoOrder['status'] {
   switch (status) {
@@ -117,7 +117,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
       log.info(`max_open_trades=${showConfig.max_open_trades} (from config)`);
     }
 
-    // Fetch whitelist from Freqtrade and sync with OpenAlice
+    // Fetch whitelist from Freqtrade and sync with TradeClaw
     // Normalize futures format: "ZEC/USDT:USDT" → "ZEC/USDT", then filter garbled entries
     const rawWhitelist = await this.fetchWhitelist();
     const whitelist = rawWhitelist.map(normalizePair).filter(isValidPair);

@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# OpenAlice with Freqtrade startup script
+# TradeClaw with Freqtrade startup script
 # This script ensures proper environment for connecting to remote Freqtrade
 
 echo "==============================================="
-echo "OpenAlice + Freqtrade Launcher"
+echo "TradeClaw + Freqtrade Launcher"
 echo "==============================================="
 
 # Disable proxy for direct connection to Freqtrade
@@ -19,5 +19,5 @@ echo "Freqtrade URL: http://YOUR_FREQTRADE_HOST:8080"
 echo "Status: Ready to connect"
 echo ""
 
-# Start OpenAlice
+# Start TradeClaw
 pnpm dev
