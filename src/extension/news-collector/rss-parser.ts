@@ -16,7 +16,7 @@ export async function fetchAndParseFeed(url: string, retries = 1): Promise<Parse
     try {
       const res = await fetch(url, {
         signal: AbortSignal.timeout(15_000),
-        headers: { 'User-Agent': 'TradeClaw/1.0 NewsCollector' },
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NewsReader/1.0)', 'Accept': 'application/rss+xml, application/xml, text/xml' },
       })
       if (!res.ok) throw new Error(`RSS fetch failed: ${res.status} ${res.statusText}`)
       const xml = await res.text()

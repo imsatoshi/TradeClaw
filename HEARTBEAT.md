@@ -16,10 +16,15 @@ Keep response under 500 characters. Use this exact template:
 ⚠️ Alerts: [only if something needs attention]
 🎯 Top Signal: [best 1 signal if aligned with regime] or (none)
 
+## SCANNER REFERENCE (1H entry timeframe)
+- Grade A signal: score >= 78
+- Trend regime threshold: 65
+- Range regime threshold: 75
+
 ## WHEN TO REPORT (exception-based)
 Reply HEARTBEAT_OK if ALL true:
 - No open positions OR all positions within normal range (-1.5% to +3%)
-- No high-confidence regime-aligned signals (confidence >= 80)
+- No Grade A regime-aligned signals (score >= 78)
 - No funding rate warnings (> 0.05%/8h against position)
 - Freqtrade health = OK (in dry-run, temporary disconnects count as OK)
 
@@ -27,7 +32,7 @@ Reply HEARTBEAT_OK if ALL true:
 - Position loss > -1.5% → EXIT immediately (market order)
 - Position profit > +2% → partial TP (close 50%)
 - Regime shifted against position → EXIT
-- Signal >= 80 confidence + regime aligned → proposeTradeWithButtons
+- Grade A signal (score >= 78) + regime aligned → proposeTradeWithButtons
 
 ## WHEN TO SEND DETAILED ALERT (break the 500 char limit)
 - Position loss > -1% (approaching danger zone)

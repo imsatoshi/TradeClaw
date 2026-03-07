@@ -201,7 +201,14 @@ describe('heartbeat', () => {
       expect(eventLog.recent({ type: 'heartbeat.done' })).toHaveLength(0)
     })
 
-    it('should skip CHAT_NO responses', async () => {
+    it('should treat former CHAT_NO as unparsed and deliver (fail-open)', async () => {
+      const delivered: string[] = []
+      connectorRegistry.registerConnector({
+        channel: 'test', to: 'user1',
+        deliver: async (text) => { delivered.push(text) },
+      })
+      connectorRegistry.touchInteraction('test', 'user1')
+
       mockEngine.setResponse('STATUS: CHAT_NO\nREASON: Minor fluctuations, nothing worth reporting.')
 
       heartbeat = createHeartbeat({
@@ -215,12 +222,12 @@ describe('heartbeat', () => {
       await cronEngine.runNow(cronEngine.list()[0].id)
 
       await vi.waitFor(() => {
-        const skips = eventLog.recent({ type: 'heartbeat.skip' })
-        expect(skips).toHaveLength(1)
+        const done = eventLog.recent({ type: 'heartbeat.done' })
+        expect(done).toHaveLength(1)
       })
 
-      const skips = eventLog.recent({ type: 'heartbeat.skip' })
-      expect(skips[0].payload).toMatchObject({ reason: 'chat-no' })
+      // CHAT_NO is no longer a valid status, so it falls through as unparsed → delivered
+      expect(delivered).toHaveLength(1)
     })
 
     it('should deliver unparsed responses (fail-open)', async () => {
@@ -509,12 +516,11 @@ describe('parseHeartbeatResponse', () => {
     expect(r.unparsed).toBe(false)
   })
 
-  it('should parse CHAT_NO', () => {
+  it('should treat CHAT_NO as unparsed (no longer valid)', () => {
     const r = parseHeartbeatResponse('STATUS: CHAT_NO\nREASON: Nothing worth reporting.')
-    expect(r.status).toBe('CHAT_NO')
-    expect(r.reason).toBe('Nothing worth reporting.')
-    expect(r.content).toBe('')
-    expect(r.unparsed).toBe(false)
+    // CHAT_NO is not a recognized status anymore → fail-open as CHAT_YES
+    expect(r.status).toBe('CHAT_YES')
+    expect(r.unparsed).toBe(true)
   })
 
   it('should parse CHAT_YES with content', () => {
@@ -541,8 +547,8 @@ describe('parseHeartbeatResponse', () => {
   })
 
   it('should handle extra whitespace', () => {
-    const r = parseHeartbeatResponse('  STATUS:   CHAT_NO  \n  REASON:   All quiet.  ')
-    expect(r.status).toBe('CHAT_NO')
+    const r = parseHeartbeatResponse('  STATUS:   HEARTBEAT_OK  \n  REASON:   All quiet.  ')
+    expect(r.status).toBe('HEARTBEAT_OK')
     expect(r.reason).toBe('All quiet.')
   })
 

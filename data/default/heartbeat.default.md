@@ -13,7 +13,11 @@ Read this file at the start of every heartbeat to recall what you should be payi
 ## Response Format
 
 ```
-STATUS: HEARTBEAT_OK | CHAT_YES | CHAT_NO
+STATUS: HEARTBEAT_OK | CHAT_YES
 REASON: <why you made this decision>
 CONTENT: <message to deliver, only for CHAT_YES>
 ```
+
+- HEARTBEAT_OK = nothing interesting, don't bother the user
+- CHAT_YES = found something worth reporting (new signal, position update, news alert, etc.)
+- If parsing fails, the full response is sent as fallback

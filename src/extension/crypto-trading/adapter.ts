@@ -6,6 +6,7 @@ import type { OrderStatusUpdate, WalletState } from './wallet/types';
 import { createCryptoWalletToolsImpl } from './wallet/adapter';
 import type { TradeManager } from './trade-manager/TradeManager';
 import { createTradePlanTools } from './trade-manager/adapter';
+import { runGuardPipeline, createDefaultGuards, type Guard, type GuardContext } from './guards/guard-pipeline';
 
 /**
  * Create crypto trading AI tools (market interaction + wallet management)
@@ -25,7 +26,10 @@ export function createCryptoTradingTools(
   getWalletState?: () => Promise<WalletState>,
   directExchangeEngine?: ICryptoTradingEngine,
   tradeManager?: TradeManager,
+  guardOverrides?: Guard[],
 ) {
+  // Initialize guard pipeline (code-level safety checks, cannot be bypassed by AI)
+  const guards = guardOverrides ?? createDefaultGuards();
   return {
     // ==================== Wallet operations ====================
     ...createCryptoWalletToolsImpl(wallet),
@@ -154,7 +158,7 @@ NOTE: This stages the operation. Call cryptoWalletCommit + cryptoWalletPush to e
           .optional()
           .describe('Only reduce position (close only)'),
       }),
-      execute: ({
+      execute: async ({
         symbol,
         side,
         type,
@@ -164,10 +168,25 @@ NOTE: This stages the operation. Call cryptoWalletCommit + cryptoWalletPush to e
         leverage,
         reduceOnly,
       }) => {
-        return wallet.add({
-          action: 'placeOrder',
+        // === Guard Pipeline: code-level pre-execution safety checks ===
+        const operation = {
+          action: 'placeOrder' as const,
           params: { symbol, side, type, size, usd_size, price, leverage, reduceOnly },
-        });
+        };
+
+        const [positions, account] = await Promise.all([
+          tradingEngine.getPositions(),
+          tradingEngine.getAccount(),
+        ]);
+
+        const guardCtx: GuardContext = { operation, positions, account };
+        const guardResult = await runGuardPipeline(guards, guardCtx);
+
+        if (!guardResult.allowed) {
+          return { error: `BLOCKED by ${guardResult.guardName}: ${guardResult.reason}` };
+        }
+
+        return wallet.add(operation);
       },
     }),
 

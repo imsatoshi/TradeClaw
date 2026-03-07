@@ -9,7 +9,7 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
 import { computeSignalStats, computeDetailedStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
 import type { DetailedSignalStats, StrategyWeight } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
@@ -53,6 +53,7 @@ const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const BRAIN_FILE = resolve('data/brain/commit.json')
 const FRONTAL_LOBE_FILE = resolve('data/brain/frontal-lobe.md')
 const EMOTION_LOG_FILE = resolve('data/brain/emotion-log.md')
+const PERSONA_DEFAULT_FILE = resolve('data/default/persona.default.md')
 const PERSONA_FILE = resolve('data/config/persona.md')
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -143,15 +144,13 @@ async function main() {
     ? Wallet.restore(savedState, cryptoWalletConfig)
     : new Wallet(cryptoWalletConfig)
 
-  // Sandbox (data access + realtime market & news data)
-  const { marketData } = await fetchRealtimeData()
-
-  // Supplement with exchange OHLCV for all whitelisted pairs (Binance public API)
+  // Sandbox (data access — OHLCV from Binance exchange)
+  let marketData: Record<string, import('./extension/archive-analysis/data/interfaces.js').MarketData[]> = {}
   try {
-    const exchangeData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
-    Object.assign(marketData, exchangeData)
+    marketData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
+    console.log(`market data: loaded ${Object.keys(marketData).length} pairs from Binance`)
   } catch (err) {
-    console.warn('exchange OHLCV fetch failed (non-fatal):', err)
+    console.warn('exchange OHLCV fetch failed (non-fatal, starting with empty data):', err)
   }
 
   const marketProvider = new RealMarketDataProvider(marketData)
@@ -188,8 +187,11 @@ async function main() {
     : new Brain({ onCommit: brainOnCommit })
 
   // Build system prompt: persona + current brain state
+  // Persona layering: user override (data/config/persona.md) > default (data/default/persona.default.md)
   let persona = ''
-  try { persona = await readFile(PERSONA_FILE, 'utf-8') } catch { /* use empty */ }
+  try { persona = await readFile(PERSONA_FILE, 'utf-8') } catch {
+    try { persona = await readFile(PERSONA_DEFAULT_FILE, 'utf-8') } catch { /* use empty */ }
+  }
 
   const frontalLobe = brain.getFrontalLobe()
   const emotion = brain.getEmotion().current
@@ -413,20 +415,13 @@ async function main() {
     '24. If the whitelist has 0 pairs shown above, call `getAllowedSymbols` or `cryptoGetWhitelist` to refresh.',
   ].join('\n')
 
-  // Refresh market data periodically (news is handled by RSS collector)
+  // Refresh market data periodically from Binance (news handled by RSS collector)
   setInterval(async () => {
     try {
-      const { marketData } = await fetchRealtimeData()
-
-      // Merge exchange OHLCV for whitelisted pairs
-      try {
-        const exchangeData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
-        Object.assign(marketData, exchangeData)
-      } catch { /* non-fatal */ }
-
-      marketProvider.reload(marketData)
+      const freshData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
+      marketProvider.reload(freshData)
     } catch (err) {
-      console.error('market data refresh failed:', err)
+      console.warn('market data refresh failed (non-fatal):', err)
     }
   }, config.engine.dataRefreshInterval)
 
