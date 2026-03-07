@@ -22,6 +22,7 @@ import {
   findSwingHighs, findSwingLows,
   bandwidthSeries, sma, rocSeries,
   detectFVGs, validateBOSSequence,
+  detectLiquidityZones,
 } from './helpers.js'
 import { getStrategyParamsFor } from './config.js'
 
@@ -279,9 +280,33 @@ function scoreStructure(
     chochDetail = `, CHoCH +4`
   }
 
-  const score = fvgScore + bosScore + chochScore
-  const detail = `${fvgDetail} (${fvgScore}/6), ${bosDetail} (${bosScore}/10)${chochDetail}`
-  return { score, max: 20, detail, raw: { hasFVG: fvgScore > 0, bosConfirmed: bosScore >= 6, hasCHoCH: chochScore > 0 } }
+  // --- Liquidity zone proximity (0-4, can stack with CHoCH up to combined cap) ---
+  let liqScore = 0
+  let liqDetail = ''
+
+  const liqZones = detectLiquidityZones(swingHighs, swingLows)
+  if (liqZones.length > 0) {
+    // Find nearest relevant liquidity zone
+    const relevantZones = direction === 'long'
+      ? liqZones.filter(lz => lz.type === 'equal_lows')  // EQL below = support magnet
+      : liqZones.filter(lz => lz.type === 'equal_highs') // EQH above = resistance magnet
+
+    for (const lz of relevantZones) {
+      const distPct = Math.abs((currentPrice - lz.price) / lz.price) * 100
+      if (distPct <= 1.5) {
+        liqScore = lz.count >= 3 ? 4 : 3
+        liqDetail = `, ${lz.type} $${lz.price.toFixed(2)} (${lz.count}x, ${distPct.toFixed(1)}%) +${liqScore}`
+        break
+      }
+    }
+  }
+
+  // Cap bonus at 4 to keep max at 20
+  const bonusScore = Math.min(chochScore + liqScore, 4)
+
+  const score = fvgScore + bosScore + bonusScore
+  const detail = `${fvgDetail} (${fvgScore}/6), ${bosDetail} (${bosScore}/10)${chochDetail}${liqDetail}`
+  return { score, max: 20, detail, raw: { hasFVG: fvgScore > 0, bosConfirmed: bosScore >= 6, hasCHoCH: chochScore > 0, hasLiqZone: liqScore > 0 } }
 }
 
 function scoreCandleQuality(

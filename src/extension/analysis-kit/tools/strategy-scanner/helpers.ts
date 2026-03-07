@@ -254,6 +254,124 @@ export function detectFVGs(
   return result
 }
 
+// ==================== Liquidity Zone Detection ====================
+
+/** A cluster of swing points at similar price levels — liquidity pool. */
+export interface LiquidityZone {
+  price: number               // average price of the cluster
+  type: 'equal_highs' | 'equal_lows'
+  count: number               // number of touches
+  latestIndex: number         // index of most recent touch
+}
+
+/**
+ * Detect Equal Highs / Equal Lows — price levels where multiple swing
+ * points cluster within `tolerancePct` of each other.
+ *
+ * These levels act as liquidity magnets: stop-hunts and breakouts target them.
+ * Minimum 2 touches to qualify.
+ */
+export function detectLiquidityZones(
+  swingHighs: SwingPoint[],
+  swingLows: SwingPoint[],
+  tolerancePct: number = 0.3,
+): LiquidityZone[] {
+  const zones: LiquidityZone[] = []
+
+  // Cluster swing highs into equal-high zones
+  const usedH = new Set<number>()
+  for (let i = 0; i < swingHighs.length; i++) {
+    if (usedH.has(i)) continue
+    const cluster = [swingHighs[i]]
+    usedH.add(i)
+    for (let j = i + 1; j < swingHighs.length; j++) {
+      if (usedH.has(j)) continue
+      const diff = Math.abs(swingHighs[j].price - swingHighs[i].price) / swingHighs[i].price * 100
+      if (diff <= tolerancePct) {
+        cluster.push(swingHighs[j])
+        usedH.add(j)
+      }
+    }
+    if (cluster.length >= 2) {
+      const avgPrice = cluster.reduce((s, p) => s + p.price, 0) / cluster.length
+      const latestIndex = Math.max(...cluster.map(p => p.index))
+      zones.push({ price: avgPrice, type: 'equal_highs', count: cluster.length, latestIndex })
+    }
+  }
+
+  // Cluster swing lows into equal-low zones
+  const usedL = new Set<number>()
+  for (let i = 0; i < swingLows.length; i++) {
+    if (usedL.has(i)) continue
+    const cluster = [swingLows[i]]
+    usedL.add(i)
+    for (let j = i + 1; j < swingLows.length; j++) {
+      if (usedL.has(j)) continue
+      const diff = Math.abs(swingLows[j].price - swingLows[i].price) / swingLows[i].price * 100
+      if (diff <= tolerancePct) {
+        cluster.push(swingLows[j])
+        usedL.add(j)
+      }
+    }
+    if (cluster.length >= 2) {
+      const avgPrice = cluster.reduce((s, p) => s + p.price, 0) / cluster.length
+      const latestIndex = Math.max(...cluster.map(p => p.index))
+      zones.push({ price: avgPrice, type: 'equal_lows', count: cluster.length, latestIndex })
+    }
+  }
+
+  return zones
+}
+
+/**
+ * Find structural support/resistance levels from swing points.
+ * Returns sorted prices: resistances ascending, supports descending.
+ */
+export function findStructuralLevels(
+  swingHighs: SwingPoint[],
+  swingLows: SwingPoint[],
+  currentPrice: number,
+  liquidityZones: LiquidityZone[],
+): { resistances: number[]; supports: number[] } {
+  const resistances: number[] = []
+  const supports: number[] = []
+
+  // Swing highs above price → resistance; below → support
+  for (const sh of swingHighs) {
+    if (sh.price > currentPrice * 1.001) resistances.push(sh.price)
+    else if (sh.price < currentPrice * 0.999) supports.push(sh.price)
+  }
+
+  // Swing lows below price → support; above → resistance
+  for (const sl of swingLows) {
+    if (sl.price < currentPrice * 0.999) supports.push(sl.price)
+    else if (sl.price > currentPrice * 1.001) resistances.push(sl.price)
+  }
+
+  // Liquidity zones — stronger than individual swings
+  for (const lz of liquidityZones) {
+    if (lz.price > currentPrice * 1.001) resistances.push(lz.price)
+    else if (lz.price < currentPrice * 0.999) supports.push(lz.price)
+  }
+
+  // Deduplicate (within 0.2% of each other, keep stronger/closer)
+  const dedup = (arr: number[]) => {
+    const sorted = [...new Set(arr)].sort((a, b) => a - b)
+    const result: number[] = []
+    for (const p of sorted) {
+      if (result.length === 0 || Math.abs(p - result[result.length - 1]) / p > 0.002) {
+        result.push(p)
+      }
+    }
+    return result
+  }
+
+  return {
+    resistances: dedup(resistances),                    // ascending
+    supports: dedup(supports).sort((a, b) => b - a),   // descending (nearest first)
+  }
+}
+
 /** BOS/CHoCH validation result. */
 export interface BOSResult {
   bosConfirmed: boolean

@@ -117,18 +117,41 @@ export interface SetupScore {
   entry: EntryTrigger | null
 }
 
-/** 15m entry trigger with precise SL/TP levels. */
+/** 1H entry trigger with precise SL/TP levels. */
 export interface EntryTrigger {
   triggered: boolean
   entry: number               // suggested entry price
-  stopLoss: number            // ATR-based SL
+  stopLoss: number            // structure + ATR-based SL
   takeProfits: {
-    tp1: { price: number; ratio: number }  // 1.5×ATR, 40%
-    tp2: { price: number; ratio: number }  // 3.0×ATR, 30%
-    tp3: { price: number; ratio: number }  // trailing, 30%
+    tp1: { price: number; ratio: number }
+    tp2: { price: number; ratio: number }
+    tp3: { price: number; ratio: number }
   }
   riskReward: number
   reason: string
+  /** How TP/SL were derived */
+  tpSource?: 'structure' | 'atr'
+  slSource?: 'structure' | 'atr' | 'dynamic'
+}
+
+/** Pending entry zone — setup qualifies but no immediate trigger. */
+export interface PendingZone {
+  symbol: string
+  direction: SignalDirection
+  setupScore: number
+  idealEntry: number          // target entry price
+  zoneHigh: number            // upper boundary
+  zoneLow: number             // lower boundary
+  stopLoss: number
+  takeProfits: {
+    tp1: { price: number; ratio: number }
+    tp2: { price: number; ratio: number }
+    tp3: { price: number; ratio: number }
+  }
+  riskReward: number
+  reason: string
+  createdAt: number           // Date.now()
+  expiresAt: number           // TTL
 }
 
 /** Pipeline signal — the primary output of the new scoring system. */
@@ -139,5 +162,6 @@ export interface PipelineSignal {
   regime: string
   dimensions: SetupScore['dimensions']
   entry: EntryTrigger | null  // null if score < threshold or no trigger
+  pendingZone?: PendingZone   // set when setup qualifies but no immediate trigger
   grade: 'A' | 'B' | 'C'     // A: ≥78, B: ≥threshold, C: below threshold
 }

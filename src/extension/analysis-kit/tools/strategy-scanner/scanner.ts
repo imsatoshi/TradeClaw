@@ -14,7 +14,7 @@
  * - Session info
  */
 
-import type { ScanResult, StrategySignal, FundingRateInfo, PipelineSignal } from './types.js'
+import type { ScanResult, StrategySignal, FundingRateInfo, PipelineSignal, PendingZone } from './types.js'
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import { fetchExchangeOHLCV } from '../../../archive-analysis/data/ExchangeClient.js'
 import { fetchFundingRates } from '../../../archive-analysis/data/FundingRateClient.js'
@@ -24,7 +24,7 @@ import { getStrategyParams } from './config.js'
 import { detectMarketRegime } from './regime.js'
 import type { MarketRegime } from './regime.js'
 import { scoreSetup } from './setup-scorer.js'
-import { checkEntryTrigger } from './entry-trigger.js'
+import { checkEntryTrigger, computePendingZone, checkPendingZone } from './entry-trigger.js'
 import { atrSeries } from './helpers.js'
 import { createLogger } from '../../../../core/logger.js'
 
@@ -48,6 +48,9 @@ const ohlcvCache = new Map<string, CacheEntry>()
 const signalCooldown = new Map<string, number>()  // key → timestamp of last log
 const SIGNAL_COOLDOWN_MS = 2 * 60 * 60 * 1000  // 2 hours
 let CACHE_TTL_MS = 20 * 60 * 1000  // 20 minutes (overridden by config)
+
+// Pending entry zones — setups that qualified but didn't trigger immediately
+const pendingZones = new Map<string, PendingZone>()  // "SYMBOL|direction" → zone
 
 function makeCacheKey(symbols: string[], timeframe: string, limit: number): string {
   return `${[...symbols].sort().join(',')}|${timeframe}|${limit}`
@@ -217,9 +220,43 @@ export async function runStrategyScan(
 
         const threshold = regime.regime === 'ranging' ? THRESHOLD_RANGE : THRESHOLD_TREND
 
-        // Stage 3: Check entry trigger if score qualifies
-        if (score.totalScore >= threshold && atr > 0) {
+        const zoneKey = `${symbol}|${direction}`
+        let pendingZone: PendingZone | undefined
+
+        // Stage 3a: Check existing pending zones first
+        const existingZone = pendingZones.get(zoneKey)
+        if (existingZone && !score.entry) {
+          if (Date.now() > existingZone.expiresAt) {
+            pendingZones.delete(zoneKey)
+          } else {
+            const currentBar = bars1h[bars1h.length - 1]
+            const zoneEntry = checkPendingZone(existingZone, currentBar.close, currentBar)
+            if (zoneEntry) {
+              score.entry = zoneEntry
+              pendingZones.delete(zoneKey) // consumed
+              log.info(`pending zone triggered for ${symbol} ${direction}`, { idealEntry: existingZone.idealEntry })
+            }
+          }
+        }
+
+        // Stage 3b: Check immediate entry trigger if score qualifies
+        if (score.totalScore >= threshold && atr > 0 && !score.entry) {
           score.entry = checkEntryTrigger(direction, bars1h, atr)
+
+          // Stage 3c: If no immediate trigger, create pending zone for pullback entry
+          if (!score.entry) {
+            const zone = computePendingZone(symbol, direction, score.totalScore, bars1h, atr)
+            if (zone) {
+              pendingZones.set(zoneKey, zone)
+              pendingZone = zone
+              log.info(`pending zone created for ${symbol} ${direction}`, {
+                idealEntry: zone.idealEntry,
+                zoneHigh: zone.zoneHigh,
+                zoneLow: zone.zoneLow,
+                expiresIn: `${((zone.expiresAt - Date.now()) / 3600000).toFixed(1)}h`,
+              })
+            }
+          }
         }
 
         const grade = score.totalScore >= 78 ? 'A' as const
@@ -233,6 +270,7 @@ export async function runStrategyScan(
           regime: regime.regime,
           dimensions: score.dimensions,
           entry: score.entry,
+          pendingZone,
           grade,
         })
       } catch (err) {
@@ -249,10 +287,16 @@ export async function runStrategyScan(
   const qualified = pipelineSignals.filter(s => s.grade !== 'C')
   const triggered = pipelineSignals.filter(s => s.entry?.triggered)
 
+  // Clean up expired pending zones
+  for (const [key, zone] of pendingZones) {
+    if (Date.now() > zone.expiresAt) pendingZones.delete(key)
+  }
+
   log.info('pipeline scan complete', {
     scored: pipelineSignals.length,
     qualified: qualified.length,
     triggered: triggered.length,
+    pendingZones: pendingZones.size,
     errors: errors.length,
   })
 
