@@ -9,7 +9,7 @@ import type { Plugin, EngineContext, MediaAttachment } from './core/types.js'
 import { HttpPlugin } from './plugins/http.js'
 import { McpPlugin } from './plugins/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
-import { Sandbox, RealMarketDataProvider, RealNewsProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
+import { Sandbox, RealMarketDataProvider, fetchRealtimeData, fetchExchangeOHLCV, runStrategyScan, detectMarketRegime } from './extension/analysis-kit/index.js'
 import { createAnalysisTools } from './extension/analysis-kit/index.js'
 import { computeSignalStats, computeDetailedStats } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
 import type { DetailedSignalStats, StrategyWeight } from './extension/analysis-kit/tools/strategy-scanner/signal-log.js'
@@ -144,7 +144,7 @@ async function main() {
     : new Wallet(cryptoWalletConfig)
 
   // Sandbox (data access + realtime market & news data)
-  const { marketData, news } = await fetchRealtimeData()
+  const { marketData } = await fetchRealtimeData()
 
   // Supplement with exchange OHLCV for all whitelisted pairs (Binance public API)
   try {
@@ -155,7 +155,6 @@ async function main() {
   }
 
   const marketProvider = new RealMarketDataProvider(marketData)
-  const newsProvider = new RealNewsProvider(news)
 
   const sandbox = new Sandbox(
     { timeframe: config.engine.timeframe },
@@ -414,10 +413,10 @@ async function main() {
     '24. If the whitelist has 0 pairs shown above, call `getAllowedSymbols` or `cryptoGetWhitelist` to refresh.',
   ].join('\n')
 
-  // Refresh market data & news periodically
+  // Refresh market data periodically (news is handled by RSS collector)
   setInterval(async () => {
     try {
-      const { marketData, news } = await fetchRealtimeData()
+      const { marketData } = await fetchRealtimeData()
 
       // Merge exchange OHLCV for whitelisted pairs
       try {
@@ -426,9 +425,8 @@ async function main() {
       } catch { /* non-fatal */ }
 
       marketProvider.reload(marketData)
-      newsProvider.reload(news)
     } catch (err) {
-      console.error('DotAPI refresh failed:', err)
+      console.error('market data refresh failed:', err)
     }
   }, config.engine.dataRefreshInterval)
 
