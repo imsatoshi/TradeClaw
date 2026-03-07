@@ -623,9 +623,11 @@ Pipeline (4H + 1H + 15m data from Binance):
   Stage 3: 15m entry trigger → precise SL/TP levels (3-tier TP)
 
 Returns pipelineSignals sorted by score:
-- Grade A (≥70): high-confidence setup, propose trade if entry triggered
-- Grade B (55-69): moderate setup, propose with caveats if entry triggered
-- Grade C (<55): below threshold, context only
+- Grade A (≥78): high-confidence setup, propose trade if entry triggered
+- Grade B (≥65 trend / ≥75 range): moderate setup, validate with getMarketContext before proposing
+- Grade C (below threshold): below threshold, context only
+- Thresholds are DYNAMIC: auto-increase if historical win rate < 45%
+- Fresh regime penalty: -10pts if regime changed within 32 hours
 
 Call this when user asks about market opportunities or during heartbeat.
       `.trim(),

@@ -164,9 +164,22 @@ export async function runStrategyScan(
     regimeMap[r.symbol] = r
   }
 
-  // Pipeline scoring thresholds
-  const THRESHOLD_TREND = scannerParams.pipelineThresholdTrend ?? 55
-  const THRESHOLD_RANGE = scannerParams.pipelineThresholdRange ?? 65
+  // Dynamic thresholds: if historical win rate is low, raise the bar
+  const weights = await computeStrategyWeights().catch(() => ({} as Record<string, StrategyWeight>))
+  const pipelineWeight = weights['pipeline']
+  let thresholdBoost = 0
+  if (pipelineWeight && pipelineWeight.sampleSize >= 10) {
+    if (pipelineWeight.winRate < 0.40) thresholdBoost = 15      // very poor: require much higher score
+    else if (pipelineWeight.winRate < 0.45) thresholdBoost = 10  // poor: require higher score
+    else if (pipelineWeight.winRate < 0.50) thresholdBoost = 5   // below breakeven: slight boost
+  }
+
+  const THRESHOLD_TREND = (scannerParams.pipelineThresholdTrend ?? 65) + thresholdBoost
+  const THRESHOLD_RANGE = (scannerParams.pipelineThresholdRange ?? 75) + thresholdBoost
+
+  if (thresholdBoost > 0) {
+    log.info('dynamic threshold boost applied', { winRate: pipelineWeight!.winRate, samples: pipelineWeight!.sampleSize, boost: thresholdBoost, trendThreshold: THRESHOLD_TREND, rangeThreshold: THRESHOLD_RANGE })
+  }
 
   // Stage 2 + 3: Score setups and check entry triggers
   const pipelineSignals: PipelineSignal[] = []
@@ -203,6 +216,12 @@ export async function runStrategyScan(
     for (const direction of directions) {
       try {
         const score = await scoreSetup(symbol, direction, regime, bars15m, bars1h, funding)
+
+        // Fresh regime penalty: reduce score by 10 if regime just changed (< 8 bars = 32 hours)
+        if (regime.isFreshRegime) {
+          score.totalScore = Math.max(0, score.totalScore - 10)
+        }
+
         const threshold = regime.regime === 'ranging' ? THRESHOLD_RANGE : THRESHOLD_TREND
 
         // Stage 3: Check entry trigger if score qualifies
@@ -210,7 +229,7 @@ export async function runStrategyScan(
           score.entry = checkEntryTrigger(direction, bars15m, atr)
         }
 
-        const grade = score.totalScore >= 70 ? 'A' as const
+        const grade = score.totalScore >= 78 ? 'A' as const
           : score.totalScore >= threshold ? 'B' as const
           : 'C' as const
 
@@ -232,8 +251,7 @@ export async function runStrategyScan(
   // Sort by setup score descending
   pipelineSignals.sort((a, b) => b.setupScore - a.setupScore)
 
-  // Compute strategy weights (still useful for AI context / historical performance)
-  const weights = await computeStrategyWeights().catch(() => ({} as Record<string, StrategyWeight>))
+  // weights already computed above (dynamic threshold + AI context)
 
   const qualified = pipelineSignals.filter(s => s.grade !== 'C')
   const triggered = pipelineSignals.filter(s => s.entry?.triggered)

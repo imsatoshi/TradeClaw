@@ -20,6 +20,10 @@ export interface MarketRegime {
   priceVsEma55: number  // % deviation from EMA55
   rsi: number
   reason: string     // human-readable explanation
+  /** How many consecutive 4H bars the current regime has held. */
+  regimeDuration: number
+  /** True if regime just changed (duration < 8 bars = 32 hours). Fresh regimes are less reliable. */
+  isFreshRegime: boolean
 }
 
 /**
@@ -53,6 +57,8 @@ export function detectMarketRegime(
         priceVsEma55: 0,
         rsi: 50,
         reason: 'insufficient data (< 55 bars)',
+        regimeDuration: 0,
+        isFreshRegime: true,
       })
       continue
     }
@@ -93,6 +99,26 @@ export function detectMarketRegime(
       reason = `EMA no clear alignment, price $${price.toPrecision(4)} (${priceVsEma55 >= 0 ? '+' : ''}${priceVsEma55.toFixed(1)}% vs EMA55), RSI ${rsi.toFixed(0)}`
     }
 
+    // Count regime duration: how many consecutive bars had the same regime
+    let regimeDuration = 1
+    const ema9Arr = ema9
+    const ema21Arr = ema21
+    const ema55Arr = ema55
+    for (let i = ema9Arr.length - 2; i >= 0 && i >= ema9Arr.length - 30; i--) {
+      const f = ema9Arr[i], m = ema21Arr[i], s = ema55Arr[i]
+      const p = closes[i + (closes.length - ema9Arr.length)]
+      let pastRegime: MarketRegime['regime']
+      if (f < m && m < s && p < s) pastRegime = 'downtrend'
+      else if (f > m && m > s && p > s) pastRegime = 'uptrend'
+      else pastRegime = 'ranging'
+      if (pastRegime === regime) regimeDuration++
+      else break
+    }
+    const isFreshRegime = regimeDuration < 8
+    if (isFreshRegime) {
+      reason += ` [FRESH regime: ${regimeDuration} bars]`
+    }
+
     results.push({
       symbol,
       regime,
@@ -103,6 +129,8 @@ export function detectMarketRegime(
       priceVsEma55,
       rsi,
       reason,
+      regimeDuration,
+      isFreshRegime,
     })
   }
 

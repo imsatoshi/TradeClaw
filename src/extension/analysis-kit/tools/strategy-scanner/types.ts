@@ -139,5 +139,5 @@ export interface PipelineSignal {
   regime: string
   dimensions: SetupScore['dimensions']
   entry: EntryTrigger | null  // null if score < threshold or no trigger
-  grade: 'A' | 'B' | 'C'     // A: ≥70, B: 55-69, C: <55
+  grade: 'A' | 'B' | 'C'     // A: ≥78, B: ≥threshold, C: below threshold
 }

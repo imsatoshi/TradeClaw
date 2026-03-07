@@ -384,11 +384,12 @@ function scoreVolume(
     else if (volRatio >= 0.8) { score = 4; detail = `${volRatio.toFixed(1)}x avg (normal)` }
     else { score = 1; detail = `${volRatio.toFixed(1)}x avg (weak)` }
   } else {
-    // Ranging mode: low volume = exhaustion (mean-reversion)
-    if (volRatio < 0.7) { score = 8; detail = `${volRatio.toFixed(1)}x avg (exhaustion)` }
-    else if (volRatio < 0.9) { score = 6; detail = `${volRatio.toFixed(1)}x avg (low)` }
-    else if (volRatio <= 1.3) { score = 4; detail = `${volRatio.toFixed(1)}x avg (normal)` }
-    else { score = 1; detail = `${volRatio.toFixed(1)}x avg (too high for ranging)` }
+    // Ranging mode: prefer normal-to-slightly-low volume; very low = dead market (risky), high = breakout incoming
+    if (volRatio >= 0.8 && volRatio <= 1.2) { score = 7; detail = `${volRatio.toFixed(1)}x avg (ideal for ranging)` }
+    else if (volRatio < 0.8 && volRatio >= 0.5) { score = 4; detail = `${volRatio.toFixed(1)}x avg (low, caution)` }
+    else if (volRatio < 0.5) { score = 1; detail = `${volRatio.toFixed(1)}x avg (dead market)` }
+    else if (volRatio <= 1.5) { score = 3; detail = `${volRatio.toFixed(1)}x avg (elevated for ranging)` }
+    else { score = 0; detail = `${volRatio.toFixed(1)}x avg (breakout volume, skip mean-reversion)` }
   }
 
   return { score, max: 10, detail, raw: { volumeRatio: Math.round(volRatio * 100) / 100 } }
@@ -504,8 +505,16 @@ export async function scoreSetup(
   const volatility = scoreVolatility(closes, BB_PERIOD, BB_MULT, BBWP_LOOKBACK)
   const fundingScore = scoreFunding(direction, funding)
 
-  const totalScore = trend.score + momentum.score + acceleration.score + structure.score
+  let totalScore = trend.score + momentum.score + acceleration.score + structure.score
     + candle.score + volume.score + volatility.score + fundingScore.score
+
+  // Global volatility penalty: high BBWP (>70th percentile) makes all setups riskier
+  const bbwpRaw = volatility.raw?.bbwp
+  if (typeof bbwpRaw === 'number' && bbwpRaw > 70) {
+    const volPenalty = bbwpRaw > 85 ? 15 : 10
+    totalScore = Math.max(0, totalScore - volPenalty)
+    volatility.detail += ` [HIGH-VOL PENALTY: -${volPenalty}]`
+  }
 
   return {
     symbol,
