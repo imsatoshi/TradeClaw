@@ -233,7 +233,7 @@ case 'freqtrade': {
   "provider": {
     "type": "freqtrade",
     "url": "http://YOUR_FREQTRADE_HOST:8080",
-    "username": "admin",
+    "username": "your-username",
     "password": "your-password",
     "defaultStakeAmount": 100
   }
@@ -324,7 +324,7 @@ AI: 正在执行平仓操作...
 ```typescript
 const engine = new FreqtradeTradingEngine({
   url: 'http://YOUR_FREQTRADE_HOST:8080',
-  username: 'admin',
+  username: 'your-username',
   password: 'your-password',
 });
 
