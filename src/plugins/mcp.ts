@@ -117,7 +117,7 @@ export class McpPlugin implements Plugin {
       this.server = serve({ fetch: app.fetch, port }, (info) => {
         console.log(`mcp plugin listening on http://localhost:${info.port}/mcp`)
       })
-      this.server.on('error', (err: NodeJS.ErrnoException) => {
+      const onError = (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
           console.warn(`mcp plugin: port ${port} in use, retrying in 3s...`)
           setTimeout(() => {
@@ -125,11 +125,13 @@ export class McpPlugin implements Plugin {
             this.server = serve({ fetch: app.fetch, port }, (info) => {
               console.log(`mcp plugin listening on http://localhost:${info.port}/mcp (retry)`)
             })
+            this.server.on('error', onError)
           }, 3000)
         } else {
           console.error(`mcp plugin error: ${err.message}`)
         }
-      })
+      }
+      this.server.on('error', onError)
     } catch (err) {
       console.warn(`mcp plugin: failed to start on port ${port}: ${err}`)
     }

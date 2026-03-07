@@ -33,7 +33,7 @@ export class HttpPlugin implements Plugin {
         console.log(`http plugin listening on http://localhost:${info.port}`)
       })
       // Handle server errors (e.g. EADDRINUSE) without crashing
-      this.server.on('error', (err: NodeJS.ErrnoException) => {
+      const onError = (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
           console.warn(`http plugin: port ${port} in use, retrying in 3s...`)
           setTimeout(() => {
@@ -41,11 +41,13 @@ export class HttpPlugin implements Plugin {
             this.server = serve({ fetch: app.fetch, port }, (info) => {
               console.log(`http plugin listening on http://localhost:${info.port} (retry)`)
             })
+            this.server.on('error', onError)
           }, 3000)
         } else {
           console.error(`http plugin error: ${err.message}`)
         }
-      })
+      }
+      this.server.on('error', onError)
     } catch (err) {
       console.warn(`http plugin: failed to start on port ${port}: ${err}`)
     }
