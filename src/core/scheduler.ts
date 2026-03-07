@@ -271,7 +271,9 @@ export class HeartbeatDedup {
 // ==================== Scheduler ====================
 
 const DEFAULT_COALESCE_MS = 250
-const RETRY_DELAY_MS = 1000
+const RETRY_BASE_MS = 2000
+const RETRY_MAX_MS = 120_000    // cap at 2 minutes
+const MAX_CONSECUTIVE_FAILURES = 5  // stop retrying after 5 consecutive failures
 
 export function createScheduler(
   config: SchedulerConfig,
@@ -294,6 +296,9 @@ export function createScheduler(
   // Wake coalescing state
   let pendingReason: WakeReason | null = null
   let pendingPriority = -1
+
+  // Retry backoff state
+  let consecutiveFailures = 0
 
   function requestWake(reason: WakeReason = 'manual'): void {
     if (stopped) return
@@ -365,8 +370,12 @@ export function createScheduler(
           enqueueSystemEvent(evt)
         }
         if (!stopped) {
-          setTimeout(() => requestWake('retry'), RETRY_DELAY_MS)
+          const delay = Math.min(RETRY_BASE_MS * Math.pow(2, consecutiveFailures), RETRY_MAX_MS)
+          consecutiveFailures++
+          setTimeout(() => requestWake('retry'), delay)
         }
+      } else {
+        consecutiveFailures = 0 // reset on success
       }
 
       const durationMs = now() - start
@@ -374,10 +383,12 @@ export function createScheduler(
       emit('heartbeat', { ...result, reason, durationMs })
 
     } catch (err) {
-      console.error('scheduler: runOnce error:', err)
+      consecutiveFailures++
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.error(`scheduler: runOnce error (failure ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`, errMsg)
       emit('heartbeat', {
         status: 'failed',
-        reason: String(err instanceof Error ? err.message : err),
+        reason: errMsg,
         durationMs: now() - start,
       })
 
@@ -388,9 +399,14 @@ export function createScheduler(
         }
       }
 
-      // Auto-retry on failure (lowest priority)
-      if (!stopped) {
-        setTimeout(() => requestWake('retry'), RETRY_DELAY_MS)
+      // Auto-retry with exponential backoff, but stop after MAX_CONSECUTIVE_FAILURES
+      if (!stopped && consecutiveFailures < MAX_CONSECUTIVE_FAILURES) {
+        const delay = Math.min(RETRY_BASE_MS * Math.pow(2, consecutiveFailures - 1), RETRY_MAX_MS)
+        console.log(`scheduler: will retry in ${Math.round(delay / 1000)}s`)
+        setTimeout(() => requestWake('retry'), delay)
+      } else if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.error(`scheduler: ${MAX_CONSECUTIVE_FAILURES} consecutive failures, giving up until next interval`)
+        // Drop system events to prevent infinite accumulation
       }
     } finally {
       running = false

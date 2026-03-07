@@ -822,8 +822,10 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
         return await fn();
       } catch (error) {
         if (i === retries) throw error;
-        log.warn(`request failed, retrying (${i + 1}/${retries})...`);
-        await new Promise(r => setTimeout(r, 1000));
+        // Exponential backoff: 1s → 2s → 4s
+        const delay = 1000 * Math.pow(2, i);
+        log.warn(`request failed, retrying in ${delay}ms (${i + 1}/${retries})...`);
+        await new Promise(r => setTimeout(r, delay));
       }
     }
     throw new Error('unreachable');
