@@ -337,6 +337,15 @@ freqtrade/
 HEARTBEAT.md                     # 自主心跳监控指令
 ```
 
+## 致谢
+
+TradeClaw 的架构设计受益于 [OpenAlice](https://github.com/TraderAlice/OpenAlice) 和 [OpenClaw](https://github.com/anthropics/claude-code) 两个项目：
+
+- **OpenAlice** — AI Agent 框架的基础架构：引擎、调度系统、会话管理、多连接器设计均源自 OpenAlice 的开创性工作。
+- **OpenClaw** — 心跳/Cron/投递队列的调度架构、浏览器自动化子系统、Agent 工具沙箱等核心模块的设计灵感来自 OpenClaw。
+
+感谢这两个项目为 AI-native 应用架构探索出的道路。
+
 ## 许可证
 
 [MIT](LICENSE)
