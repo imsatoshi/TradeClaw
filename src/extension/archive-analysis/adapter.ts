@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { IAnalysisContext } from './interfaces';
 import { calculate } from '../thinking-kit/tools/calculate.tool';
 import { calculateIndicator } from './tools/calculate-indicator.tool';
-import { globNews, grepNews, readNews } from './tools/news.tool';
+
 import { CRYPTO_ALLOWED_SYMBOLS, CRYPTO_DEFAULT_LEVERAGE, CRYPTO_MAX_OPEN_TRADES } from '../crypto-trading/interfaces.js';
 import { runStrategyScan } from '../analysis-kit/tools/strategy-scanner/index.js';
 import { runBacktest, optimizeParams, batchOptimize } from '../analysis-kit/tools/strategy-scanner/index.js';
@@ -26,7 +26,7 @@ import type { MarketData } from './data/interfaces.js';
  *
  * Includes:
  * - Market data: getLatestOHLCV, getAllowedSymbols
- * - News: globNews, grepNews, readNews
+ * - News: globNews, grepNews, readNews (provided by news-collector module)
  * - Time: getCurrentTime
  * - Thinking: think, plan
  * - Calculation: calculate, calculateIndicator
@@ -70,152 +70,8 @@ export function createAnalysisToolsImpl(sandbox: IAnalysisContext) {
       },
     }),
 
-    globNews: tool({
-      description: `
-Search news by title pattern (like "ls" or "glob" for files).
-
-Returns a list of matching news with index, title, content length, and metadata preview.
-Use this to quickly scan headlines and find relevant news before reading full content.
-
-Time range control:
-- lookback: How far back to search, e.g. "1h", "12h", "1d", "7d" (recommended over startTime)
-- Default: searches all available news up to current time
-
-Example use cases:
-- globNews({ pattern: "BTC|Bitcoin" }) - Find all Bitcoin-related news
-- globNews({ pattern: "ETF", lookback: "1d" }) - Find ETF news from the last 24 hours
-- globNews({ pattern: ".*", metadataFilter: { source: "official" }, limit: 10 }) - Latest 10 official news
-      `.trim(),
-      inputSchema: z.object({
-        pattern: z
-          .string()
-          .describe('Regular expression to match against news titles'),
-        lookback: z
-          .string()
-          .optional()
-          .describe(
-            'How far back to search: "1h", "2h", "12h", "1d", "7d", etc. Recommended over startTime.',
-          ),
-        metadataFilter: z
-          .record(z.string(), z.string())
-          .optional()
-          .describe('Filter by metadata key-value pairs'),
-        limit: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe('Maximum number of results to return'),
-      }),
-      execute: async ({ pattern, lookback, metadataFilter, limit }) => {
-        // Default hard limit of 500 items to prevent processing too much data
-        const NEWS_LIMIT = 500;
-        return await globNews(
-          { getNews: () => sandbox.getNewsV2({ lookback, limit: NEWS_LIMIT }) },
-          { pattern, metadataFilter, limit },
-        );
-      },
-    }),
-
-    grepNews: tool({
-      description: `
-Search news content by pattern (like "grep" for files).
-
-Returns matching news with context around the matched text.
-Use this to find specific information mentioned in news content.
-
-Time range control:
-- lookback: How far back to search, e.g. "1h", "12h", "1d", "7d" (recommended over startTime)
-- Default: searches all available news up to current time
-
-Example use cases:
-- grepNews({ pattern: "interest rate", lookback: "2d" }) - Find interest rate mentions in last 2 days
-- grepNews({ pattern: "\\$[0-9]+[KMB]?", contextChars: 100 }) - Find price mentions with more context
-- grepNews({ pattern: "hack|exploit|vulnerability", lookback: "1d" }) - Find security news from last 24h
-      `.trim(),
-      inputSchema: z.object({
-        pattern: z
-          .string()
-          .describe(
-            'Regular expression to search in news title and content',
-          ),
-        lookback: z
-          .string()
-          .optional()
-          .describe(
-            'How far back to search: "1h", "2h", "12h", "1d", "7d", etc. Recommended over startTime.',
-          ),
-        contextChars: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe(
-            'Number of characters to show before and after match (default: 50)',
-          ),
-        metadataFilter: z
-          .record(z.string(), z.string())
-          .optional()
-          .describe('Filter by metadata key-value pairs'),
-        limit: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe('Maximum number of results to return'),
-      }),
-      execute: async ({
-        pattern,
-        lookback,
-        contextChars,
-        metadataFilter,
-        limit,
-      }) => {
-        // Default hard limit of 500 items to prevent processing too much data
-        const NEWS_LIMIT = 500;
-        return await grepNews(
-          { getNews: () => sandbox.getNewsV2({ lookback, limit: NEWS_LIMIT }) },
-          { pattern, contextChars, metadataFilter, limit },
-        );
-      },
-    }),
-
-    readNews: tool({
-      description: `
-Read full news content by index (like "cat" for files).
-
-Use this after globNews or grepNews to read the complete content of a specific news item.
-The index is returned by globNews/grepNews results.
-
-Note: The index is relative to the news list from your last globNews/grepNews call.
-Make sure to use the same lookback parameter to get consistent indices.
-      `.trim(),
-      inputSchema: z.object({
-        index: z
-          .number()
-          .int()
-          .nonnegative()
-          .describe('News index from globNews/grepNews results'),
-        lookback: z
-          .string()
-          .optional()
-          .describe(
-            'Should match the lookback used in globNews/grepNews to get consistent indices',
-          ),
-      }),
-      execute: async ({ index, lookback }) => {
-        // Use the same limit to maintain index consistency
-        const NEWS_LIMIT = 500;
-        const result = await readNews(
-          { getNews: () => sandbox.getNewsV2({ lookback, limit: NEWS_LIMIT }) },
-          { index },
-        );
-        if (!result) {
-          return { error: `News index ${index} not found` };
-        }
-        return result;
-      },
-    }),
+    // Note: globNews/grepNews/readNews are now provided by the news-collector module
+    // and merged into the tools object in main.ts (createNewsArchiveTools)
 
     getAllowedSymbols: tool({
       description: 'Get available trading symbols/pairs (from exchange whitelist)',

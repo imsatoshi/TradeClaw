@@ -1,5 +1,5 @@
 /**
- * 15m entry trigger — precise entry conditions with ATR-based SL/TP.
+ * 1H entry trigger — precise entry conditions with ATR-based SL/TP.
  *
  * Only called when setup score qualifies (≥ threshold).
  * Checks 3 trigger patterns per direction and computes 3-tier TP exits.
@@ -10,24 +10,24 @@ import type { EntryTrigger, SignalDirection } from './types.js'
 import { findSwingHighs, findSwingLows, rsiSeries, atrSeries } from './helpers.js'
 
 /**
- * Check if 15m price action provides a valid entry trigger.
+ * Check if 1H price action provides a valid entry trigger.
  *
  * @returns EntryTrigger if conditions met, null otherwise
  */
 export function checkEntryTrigger(
   direction: SignalDirection,
-  bars15m: MarketData[],
+  bars: MarketData[],
   atr: number,
 ): EntryTrigger | null {
-  if (bars15m.length < 30 || atr <= 0) return null
+  if (bars.length < 30 || atr <= 0) return null
 
-  const closes = bars15m.map(b => b.close)
-  const highs = bars15m.map(b => b.high)
-  const lows = bars15m.map(b => b.low)
-  const volumes = bars15m.map(b => b.volume)
+  const closes = bars.map(b => b.close)
+  const highs = bars.map(b => b.high)
+  const lows = bars.map(b => b.low)
+  const volumes = bars.map(b => b.volume)
 
-  const current = bars15m[bars15m.length - 1]
-  const prev = bars15m[bars15m.length - 2]
+  const current = bars[bars.length - 1]
+  const prev = bars[bars.length - 2]
   const entry = current.close
 
   // Volume context for trigger confirmation

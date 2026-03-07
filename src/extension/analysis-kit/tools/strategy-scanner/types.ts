@@ -6,14 +6,14 @@ export type StrategyName =
   | 'pipeline'
 
 /** Primary decision timeframe for each strategy. */
-export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '15m'> = {
+export const STRATEGY_TIMEFRAMES: Record<StrategyName, '4h' | '1h' | '15m'> = {
   rsi_divergence: '15m',
   ema_trend: '4h',
   breakout_volume: '4h',
   funding_fade: '4h',
   bb_mean_revert: '15m',
   structure_break: '15m',
-  pipeline: '15m',
+  pipeline: '1h',
 }
 
 export interface StrategySignal {

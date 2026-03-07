@@ -47,6 +47,7 @@ import { ClaudeCodeProvider } from './providers/claude-code/index.js'
 import { resolveCompactionConfig } from './core/compaction.js'
 import { createEventLog } from './core/event-log.js'
 import type { Heartbeat } from './task/heartbeat/index.js'
+import { NewsCollectorStore, NewsCollector, createNewsArchiveTools } from './extension/news-collector/index.js'
 
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const BRAIN_FILE = resolve('data/brain/commit.json')
@@ -310,7 +311,17 @@ async function main() {
     '- If you believe a position should be closed, use proposeTradeWithButtons to ASK the user',
     '- The SL exists for a reason — let it do its job. Do NOT preempt the SL by closing manually.',
     '',
-    '**Step 3: Housekeeping**',
+    '**Step 3: News Check (CRITICAL for risk management)**',
+    '- Call globNews({ pattern: ".*", lookback: "1h", limit: 10 }) to scan recent headlines',
+    '- If you find BREAKING NEWS affecting held positions or watchlist:',
+    '  → Regulatory action (SEC, ban, lawsuit) → immediately tighten SL on affected positions',
+    '  → Exchange hack/exploit → propose closing affected positions via proposeTradeWithButtons',
+    '  → Major macro event (Fed, CPI, war) → evaluate portfolio-wide exposure',
+    '  → Positive catalyst (ETF approval, partnership) → consider if it supports current positions',
+    '- For held positions: search grepNews for the specific coin name to check recent sentiment',
+    '- News sources: CoinDesk, CoinTelegraph, The Block, CNBC (auto-collected every 10 minutes)',
+    '',
+    '**Step 4: Housekeeping**',
     '- syncSignalOutcomes — update signal win-rate stats',
     '',
     '**Step 4: Learn from outcomes**',
@@ -417,6 +428,24 @@ async function main() {
     }
   }, config.engine.dataRefreshInterval)
 
+  // ==================== News Collector ====================
+
+  const newsStore = new NewsCollectorStore()
+  await newsStore.init()
+
+  const newsCollector = new NewsCollector({
+    store: newsStore,
+    feeds: [
+      { name: 'CoinDesk', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'coindesk' },
+      { name: 'CoinTelegraph', url: 'https://cointelegraph.com/rss', source: 'cointelegraph' },
+      { name: 'The Block', url: 'https://www.theblock.co/rss.xml', source: 'theblock' },
+      { name: 'CNBC Finance', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', source: 'cnbc' },
+    ],
+    intervalMs: 10 * 60 * 1000, // Every 10 minutes
+  })
+  newsCollector.start()
+  console.log('news-collector: started (4 RSS feeds, every 10m)')
+
   // ==================== Tool Assembly ====================
 
   // Cron engine (created early so tools can reference it; timers start later after plugins)
@@ -430,6 +459,7 @@ async function main() {
 
   const tools = {
     ...createAnalysisTools(sandbox),
+    ...createNewsArchiveTools(newsStore),
     ...createAShareTools(),
     ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge, cryptoResult?.directExchangeEngine, tradeManager),
     ...createBrainTools(brain),

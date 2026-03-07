@@ -2,8 +2,8 @@
  * Multi-factor setup scorer v2 — 8-dimension scoring system.
  *
  * Scores each (symbol, direction) pair on 8 dimensions (0-100 total):
- *   1. Trend Strength  (15) — EMA spread + 1H SMA20
- *   2. Momentum        (15) — 15m RSI + MACD + 1H RSI MTF gate
+ *   1. Trend Strength  (15) — EMA spread + SMA20
+ *   2. Momentum        (15) — RSI + MACD + MTF RSI gate
  *   3. Acceleration    (10) — ROC delta (rate of change of rate of change)
  *   4. Structure       (20) — FVG + validated BOS sequence + CHoCH
  *   5. Candle Quality  (10) — body ratio + wick rejection + engulfing
@@ -286,12 +286,12 @@ function scoreStructure(
 
 function scoreCandleQuality(
   direction: SignalDirection,
-  bars15m: MarketData[],
+  bars: MarketData[],
 ): DimensionScore {
-  if (bars15m.length < 2) return { score: 5, max: 10, detail: 'insufficient data' }
+  if (bars.length < 2) return { score: 5, max: 10, detail: 'insufficient data' }
 
-  const current = bars15m[bars15m.length - 1]
-  const prev = bars15m[bars15m.length - 2]
+  const current = bars[bars.length - 1]
+  const prev = bars[bars.length - 2]
 
   const body = Math.abs(current.close - current.open)
   const range = current.high - current.low
@@ -475,8 +475,7 @@ export async function scoreSetup(
   symbol: string,
   direction: SignalDirection,
   regime: MarketRegime,
-  bars15m: MarketData[],
-  bars1h: MarketData[],
+  bars: MarketData[],
   funding?: FundingRateInfo,
 ): Promise<SetupScore> {
   // Load configurable params (reuses existing config system)
@@ -489,18 +488,18 @@ export async function scoreSetup(
   const BB_MULT = p.bbMultiplier ?? 2
   const BBWP_LOOKBACK = p.bwPercentileLookback ?? 120
 
-  const closes = bars15m.map(b => b.close)
-  const highs = bars15m.map(b => b.high)
-  const lows = bars15m.map(b => b.low)
-  const volumes = bars15m.map(b => b.volume)
+  const closes = bars.map(b => b.close)
+  const highs = bars.map(b => b.high)
+  const lows = bars.map(b => b.low)
+  const volumes = bars.map(b => b.volume)
 
   const rsiArr = rsiSeries(closes, RSI_PERIOD)
 
-  const trend = scoreTrend(direction, regime, bars1h)
-  const momentum = scoreMomentum(direction, closes, bars1h, RSI_PERIOD)
+  const trend = scoreTrend(direction, regime, bars)
+  const momentum = scoreMomentum(direction, closes, bars, RSI_PERIOD)
   const acceleration = scoreAcceleration(direction, closes)
   const structure = scoreStructure(direction, closes, highs, lows, rsiArr, volumes, SWING_WINDOW)
-  const candle = scoreCandleQuality(direction, bars15m)
+  const candle = scoreCandleQuality(direction, bars)
   const volume = scoreVolume(regime.regime, volumes, VOL_AVG_PERIOD)
   const volatility = scoreVolatility(closes, BB_PERIOD, BB_MULT, BBWP_LOOKBACK)
   const fundingScore = scoreFunding(direction, funding)

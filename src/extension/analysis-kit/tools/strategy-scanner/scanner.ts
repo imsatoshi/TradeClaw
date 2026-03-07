@@ -3,8 +3,8 @@
  *
  * Architecture:
  *   Stage 1: Direction (4H regime) → determines which directions to evaluate
- *   Stage 2: Setup scoring (15m/1H) → multi-factor 0-100 composite score
- *   Stage 3: Entry trigger (15m) → precise entry with ATR-based SL/TP
+ *   Stage 2: Setup scoring (1H) → multi-factor 0-100 composite score
+ *   Stage 3: Entry trigger (1H) → precise entry with ATR-based SL/TP
  *   Stage 4: Exit management → handled by TradeManager (not in scanner)
  *
  * Retained from v1:
@@ -32,10 +32,8 @@ const log = createLogger('scanner')
 
 const TIMEFRAME_4H = '4h'
 const TIMEFRAME_1H = '1h'
-const TIMEFRAME_15M = '15m'
 const CANDLE_LIMIT_4H = 60   // ~10 days of 4H data
-const CANDLE_LIMIT_1H = 40   // ~2 days, enough for SMA20 trend
-const CANDLE_LIMIT_15M = 100 // ~25 hours of 15m data
+const CANDLE_LIMIT_1H = 150  // ~6 days, enough for BBWP lookback (120) + SMA20
 
 // ==================== OHLCV Cache ====================
 
@@ -118,7 +116,7 @@ function getSessionInfo(): SessionInfo {
  * Pipeline:
  *   1. Detect 4H regime → determines direction(s) to evaluate
  *   2. Score each (symbol, direction) on 6 dimensions → 0-100 composite
- *   3. If score qualifies, check 15m entry trigger → precise SL/TP
+ *   3. If score qualifies, check 1H entry trigger → precise SL/TP
  *
  * @param symbols - Trading pairs to scan, e.g. ["BTC/USDT", "ETH/USDT"]
  * @param fundingRates - Optional pre-fetched funding rates
@@ -146,11 +144,7 @@ export async function runStrategyScan(
     return {} as Record<string, MarketData[]>
   })
   const ohlcv1h = await fetchWithCache(symbols, TIMEFRAME_1H, CANDLE_LIMIT_1H).catch((err) => {
-    log.warn('1H OHLCV fetch failed — trend dimension degraded', { error: String(err) })
-    return {} as Record<string, MarketData[]>
-  })
-  const ohlcv15m = await fetchWithCache(symbols, TIMEFRAME_15M, CANDLE_LIMIT_15M).catch((err) => {
-    log.warn('15m OHLCV fetch failed — scoring disabled', { error: String(err) })
+    log.warn('1H OHLCV fetch failed — scoring disabled', { error: String(err) })
     return {} as Record<string, MarketData[]>
   })
   const rates = fundingRates !== undefined
@@ -191,13 +185,12 @@ export async function runStrategyScan(
       continue
     }
 
-    const bars15m = ohlcv15m[symbol]
-    if (!bars15m || bars15m.length < 40) {
-      errors.push(`${symbol}: insufficient 15m data (${bars15m?.length ?? 0} bars)`)
+    const bars1h = ohlcv1h[symbol]
+    if (!bars1h || bars1h.length < 40) {
+      errors.push(`${symbol}: insufficient 1H data (${bars1h?.length ?? 0} bars)`)
       continue
     }
 
-    const bars1h = ohlcv1h[symbol] ?? []
     const funding = rates[symbol]
 
     // Determine directions based on regime
@@ -206,16 +199,16 @@ export async function runStrategyScan(
         : regime.regime === 'downtrend' ? ['short']
         : ['long', 'short']
 
-    // Compute ATR once for entry trigger
-    const highs = bars15m.map(b => b.high)
-    const lows = bars15m.map(b => b.low)
-    const closes = bars15m.map(b => b.close)
+    // Compute 1H ATR for entry trigger
+    const highs = bars1h.map(b => b.high)
+    const lows = bars1h.map(b => b.low)
+    const closes = bars1h.map(b => b.close)
     const atrArr = atrSeries(highs, lows, closes, 14)
     const atr = atrArr.length > 0 ? atrArr[atrArr.length - 1] : 0
 
     for (const direction of directions) {
       try {
-        const score = await scoreSetup(symbol, direction, regime, bars15m, bars1h, funding)
+        const score = await scoreSetup(symbol, direction, regime, bars1h, funding)
 
         // Fresh regime penalty: reduce score by 10 if regime just changed (< 8 bars = 32 hours)
         if (regime.isFreshRegime) {
@@ -226,7 +219,7 @@ export async function runStrategyScan(
 
         // Stage 3: Check entry trigger if score qualifies
         if (score.totalScore >= threshold && atr > 0) {
-          score.entry = checkEntryTrigger(direction, bars15m, atr)
+          score.entry = checkEntryTrigger(direction, bars1h, atr)
         }
 
         const grade = score.totalScore >= 78 ? 'A' as const
@@ -277,7 +270,7 @@ export async function runStrategyScan(
     direction: ps.direction,
     strength: ps.grade === 'A' ? 'strong' as const : 'moderate' as const,
     confidence: ps.setupScore,
-    timeframe: '15m',
+    timeframe: '1h',
     entry: ps.entry!.entry,
     stopLoss: ps.entry!.stopLoss,
     takeProfit: ps.entry!.takeProfits.tp1.price,
@@ -307,7 +300,7 @@ export async function runStrategyScan(
   return {
     scannedAt,
     symbols,
-    timeframe: '4h+15m',
+    timeframe: '4h+1h',
     signals: loggableSignals,       // backward compat: triggered signals as StrategySignal
     compositeSignals: [],           // backward compat: empty (replaced by pipelineSignals)
     errors,
