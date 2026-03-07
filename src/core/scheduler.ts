@@ -15,6 +15,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { emit, drainSystemEvents, enqueueSystemEvent, hasSystemEvents } from './agent-events.js'
+import { errorThrottle } from './error-throttle.js'
 
 // ==================== Types ====================
 
@@ -385,7 +386,9 @@ export function createScheduler(
     } catch (err) {
       consecutiveFailures++
       const errMsg = err instanceof Error ? err.message : String(err)
-      console.error(`scheduler: runOnce error (failure ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`, errMsg)
+      if (errorThrottle.shouldReport(`scheduler:${errMsg.slice(0, 80)}`)) {
+        console.error(`scheduler: runOnce error (failure ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`, errMsg)
+      }
       emit('heartbeat', {
         status: 'failed',
         reason: errMsg,

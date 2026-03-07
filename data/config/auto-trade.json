@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "minConfidence": 80,
+  "minGrade": "A",
+  "maxAutoUsdSize": 500,
+  "notifyOnAuto": true
+}

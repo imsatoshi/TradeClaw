@@ -1,0 +1,9 @@
+{
+  "guards": [
+    { "name": "MaxPositionSize", "enabled": true, "params": { "maxPercentOfEquity": 40 } },
+    { "name": "Cooldown",        "enabled": true, "params": { "minIntervalMs": 60000 } },
+    { "name": "MaxOpenTrades",   "enabled": true, "params": { "maxOpenTrades": 5 } },
+    { "name": "MinBalance",      "enabled": true, "params": { "minBalanceRatio": 0.3 } },
+    { "name": "Emotion",         "enabled": true, "params": {} }
+  ]
+}

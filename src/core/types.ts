@@ -1,4 +1,5 @@
 import type { ICryptoTradingEngine } from '../extension/crypto-trading/index.js'
+import type { TradeManager } from '../extension/crypto-trading/trade-manager/TradeManager.js'
 import type { CronEngine } from '../task/cron/engine.js'
 import type { Heartbeat } from '../task/heartbeat/index.js'
 import type { Config } from './config.js'
@@ -20,6 +21,7 @@ export interface EngineContext {
   eventLog: EventLog
   heartbeat: Heartbeat
   cronEngine: CronEngine
+  tradeManager?: TradeManager
   /** Legacy: Sandbox data provider. */
   sandbox?: any
 }

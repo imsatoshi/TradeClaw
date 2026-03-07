@@ -1,0 +1,6 @@
+{
+  "eventLog": { "maxDays": 30 },
+  "signalLog": { "maxDays": 90 },
+  "tradeReviews": { "maxDays": 365 },
+  "newsItems": { "maxDays": 7 }
+}

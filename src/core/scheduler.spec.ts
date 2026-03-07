@@ -319,8 +319,8 @@ describe('createScheduler', () => {
     scheduler.requestWake('manual')
     await vi.advanceTimersByTimeAsync(10) // flush → fails
 
-    // Retry after 1000ms (RETRY_DELAY_MS) + coalesce
-    await vi.advanceTimersByTimeAsync(1000 + 10)
+    // Retry after 2000ms (RETRY_BASE_MS) + coalesce
+    await vi.advanceTimersByTimeAsync(2000 + 10)
 
     expect(callCount).toBe(2) // retried once
 
@@ -376,7 +376,7 @@ describe('createScheduler', () => {
 
     // At this point the event has been drained. A subsequent wake should still see it.
     // Wait for auto-retry or manual retry
-    await vi.advanceTimersByTimeAsync(1000 + 10) // RETRY_DELAY_MS + coalesce
+    await vi.advanceTimersByTimeAsync(2000 + 10) // RETRY_BASE_MS + coalesce
 
     // The system event should eventually reach runOnce successfully
     const allEvents = receivedEvents.flat()
@@ -546,13 +546,13 @@ describe('HeartbeatDedup', () => {
     expect(dedup.isDuplicate('message B', 3000)).toBe(true)
   })
 
-  it('should use default 24h window', () => {
+  it('should use default 1h window', () => {
     const dedup = new HeartbeatDedup()
     const t = 1000
     dedup.record('alert', t)
-    // 23h59m later — still duplicate
-    expect(dedup.isDuplicate('alert', t + 23 * 60 * 60 * 1000 + 59 * 60 * 1000)).toBe(true)
-    // 24h later — no longer duplicate
-    expect(dedup.isDuplicate('alert', t + 24 * 60 * 60 * 1000 + 1)).toBe(false)
+    // 59m later — still duplicate
+    expect(dedup.isDuplicate('alert', t + 59 * 60 * 1000)).toBe(true)
+    // 1h later — no longer duplicate
+    expect(dedup.isDuplicate('alert', t + 60 * 60 * 1000 + 1)).toBe(false)
   })
 })

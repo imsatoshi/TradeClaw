@@ -1,6 +1,7 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
 import { readFile, writeFile, appendFile, mkdir } from 'fs/promises'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'path'
 import { Engine } from './core/engine.js'
 import { loadConfig } from './core/config.js'
@@ -28,6 +29,10 @@ import { createAShareTools } from './extension/ashare/index.js'
 import { Brain, createBrainTools } from './extension/brain/index.js'
 import type { BrainExportState } from './extension/brain/index.js'
 import { createBrowserTools } from './extension/browser/index.js'
+import { createThinkBeforeTradeTools } from './extension/crypto-trading/tools/think-before-trade.js'
+import { createTradeReviewTools } from './extension/crypto-trading/tools/trade-review.js'
+import { createGuardsFromConfig } from './extension/crypto-trading/guards/registry.js'
+import { runRetentionCleanup } from './core/retention.js'
 import { createCronTools } from './extension/cron/index.js'
 import {
   createScheduler, stripAckToken,
@@ -294,8 +299,20 @@ async function main() {
     '- The 3-tier TP system (TP1 40%, TP2 30%, TP3 trailing 30%) should be reflected in createTradePlan',
     '- For qualifying setups:',
     ...(config.model.enableVision
-      ? ['  → strategyScan → getMarketContext → analyzeChart → your AI judgment → calculatePositionSize → proposeTradeWithButtons']
-      : ['  → strategyScan → getMarketContext → your AI judgment → calculatePositionSize → proposeTradeWithButtons']),
+      ? ['  → strategyScan → getMarketContext → analyzeChart → your AI judgment → thinkBeforeTrade → calculatePositionSize → proposeTradeWithButtons']
+      : ['  → strategyScan → getMarketContext → your AI judgment → thinkBeforeTrade → calculatePositionSize → proposeTradeWithButtons']),
+    '',
+    '**MANDATORY DECISION PROTOCOL (thinkBeforeTrade)**',
+    '- Before ANY trade proposal, you MUST call thinkBeforeTrade first. Skipping this step is FORBIDDEN.',
+    '- The tool requires: your edge (why this works), risk (what could go wrong), confidence (0-100), and a checklist.',
+    '- If confidence < 60 → trade is BLOCKED. If checklist incomplete → trade is BLOCKED.',
+    '- This forces you to articulate your reasoning BEFORE committing. No impulsive trades.',
+    '- The tool returns executionMode:',
+    '  → "blocked" → do NOT proceed with the trade',
+    '  → "confirm" → use proposeTradeWithButtons for Telegram confirmation as usual',
+    '  → "auto" → high-confidence trade, skip proposeTradeWithButtons and execute directly:',
+    '     calculatePositionSize → createTradePlan → cryptoPlaceOrder → cryptoWalletCommit → cryptoWalletPush',
+    '     IMPORTANT: for auto-execute, respect maxAutoUsdSize from the result — do not exceed this USD amount',
     '',
     '**Step 2: Review active TradePlans** (from heartbeat "Active Trade Plans" section)',
     '- Check live P&L data: unrealized P&L, realized P&L, risk:reward ratio, max drawdown',
@@ -327,6 +344,8 @@ async function main() {
     '',
     '**Step 4: Learn from outcomes**',
     '- After syncSignalOutcomes, review any newly resolved signals',
+    '- When a TradePlan completes (all TPs filled, SL hit, or cancelled), call tradeReview to record a structured post-mortem',
+    '- Before proposing trades, call queryTradeReviews to check recent patterns (especially losses on the same symbol)',
     '- For each resolved signal: call tradeMemoryUpdate with a 1-sentence lesson',
     '- Lessons should be SPECIFIC and ACTIONABLE (not generic platitudes)',
     '  → Good: "SOL breakout_volume in Asian session lost 3 times — avoid low-volume hours"',
@@ -454,15 +473,39 @@ async function main() {
     })
   }
 
-  const tools = {
+  const allTools = {
     ...createAnalysisTools(sandbox),
     ...createNewsArchiveTools(newsStore),
     ...createAShareTools(),
-    ...createCryptoTradingTools(cryptoEngine, wallet, cryptoWalletStateBridge, cryptoResult?.directExchangeEngine, tradeManager),
+    ...createCryptoTradingTools(
+      cryptoEngine, wallet, cryptoWalletStateBridge, cryptoResult?.directExchangeEngine, tradeManager,
+      createGuardsFromConfig({ emotionGetter: () => brain.getEmotion().current }),
+    ),
+    ...createThinkBeforeTradeTools(),
+    ...createTradeReviewTools(),
     ...createBrainTools(brain),
     ...createBrowserTools(),
     ...(cronEngine ? createCronTools(cronEngine) : {}),
   }
+
+  // Filter out disabled tools from config
+  const disabledTools = (() => {
+    try {
+      const raw = readFileSync(resolve('data/config/tools.json'), 'utf-8')
+      const cfg = JSON.parse(raw) as { disabled?: string[] }
+      return new Set(cfg.disabled ?? [])
+    } catch { return new Set<string>() }
+  })()
+
+  const tools = Object.fromEntries(
+    Object.entries(allTools).filter(([name]) => {
+      if (disabledTools.has(name)) {
+        console.log(`tool disabled by config: ${name}`)
+        return false
+      }
+      return true
+    }),
+  )
 
   // ==================== Engine ====================
 
@@ -512,7 +555,7 @@ async function main() {
     onWake: () => {},
   })
 
-  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine, eventLog, heartbeat, cronEngine: cronEngineForCtx as any }
+  const ctx: EngineContext = { config, engine, sandbox, cryptoEngine, eventLog, heartbeat, cronEngine: cronEngineForCtx as any, tradeManager }
 
   for (const plugin of plugins) {
     await plugin.start(ctx)
@@ -1008,6 +1051,10 @@ async function main() {
       console.log('scheduler: auto-created daily-pnl cron job (UTC 00:00)')
     }
   }
+
+  // Data retention — purge old logs on startup, then daily
+  runRetentionCleanup().catch(() => {})
+  setInterval(() => runRetentionCleanup().catch(() => {}), 24 * 60 * 60 * 1000)
 
   // Post-startup WFO optimization — DISABLED
   // Reason: strategies had bugs (ema_trend EMA alignment, regime hard filter)

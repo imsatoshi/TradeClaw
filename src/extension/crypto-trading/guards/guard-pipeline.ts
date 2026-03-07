@@ -13,6 +13,7 @@
 
 import type { Operation } from '../wallet/types.js';
 import type { CryptoPosition, CryptoAccountInfo } from '../interfaces.js';
+import { EmotionGuard, type EmotionGetter } from './emotion-guard.js';
 
 // ==================== Types ====================
 
@@ -214,11 +215,16 @@ export function createDefaultGuards(opts: {
   cooldownMs?: number;
   maxOpenTrades?: number;
   minBalanceRatio?: number;
+  emotionGetter?: EmotionGetter;
 } = {}): Guard[] {
-  return [
+  const guards: Guard[] = [
     new MaxPositionSizeGuard({ maxPercentOfEquity: opts.maxPositionSizePercent }),
     new CooldownGuard({ minIntervalMs: opts.cooldownMs }),
     new MaxOpenTradesGuard({ maxOpenTrades: opts.maxOpenTrades }),
     new MinBalanceGuard({ minBalanceRatio: opts.minBalanceRatio }),
   ];
+  if (opts.emotionGetter) {
+    guards.push(new EmotionGuard(opts.emotionGetter));
+  }
+  return guards;
 }
