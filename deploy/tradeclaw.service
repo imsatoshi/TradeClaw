@@ -1,0 +1,31 @@
+[Unit]
+Description=TradeClaw Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/TradeClaw
+EnvironmentFile=/root/TradeClaw/.env
+ExecStart=/usr/bin/npx tsx src/main.ts
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=append:/root/TradeClaw/app.log
+StandardError=append:/root/TradeClaw/app.log
+
+# Graceful shutdown
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/root/TradeClaw
+
+[Install]
+WantedBy=multi-user.target
