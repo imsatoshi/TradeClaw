@@ -2,6 +2,8 @@
 Description=TradeClaw Trading Bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,9 +13,6 @@ EnvironmentFile=/root/TradeClaw/.env
 ExecStart=/usr/bin/npx tsx src/main.ts
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
 # Logging
 StandardOutput=append:/root/TradeClaw/app.log
 StandardError=append:/root/TradeClaw/app.log
@@ -24,8 +23,6 @@ TimeoutStopSec=30
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/root/TradeClaw
 
 [Install]
 WantedBy=multi-user.target
