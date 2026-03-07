@@ -1,13 +1,13 @@
+import { Bot, InlineKeyboard, InputFile } from 'grammy'
+import { autoRetry } from '@grammyjs/auto-retry'
+import { readFile } from 'node:fs/promises'
+import type { Message } from 'grammy/types'
 import type { Plugin, EngineContext, MediaAttachment } from '../../core/types.js'
 import type { TelegramConfig, ParsedMessage } from './types.js'
-import { TelegramClient } from './client.js'
-import { runPollingLoop } from './polling.js'
-import { parseUpdate, parseCallbackQuery } from './handler.js'
+import { parseUpdate, parseCallbackQuery, extractMedia, parseCommand } from './handler.js'
 import { MediaGroupMerger } from './media-group.js'
-import { askClaudeCode, askClaudeCodeWithSession } from '../../providers/claude-code/index.js'
-import type { ClaudeCodeConfig } from '../../providers/claude-code/index.js'
 import { SessionStore } from '../../core/session.js'
-import { forceCompact, type CompactionConfig } from '../../core/compaction.js'
+import { forceCompact } from '../../core/compaction.js'
 import { readAIConfig, writeAIConfig, type AIProvider } from '../../core/ai-config.js'
 import { registerConnector, touchInteraction } from '../../core/connector-registry.js'
 import { initTelegramBotApi } from './telegram-api.js'
@@ -24,63 +24,194 @@ const PROVIDER_LABELS: Record<AIProvider, string> = {
 export class TelegramPlugin implements Plugin {
   name = 'telegram'
   private config: TelegramConfig
-  private claudeCodeConfig: ClaudeCodeConfig
-  private abortController: AbortController | null = null
-  private pollingPromise: Promise<void> | null = null
+  private bot: Bot | null = null
   private merger: MediaGroupMerger | null = null
-  private botUsername?: string
   private unregisterConnector?: () => void
-
-  /** Cached AI provider setting. */
-  private currentProvider: AIProvider = 'vercel-ai-sdk'
-
-  /** Compaction config from engine config. */
-  private compactionConfig!: CompactionConfig
-
-  /** Reference to engine for compact and other operations. */
-  private engineRef: import('../../core/engine.js').Engine | null = null
-
-  /** Per-user generation lock — prevents concurrent AI calls for the same user. */
-  private userLocks = new Map<number, Promise<void>>()
 
   /** Per-user unified session stores (keyed by userId). */
   private sessions = new Map<number, SessionStore>()
 
+  /** Throttle: last time we sent an auth-guidance reply per chatId. */
+  private authReplyThrottle = new Map<number, number>()
+
+  /** Reference to engine. */
+  private engineRef: import('../../core/engine.js').Engine | null = null
+
   constructor(
     config: Omit<TelegramConfig, 'pollingTimeout'> & { pollingTimeout?: number },
-    claudeCodeConfig: ClaudeCodeConfig = {},
   ) {
     this.config = { pollingTimeout: 30, ...config }
-    this.claudeCodeConfig = claudeCodeConfig
   }
 
   async start(ctx: EngineContext) {
-    // Load persisted settings
-    const aiConfig = await readAIConfig()
-    this.currentProvider = aiConfig.provider
-    this.compactionConfig = ctx.config.compaction
     this.engineRef = ctx.engine
 
-    // Inject agent config into Claude Code config (constructor overrides take precedence)
-    this.claudeCodeConfig = {
-      allowedTools: ctx.config.agent.claudeCode.allowedTools,
-      disallowedTools: ctx.config.agent.claudeCode.disallowedTools,
-      maxTurns: ctx.config.agent.claudeCode.maxTurns,
-      ...this.claudeCodeConfig,
-    }
-    const client = new TelegramClient({ token: this.config.token })
+    const bot = new Bot(this.config.token)
 
-    // Verify token and get bot username
-    const me = await client.getMe()
-    this.botUsername = me.username
-    console.log(`telegram plugin: connected as @${me.username} (provider: ${this.currentProvider})`)
+    // Auto-retry on 429 rate limits
+    bot.api.config.use(autoRetry())
+
+    // Error handler
+    bot.catch((err) => {
+      console.error('telegram bot error:', err)
+    })
+
+    // ── Middleware: auth guard ──
+    bot.use(async (grammyCtx, next) => {
+      const chatId = grammyCtx.chat?.id
+      if (!chatId) return
+      if (this.config.allowedChatIds.length === 0 || this.config.allowedChatIds.includes(chatId)) return next()
+
+      const now = Date.now()
+      const last = this.authReplyThrottle.get(chatId) ?? 0
+      if (now - last > 60_000) {
+        this.authReplyThrottle.set(chatId, now)
+        console.log(`telegram: unauthorized chat ${chatId}, set TELEGRAM_CHAT_ID=${chatId} to allow`)
+        await grammyCtx.reply('This chat is not authorized. Add this chat ID to TELEGRAM_CHAT_ID in your environment config.').catch(() => {})
+      }
+    })
+
+    // ── Commands ──
+    bot.command('status', async (grammyCtx) => {
+      const aiConfig = await readAIConfig()
+      await grammyCtx.reply(`Engine is running. Provider: ${PROVIDER_LABELS[aiConfig.provider]}`)
+    })
+
+    bot.command('settings', async (grammyCtx) => {
+      await this.sendSettingsMenu(grammyCtx.chat.id)
+    })
+
+    bot.command('compact', async (grammyCtx) => {
+      const userId = grammyCtx.from?.id
+      if (!userId) return
+      await this.handleCompactCommand(grammyCtx.chat.id, userId)
+    })
+
+    // ── Callback queries (inline keyboard presses) ──
+    bot.on('callback_query:data', async (grammyCtx) => {
+      const data = grammyCtx.callbackQuery.data
+      const chatId = grammyCtx.chat?.id ?? grammyCtx.from.id
+      const userId = grammyCtx.from.id
+      try {
+        // Provider switch
+        if (data.startsWith('provider:')) {
+          const provider = data.slice('provider:'.length) as AIProvider
+          await writeAIConfig(provider)
+          await grammyCtx.answerCallbackQuery({ text: `Switched to ${PROVIDER_LABELS[provider]}` })
+
+          const ccLabel = provider === 'claude-code' ? '> Claude Code' : 'Claude Code'
+          const aiLabel = provider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
+          const keyboard = new InlineKeyboard()
+            .text(ccLabel, 'provider:claude-code')
+            .text(aiLabel, 'provider:vercel-ai-sdk')
+          await grammyCtx.editMessageText(
+            `Current provider: ${PROVIDER_LABELS[provider]}\n\nChoose default AI provider:`,
+            { reply_markup: keyboard },
+          )
+          return
+        }
+
+        // Trade proposal: confirm
+        if (data.startsWith('trade:confirm:')) {
+          const proposalId = data.slice('trade:confirm:'.length)
+          const proposal = takePendingProposal(proposalId)
+
+          if (!proposal) {
+            await grammyCtx.answerCallbackQuery({ text: '⏰ Proposal expired or already handled' })
+            await grammyCtx.editMessageText('⏰ Trade proposal expired.')
+            return
+          }
+
+          await grammyCtx.answerCallbackQuery({ text: '✅ Confirmed — executing trade...' })
+          await grammyCtx.editMessageText(`${proposal.summary}\n\n⏳ Executing...`)
+
+          try {
+            const session = await this.getSession(userId)
+            const result = await ctx.engine.askWithSession(proposal.confirmationPrompt, session, { maxHistoryEntries: 20, dataTTL: 2 * 60 * 1000 })
+            await this.sendReplyToChat(chatId, result.text, result.media)
+          } catch (err) {
+            await bot.api.sendMessage(chatId, `❌ Trade execution failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          return
+        }
+
+        // Trade proposal: cancel
+        if (data.startsWith('trade:cancel:')) {
+          const proposalId = data.slice('trade:cancel:'.length)
+          takePendingProposal(proposalId)
+          await grammyCtx.answerCallbackQuery({ text: '❌ Trade cancelled' })
+          await grammyCtx.editMessageText('❌ Trade proposal cancelled by user.')
+          return
+        }
+
+        await grammyCtx.answerCallbackQuery()
+      } catch (err) {
+        console.error('telegram callback query error:', err)
+      }
+    })
+
+    // ── Set up media group merger ──
+    this.merger = new MediaGroupMerger({
+      onMerged: (message) => this.handleMessage(ctx, message),
+    })
+
+    // ── Messages (text, media, edited, channel posts) ──
+    const buildParsed = (msg: Message): ParsedMessage => {
+      const text = msg.text ?? msg.caption ?? ''
+      const from = msg.from
+      let command: string | undefined
+      let commandArgs: string | undefined
+      if (msg.entities) {
+        const cmdEntity = msg.entities.find((e) => e.type === 'bot_command' && e.offset === 0)
+        if (cmdEntity) {
+          const parsed = parseCommand(text, bot.botInfo.username)
+          if (parsed) { command = parsed.command; commandArgs = parsed.args }
+        }
+      }
+      return {
+        chatId: msg.chat.id,
+        messageId: msg.message_id,
+        from: { id: from?.id ?? 0, firstName: from?.first_name ?? '', username: from?.username },
+        date: new Date(msg.date * 1000),
+        text,
+        command,
+        commandArgs,
+        media: extractMedia(msg),
+        mediaGroupId: (msg as any).media_group_id,
+        raw: msg,
+      }
+    }
+
+    const messageHandler = (msg: Message) => {
+      const parsed = buildParsed(msg)
+      console.log(`telegram: [${parsed.chatId}] ${parsed.from.firstName}: ${parsed.text?.slice(0, 80) || '(media)'}`)
+      // Skip command messages — handled by grammY command handlers
+      if (parsed.command) return
+      this.merger!.push(parsed)
+    }
+
+    bot.on('message', (grammyCtx) => messageHandler(grammyCtx.message))
+    bot.on('edited_message', (grammyCtx) => messageHandler(grammyCtx.editedMessage))
+    bot.on('channel_post', (grammyCtx) => messageHandler(grammyCtx.channelPost))
+
+    // ── Register commands with Telegram ──
+    await bot.api.setMyCommands([
+      { command: 'status', description: 'Show engine status' },
+      { command: 'settings', description: 'Choose default AI provider' },
+      { command: 'compact', description: 'Force compact session context' },
+    ])
+
+    // ── Initialize and get bot info ──
+    await bot.init()
+    const aiConfig = await readAIConfig()
+    console.log(`telegram plugin: connected as @${bot.botInfo.username} (provider: ${aiConfig.provider})`)
 
     // Initialize the direct Telegram API singleton (used by proposeTradeWithButtons tool)
     if (this.config.allowedChatIds.length > 0) {
       initTelegramBotApi(this.config.token, this.config.allowedChatIds[0])
     }
 
-    // Register connector for outbound delivery (heartbeat / cron responses)
+    // ── Register connector for outbound delivery (heartbeat / cron responses) ──
     if (this.config.allowedChatIds.length > 0) {
       const deliveryChatId = this.config.allowedChatIds[0]
       this.unregisterConnector = registerConnector({
@@ -90,68 +221,25 @@ export class TelegramPlugin implements Plugin {
           const formatted = formatForTelegram(text)
           const chunks = splitMessage(formatted, MAX_MESSAGE_LENGTH)
           for (const chunk of chunks) {
-            await client.sendMessage({ chatId: deliveryChatId, text: chunk, parseMode: 'HTML' })
+            await bot.api.sendMessage(deliveryChatId, chunk, { parse_mode: 'HTML' })
           }
         },
       })
     }
 
-    // Register commands
-    await client.setMyCommands([
-      { command: 'status', description: 'Show engine status' },
-      { command: 'settings', description: 'Choose default AI provider' },
-      { command: 'compact', description: 'Force compact session context' },
-    ])
-
-    // Set up media group merger
-    this.merger = new MediaGroupMerger({
-      onMerged: (message) => this.handleMessage(ctx, client, message),
-    })
-
-    // Start polling
-    this.abortController = new AbortController()
-    this.pollingPromise = runPollingLoop({
-      client,
-      timeout: this.config.pollingTimeout,
-      signal: this.abortController.signal,
-      onUpdates: (updates) => {
-        console.log(`telegram: received ${updates.length} update(s)`)
-        for (const update of updates) {
-          // Handle callback queries (inline keyboard presses)
-          const cq = parseCallbackQuery(update)
-          if (cq) {
-            if (this.config.allowedChatIds.length > 0 && !this.config.allowedChatIds.includes(cq.chatId)) continue
-            this.handleCallbackQuery(ctx, client, cq.chatId, cq.messageId, cq.callbackQueryId, cq.data, cq.from.id)
-            continue
-          }
-
-          const parsed = parseUpdate(update, this.botUsername)
-          if (!parsed) {
-            console.log('telegram: skipped unparseable update', update.update_id)
-            continue
-          }
-
-          console.log(`telegram: [${parsed.chatId}] ${parsed.from.firstName}: ${parsed.text?.slice(0, 80) || '(media)'}`)
-
-          // Filter by allowed chat IDs
-          if (this.config.allowedChatIds.length > 0 && !this.config.allowedChatIds.includes(parsed.chatId)) {
-            console.log(`telegram: chat ${parsed.chatId} not in allowedChatIds, skipping`)
-            continue
-          }
-
-          this.merger!.push(parsed)
-        }
-      },
-      onError: (err) => {
-        console.error('telegram polling error:', err)
-      },
+    // ── Start polling ──
+    this.bot = bot
+    bot.start({
+      allowed_updates: ['message', 'edited_message', 'channel_post', 'callback_query'],
+      onStart: () => console.log('telegram: polling started'),
+    }).catch((err) => {
+      console.error('telegram polling fatal error:', err)
     })
   }
 
   async stop() {
     this.merger?.flush()
-    this.abortController?.abort()
-    await this.pollingPromise
+    await this.bot?.stop()
     this.unregisterConnector?.()
   }
 
@@ -166,196 +254,89 @@ export class TelegramPlugin implements Plugin {
     return session
   }
 
-  private async handleCallbackQuery(
-    ctx: EngineContext,
-    client: TelegramClient,
-    chatId: number,
-    messageId: number,
-    callbackQueryId: string,
-    data: string,
-    userId: number,
-  ) {
-    try {
-      // ── Provider switch ──────────────────────────────────────────────────────
-      if (data.startsWith('provider:')) {
-        const provider = data.slice('provider:'.length) as AIProvider
-        this.currentProvider = provider
-        await writeAIConfig(provider)
-        await client.answerCallbackQuery(callbackQueryId, `Switched to ${PROVIDER_LABELS[provider]}`)
-
-        const ccLabel = provider === 'claude-code' ? '> Claude Code' : 'Claude Code'
-        const aiLabel = provider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
-        await client.editMessageText({
-          chatId,
-          messageId,
-          text: `Current provider: ${PROVIDER_LABELS[provider]}\n\nChoose default AI provider:`,
-          replyMarkup: {
-            inline_keyboard: [
-              [{ text: ccLabel, callback_data: 'provider:claude-code' }],
-              [{ text: aiLabel, callback_data: 'provider:vercel-ai-sdk' }],
-            ],
-          },
-        })
-        return
-      }
-
-      // ── Trade proposal: confirm ──────────────────────────────────────────────
-      if (data.startsWith('trade:confirm:')) {
-        const proposalId = data.slice('trade:confirm:'.length)
-        const proposal = takePendingProposal(proposalId)
-
-        if (!proposal) {
-          await client.answerCallbackQuery(callbackQueryId, '⏰ Proposal expired or already handled')
-          await client.editMessageText({ chatId, messageId, text: '⏰ Trade proposal expired.' })
-          return
-        }
-
-        await client.answerCallbackQuery(callbackQueryId, '✅ Confirmed — executing trade...')
-        await client.editMessageText({ chatId, messageId, text: `${proposal.summary}\n\n⏳ Executing...` })
-
-        // Re-enter AI flow to execute the confirmed trade
-        try {
-          const session = await this.getSession(userId)
-          const result = await ctx.engine.askWithSession(proposal.confirmationPrompt, session, { maxHistoryEntries: 20, dataTTL: 2 * 60 * 1000 })
-          await this.sendReply(client, chatId, result.text, result.media)
-        } catch (err) {
-          await client.sendMessage({ chatId, text: `❌ Trade execution failed: ${err instanceof Error ? err.message : String(err)}` })
-        }
-        return
-      }
-
-      // ── Trade proposal: cancel ───────────────────────────────────────────────
-      if (data.startsWith('trade:cancel:')) {
-        const proposalId = data.slice('trade:cancel:'.length)
-        takePendingProposal(proposalId)  // discard
-        await client.answerCallbackQuery(callbackQueryId, '❌ Trade cancelled')
-        await client.editMessageText({ chatId, messageId, text: '❌ Trade proposal cancelled by user.' })
-        return
-      }
-
-      // ── Unknown callback ─────────────────────────────────────────────────────
-      await client.answerCallbackQuery(callbackQueryId)
-    } catch (err) {
-      console.error('telegram callback query error:', err)
+  /**
+   * Sends "typing..." chat action and refreshes it every 4 seconds.
+   * Returns a function to stop the indicator.
+   */
+  private startTypingIndicator(chatId: number): () => void {
+    const send = () => {
+      this.bot?.api.sendChatAction(chatId, 'typing').catch(() => {})
     }
+    send()
+    const interval = setInterval(send, 4000)
+    return () => clearInterval(interval)
   }
 
-  private async handleMessage(ctx: EngineContext, client: TelegramClient, message: ParsedMessage) {
-    // Handle built-in commands without lock (lightweight operations)
-    if (message.command) {
-      try {
-        touchInteraction('telegram', String(message.chatId))
-        await this.handleCommand(client, message)
-      } catch (err) {
-        console.error('telegram command error:', err)
-      }
-      return
-    }
-
-    // Per-user lock: serialize AI generation for the same user
-    const userId = message.from.id
-    const prev = this.userLocks.get(userId) ?? Promise.resolve()
-    let releaseLock!: () => void
-    const lockPromise = new Promise<void>((r) => { releaseLock = r })
-    this.userLocks.set(userId, lockPromise)
-
-    await prev
-
+  private async handleMessage(ctx: EngineContext, message: ParsedMessage) {
     try {
       touchInteraction('telegram', String(message.chatId))
 
       const prompt = this.buildPrompt(message)
       if (!prompt) return
 
-      if (this.currentProvider === 'claude-code') {
-        await this.handleClaudeCodeMessage(client, message, prompt)
-      } else {
-        const session = await this.getSession(userId)
-        const result = await ctx.engine.askWithSession(prompt, session, { maxHistoryEntries: 20, dataTTL: 2 * 60 * 1000 })
-        await this.sendReply(client, message.chatId, result.text, result.media)
+      // Send "..." placeholder + typing indicator
+      const placeholder = await this.bot!.api.sendMessage(message.chatId, '...').catch(() => null)
+      const stopTyping = this.startTypingIndicator(message.chatId)
+
+      try {
+        // Unified routing — always through engine.askWithSession()
+        const session = await this.getSession(message.from.id)
+        const result = await ctx.engine.askWithSession(prompt, session, {
+          maxHistoryEntries: 20,
+          dataTTL: 2 * 60 * 1000,
+          historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier messages.',
+        })
+        stopTyping()
+        await this.sendReplyWithPlaceholder(message.chatId, result.text, result.media, placeholder?.message_id)
+      } catch (err) {
+        stopTyping()
+        // Edit placeholder to show error instead of leaving "..."
+        if (placeholder) {
+          await this.bot!.api.editMessageText(
+            message.chatId, placeholder.message_id,
+            'Sorry, something went wrong processing your message.',
+          ).catch(() => {})
+        }
+        throw err
       }
     } catch (err) {
       console.error('telegram message handling error:', err)
-      try {
-        await this.sendReply(client, message.chatId, 'Sorry, something went wrong processing your message.')
-      } catch (replyErr) {
-        console.error('telegram: failed to send error reply:', replyErr)
-      }
-    } finally {
-      releaseLock()
     }
   }
 
-  private async handleCommand(client: TelegramClient, message: ParsedMessage) {
-    switch (message.command) {
-      case 'status':
-        await this.sendReply(client, message.chatId, `Engine is running. Provider: ${PROVIDER_LABELS[this.currentProvider]}`)
-        return
-      case 'settings':
-        await this.sendSettingsMenu(client, message.chatId)
-        return
-      case 'compact':
-        await this.handleCompactCommand(client, message)
-        return
-      default:
-        // Unknown command — fall through (caller handles as regular message)
-        return
-    }
-  }
-
-  private async handleCompactCommand(client: TelegramClient, message: ParsedMessage) {
-    const session = await this.getSession(message.from.id)
-    await this.sendReply(client, message.chatId, `> Compacting session (via ${PROVIDER_LABELS[this.currentProvider]})...`)
+  private async handleCompactCommand(chatId: number, userId: number) {
+    const session = await this.getSession(userId)
+    await this.bot!.api.sendMessage(chatId, '> Compacting session...')
 
     const result = await forceCompact(
       session,
       async (summarizePrompt) => {
-        if (this.currentProvider === 'claude-code') {
-          const r = await askClaudeCode(summarizePrompt, { ...this.claudeCodeConfig, maxTurns: 1 })
-          return r.text
-        } else {
-          // vercel-ai-sdk: use engine's ask() (no session, single prompt)
-          const r = await this.engineRef!.ask(summarizePrompt)
-          return r.text
-        }
+        const r = await this.engineRef!.ask(summarizePrompt)
+        return r.text
       },
     )
 
     if (!result) {
-      await this.sendReply(client, message.chatId, 'Session is empty, nothing to compact.')
+      await this.bot!.api.sendMessage(chatId, 'Session is empty, nothing to compact.')
     } else {
-      await this.sendReply(client, message.chatId, `Compacted. Pre-compaction: ~${result.preTokens} tokens.`)
+      await this.bot!.api.sendMessage(chatId, `Compacted. Pre-compaction: ~${result.preTokens} tokens.`)
     }
   }
 
-  private async sendSettingsMenu(client: TelegramClient, chatId: number) {
-    const ccLabel = this.currentProvider === 'claude-code' ? '> Claude Code' : 'Claude Code'
-    const aiLabel = this.currentProvider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
+  private async sendSettingsMenu(chatId: number) {
+    const aiConfig = await readAIConfig()
+    const ccLabel = aiConfig.provider === 'claude-code' ? '> Claude Code' : 'Claude Code'
+    const aiLabel = aiConfig.provider === 'vercel-ai-sdk' ? '> Vercel AI SDK' : 'Vercel AI SDK'
 
-    await client.sendMessage({
+    const keyboard = new InlineKeyboard()
+      .text(ccLabel, 'provider:claude-code')
+      .text(aiLabel, 'provider:vercel-ai-sdk')
+
+    await this.bot!.api.sendMessage(
       chatId,
-      text: `Current provider: ${PROVIDER_LABELS[this.currentProvider]}\n\nChoose default AI provider:`,
-      replyMarkup: {
-        inline_keyboard: [
-          [{ text: ccLabel, callback_data: 'provider:claude-code' }],
-          [{ text: aiLabel, callback_data: 'provider:vercel-ai-sdk' }],
-        ],
-      },
-    })
-  }
-
-
-  private async handleClaudeCodeMessage(client: TelegramClient, message: ParsedMessage, userPrompt: string) {
-    await this.sendReply(client, message.chatId, '> Processing with Claude Code...')
-
-    const session = await this.getSession(message.from.id)
-    const result = await askClaudeCodeWithSession(userPrompt, session, {
-      claudeCode: this.claudeCodeConfig,
-      compaction: this.compactionConfig,
-      historyPreamble: 'The following is the recent conversation from this Telegram chat. Use it as context if the user references earlier events or decisions.',
-    })
-
-    await this.sendReply(client, message.chatId, result.text, result.media)
+      `Current provider: ${PROVIDER_LABELS[aiConfig.provider]}\n\nChoose default AI provider:`,
+      { reply_markup: keyboard },
+    )
   }
 
   private buildPrompt(message: ParsedMessage): string | null {
@@ -385,34 +366,51 @@ export class TelegramPlugin implements Plugin {
     return prompt || null
   }
 
-  private async sendReply(client: TelegramClient, chatId: number, text: string, media?: MediaAttachment[]) {
+  /**
+   * Send a reply, optionally editing a placeholder "..." message into the first text chunk.
+   */
+  private async sendReplyWithPlaceholder(chatId: number, text: string, media?: MediaAttachment[], placeholderMsgId?: number) {
     console.log(`telegram: sendReply chatId=${chatId} textLen=${text.length} media=${media?.length ?? 0}`)
 
-    // Send images first (if any)
+    // Send images first
     if (media && media.length > 0) {
       for (let i = 0; i < media.length; i++) {
-        const attachment = media[i]
-        console.log(`telegram: sending photo ${i + 1}/${media.length} path=${attachment.path}`)
         try {
-          const { readFile } = await import('node:fs/promises')
-          const buf = await readFile(attachment.path)
-          console.log(`telegram: photo file size=${buf.byteLength} bytes`)
-          await client.sendPhoto(chatId, buf)
-          console.log(`telegram: photo ${i + 1} sent ok`)
+          const buf = await readFile(media[i].path)
+          await this.bot!.api.sendPhoto(chatId, new InputFile(buf, 'screenshot.jpg'))
         } catch (err) {
           console.error(`telegram: failed to send photo ${i + 1}:`, err)
         }
       }
     }
 
-    // Then send text
+    // Send text — edit placeholder for first chunk, send the rest as new messages
     if (text) {
       const formatted = formatForTelegram(text)
       const chunks = splitMessage(formatted, MAX_MESSAGE_LENGTH)
-      for (const chunk of chunks) {
-        await client.sendMessage({ chatId, text: chunk, parseMode: 'HTML' })
+      let startIdx = 0
+
+      if (placeholderMsgId && chunks.length > 0) {
+        const edited = await this.bot!.api.editMessageText(chatId, placeholderMsgId, chunks[0], { parse_mode: 'HTML' }).then(() => true).catch(() => false)
+        if (edited) startIdx = 1
       }
+
+      for (let i = startIdx; i < chunks.length; i++) {
+        await this.bot!.api.sendMessage(chatId, chunks[i], { parse_mode: 'HTML' })
+      }
+
+      if (startIdx > 0) return
     }
+
+    // No text or edit failed — clean up placeholder
+    if (placeholderMsgId) {
+      await this.bot!.api.deleteMessage(chatId, placeholderMsgId).catch(() => {})
+    }
+  }
+
+  /** Simple send without placeholder (used by connector delivery). */
+  private async sendReplyToChat(chatId: number, text: string, media?: MediaAttachment[]) {
+    await this.sendReplyWithPlaceholder(chatId, text, media)
   }
 }
 
@@ -428,14 +426,11 @@ function splitMessage(text: string, maxLength: number): string[] {
       break
     }
 
-    // Try to split at a newline
     let splitAt = remaining.lastIndexOf('\n', maxLength)
     if (splitAt === -1 || splitAt < maxLength / 2) {
-      // Fall back to splitting at a space
       splitAt = remaining.lastIndexOf(' ', maxLength)
     }
     if (splitAt === -1 || splitAt < maxLength / 2) {
-      // Hard split
       splitAt = maxLength
     }
 

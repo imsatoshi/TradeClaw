@@ -433,15 +433,12 @@ async function main() {
   }
 
   if (process.env.TELEGRAM_BOT_TOKEN) {
-    plugins.push(new TelegramPlugin(
-      {
-        token: process.env.TELEGRAM_BOT_TOKEN,
-        allowedChatIds: process.env.TELEGRAM_CHAT_ID
-          ? process.env.TELEGRAM_CHAT_ID.split(',').map(Number)
-          : [],
-      },
-      {}, // claudeCodeConfig
-    ))
+    plugins.push(new TelegramPlugin({
+      token: process.env.TELEGRAM_BOT_TOKEN,
+      allowedChatIds: process.env.TELEGRAM_CHAT_ID
+        ? process.env.TELEGRAM_CHAT_ID.split(',').map(Number)
+        : [],
+    }))
   }
 
   // Event log — persistent append-only event log used by web plugin + heartbeat
