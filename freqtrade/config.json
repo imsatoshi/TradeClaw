@@ -111,7 +111,7 @@
     "enable_openapi": false,
     "jwt_secret_key": "change-me-to-a-random-string",
     "CORS_origins": [],
-    "username": "tradeclaw",
+    "username": "your-username",
     "password": "your-password"
   },
   "internals": {
