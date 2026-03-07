@@ -82,6 +82,7 @@ const agentSchema = z.object({
 })
 
 const cryptoSchema = z.object({
+  readOnly: z.boolean().default(false),
   allowedSymbols: z.array(z.string()).min(1).default([
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'APT/USDT',
     'SUI/USDT', 'HYPE/USDT', 'DOGE/USDT', 'XRP/USDT',

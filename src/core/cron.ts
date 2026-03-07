@@ -247,7 +247,7 @@ async function loadStore(path: string): Promise<CronStore> {
 
 async function saveStore(path: string, store: CronStore): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.tmp`
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
   await writeFile(tmp, JSON.stringify(store, null, 2), 'utf-8')
   // Atomic rename
   const { rename } = await import('node:fs/promises')

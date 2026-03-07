@@ -55,6 +55,15 @@ function makeCacheKey(symbols: string[], timeframe: string, limit: number): stri
   return `${[...symbols].sort().join(',')}|${timeframe}|${limit}`
 }
 
+const FETCH_TIMEOUT_MS = 30_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+  ])
+}
+
 async function fetchWithCache(
   symbols: string[],
   timeframe: string,
@@ -68,7 +77,7 @@ async function fetchWithCache(
     return cached.data
   }
 
-  const data = await fetchExchangeOHLCV(symbols, timeframe, limit)
+  const data = await withTimeout(fetchExchangeOHLCV(symbols, timeframe, limit), FETCH_TIMEOUT_MS, `OHLCV ${timeframe}`)
   ohlcvCache.set(key, { data, fetchedAt: Date.now() })
   log.info('OHLCV fetched from Binance', { timeframe, count: symbols.length })
   return data

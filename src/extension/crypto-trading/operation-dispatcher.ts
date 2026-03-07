@@ -13,6 +13,7 @@ import type { ICryptoTradingEngine, CryptoPlaceOrderRequest } from './interfaces
 import { CRYPTO_MAX_OPEN_TRADES, MAX_STAKE_PERCENT_OF_EQUITY, MIN_AVAILABLE_BALANCE_RATIO } from './interfaces.js';
 import type { Operation } from './wallet/types.js';
 import { createLogger } from '../../core/logger.js';
+import { isCryptoReadOnly } from './safe-mode.js';
 
 const log = createLogger('op-dispatcher');
 
@@ -21,6 +22,15 @@ export function createCryptoOperationDispatcher(
   directExchangeEngine?: ICryptoTradingEngine,
 ) {
   return async (op: Operation): Promise<unknown> => {
+    // === Safe mode: block all write operations when readOnly is enabled ===
+    if (await isCryptoReadOnly()) {
+      log.warn(`BLOCKED by readOnly mode: ${op.action} ${op.params.symbol ?? ''}`)
+      return {
+        success: false,
+        error: `Safe mode (readOnly) is ON — ${op.action} operations are blocked. Disable readOnly in data/config/crypto.json to trade.`,
+      };
+    }
+
     switch (op.action) {
       case 'placeOrder': {
         const req: CryptoPlaceOrderRequest = {

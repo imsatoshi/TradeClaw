@@ -286,6 +286,10 @@ export interface CompactionResult {
  * - If microcompact is enough → returns microcompacted entries (in-memory, not written to disk)
  * - If full compact needed → writes boundary + summary to JSONL, future readActive() will pick them up
  */
+/** Track last failed compaction attempt per session to prevent retry loops. */
+const lastCompactFailure = new Map<string, number>()
+const COMPACT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes
+
 export async function compactIfNeeded(
   session: SessionStore,
   config: CompactionConfig,
@@ -297,6 +301,13 @@ export async function compactIfNeeded(
   const threshold = getAutoCompactThreshold(config)
 
   if (currentTokens < threshold) {
+    return { compacted: false, method: 'none' }
+  }
+
+  // Cooldown: skip if full compact failed recently (prevents retry loops)
+  const lastFail = lastCompactFailure.get(session.id)
+  if (lastFail && Date.now() - lastFail < COMPACT_FAILURE_COOLDOWN_MS) {
+    console.log(`compaction: skipped for session ${session.id} (cooldown after failure)`)
     return { compacted: false, method: 'none' }
   }
 
@@ -326,6 +337,7 @@ export async function compactIfNeeded(
     return { compacted: true, method: 'full' }
   } catch (err) {
     console.error('compaction: LLM summarization failed, falling back to microcompact:', err)
+    lastCompactFailure.set(session.id, Date.now())
     // Fall back to microcompact even if savings are below threshold
     return { compacted: savedTokens > 0, method: savedTokens > 0 ? 'microcompact' : 'none', activeEntries: microcompacted }
   }

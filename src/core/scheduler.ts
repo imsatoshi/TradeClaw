@@ -332,7 +332,7 @@ export function createScheduler(
     const reason = pendingReason
     pendingReason = null
     pendingPriority = -1
-    console.log(`scheduler: flush reason=${reason}`)
+    console.log(`scheduler: flush reason=${reason} at ${new Date().toISOString()}`)
 
     // Active hours check (only for interval heartbeats)
     if (reason === 'interval' && !isWithinActiveHours(config.heartbeat.activeHours, now())) {
@@ -370,6 +370,7 @@ export function createScheduler(
       }
 
       const durationMs = now() - start
+      console.log(`scheduler: heartbeat done status=${result.status} duration=${durationMs}ms`)
       emit('heartbeat', { ...result, reason, durationMs })
 
     } catch (err) {

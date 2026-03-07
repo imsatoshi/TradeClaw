@@ -81,7 +81,7 @@ async function ensureDirs(config: DeliveryQueueConfig): Promise<void> {
 
 /** Atomic write: write to tmp, then rename. */
 async function atomicWrite(path: string, data: string): Promise<void> {
-  const tmp = `${path}.${process.pid}.tmp`
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
   await writeFile(tmp, data, 'utf-8')
   await rename(tmp, path)
 }
@@ -125,11 +125,15 @@ export async function ack(config: DeliveryQueueConfig, id: string): Promise<void
 /** Update entry after a failed delivery attempt. */
 export async function fail(config: DeliveryQueueConfig, id: string, error: string): Promise<void> {
   const path = entryPath(config, id)
-  const raw = await readFile(path, 'utf-8')
-  const entry: DeliveryEntry = JSON.parse(raw)
-  entry.retryCount += 1
-  entry.lastError = error
-  await atomicWrite(path, JSON.stringify(entry, null, 2))
+  try {
+    const raw = await readFile(path, 'utf-8')
+    const entry: DeliveryEntry = JSON.parse(raw)
+    entry.retryCount += 1
+    entry.lastError = error
+    await atomicWrite(path, JSON.stringify(entry, null, 2))
+  } catch (err) {
+    console.warn(`delivery: failed to update entry ${id}: ${err instanceof Error ? err.message : err}`)
+  }
 }
 
 /** Move an entry to the failed/ subdirectory. */

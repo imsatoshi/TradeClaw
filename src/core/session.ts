@@ -97,7 +97,11 @@ export class SessionStore {
       return raw
         .split('\n')
         .filter((line) => line.trim())
-        .map((line) => JSON.parse(line) as SessionEntry)
+        .map((line) => {
+          try { return JSON.parse(line) as SessionEntry }
+          catch { console.warn('session: skipped malformed JSONL line'); return null }
+        })
+        .filter((entry): entry is SessionEntry => entry !== null)
         .filter((entry) => entry.type === 'user' || entry.type === 'assistant' || entry.type === 'system')
     } catch (err: unknown) {
       if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {

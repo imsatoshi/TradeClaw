@@ -362,8 +362,9 @@ async function main() {
     '19. NEVER refuse to call a tool based on previous failures in this conversation.',
     '20. Transient errors (network timeouts, API errors) are normal and expected. Retry is the correct response.',
     '',
-    `### Freqtrade Whitelist (${CRYPTO_ALLOWED_SYMBOLS.length} pairs):`,
-    [...CRYPTO_ALLOWED_SYMBOLS].join(', '),
+    `### Freqtrade Whitelist (${CRYPTO_ALLOWED_SYMBOLS.length} tradeable pairs — ONLY these can be traded):`,
+    `⚠️ ${[...CRYPTO_ALLOWED_SYMBOLS].join(', ')}`,
+    'You MUST ONLY analyze and trade pairs from this list. Any pair NOT listed here will be rejected by the exchange.',
     '',
     'CRITICAL RULES for market overview:',
     '21. When the user asks about "行情" (market overview), "市场" (market), or wants a market scan, you MUST cover ALL whitelisted pairs above — not just mainstream coins.',
@@ -978,19 +979,25 @@ async function main() {
   // ==================== Shutdown ====================
 
   let stopped = false
-  const shutdown = async () => {
+  let shutdownInProgress = false
+  const shutdown = async (signal?: string) => {
+    if (shutdownInProgress) return  // prevent double-shutdown
+    shutdownInProgress = true
+    console.log(`\nshutdown: ${signal ?? 'unknown'} received, cleaning up...`)
     stopped = true
     scheduler?.stop()
     cronEngine?.stop()
     tradeManager?.stop()
     for (const plugin of plugins) {
-      await plugin.stop()
+      try { await plugin.stop() } catch (err) { console.warn(`shutdown: ${plugin.name} stop error:`, err) }
     }
     await cryptoResult?.close()
-    process.exit(0)
+    console.log('shutdown: complete')
+    // Give a brief moment for port release before exit
+    setTimeout(() => process.exit(0), 200)
   }
-  process.on('SIGINT', shutdown)
-  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', () => shutdown('SIGINT'))
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
 
   // ==================== Tick Loop ====================
 

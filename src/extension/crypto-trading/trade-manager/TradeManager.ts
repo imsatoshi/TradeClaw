@@ -16,6 +16,7 @@ import type { TradePlan, TakeProfitLevel, TradePlanPnL } from './types.js'
 import { TradePlanStore } from './store.js'
 import { emit, enqueueSystemEvent } from '../../../core/agent-events.js'
 import { createLogger, getModeTag } from '../../../core/logger.js'
+import { isCryptoReadOnly } from '../safe-mode.js'
 
 const log = createLogger('trade-manager')
 
@@ -659,6 +660,10 @@ export class TradeManager {
 
   /** Place the next pending TP as a limit exit order. */
   private async placeNextTp(plan: TradePlan, trade: FreqtradeTrade): Promise<void> {
+    if (await isCryptoReadOnly()) {
+      log.warn(`BLOCKED by readOnly: TP${plan.takeProfits.find(tp => tp.status === 'pending')?.level} for ${plan.symbol}`)
+      return
+    }
     const nextTp = plan.takeProfits.find(tp => tp.status === 'pending')
     if (!nextTp || !plan.positionSize) return
 
@@ -689,6 +694,10 @@ export class TradeManager {
 
   /** Place a STOP_MARKET order via the direct exchange engine (CCXT). */
   private async placeStopLoss(plan: TradePlan): Promise<void> {
+    if (await isCryptoReadOnly()) {
+      log.warn(`BLOCKED by readOnly: SL for ${plan.symbol}`)
+      return
+    }
     if (!this.directEngine) {
       log.info(`no direct engine, SL for ${plan.symbol} managed by Freqtrade built-in stoploss`)
       return

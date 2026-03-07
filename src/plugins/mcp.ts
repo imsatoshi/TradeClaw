@@ -66,7 +66,7 @@ export class McpPlugin implements Plugin {
     const tools = this.tools
 
     const createMcpServer = () => {
-      const mcp = new McpServer({ name: 'tradeclaw', version: '1.0.0' })
+      const mcp = new McpServer({ name: 'trade-claw', version: '1.0.0' })
 
       for (const [name, t] of Object.entries(tools)) {
         if (!t.execute) continue
@@ -112,9 +112,27 @@ export class McpPlugin implements Plugin {
       return transport.handleRequest(c.req.raw)
     })
 
-    this.server = serve({ fetch: app.fetch, port: this.port }, (info) => {
-      console.log(`mcp plugin listening on http://localhost:${info.port}/mcp`)
-    })
+    const port = this.port
+    try {
+      this.server = serve({ fetch: app.fetch, port }, (info) => {
+        console.log(`mcp plugin listening on http://localhost:${info.port}/mcp`)
+      })
+      this.server.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          console.warn(`mcp plugin: port ${port} in use, retrying in 3s...`)
+          setTimeout(() => {
+            this.server?.close()
+            this.server = serve({ fetch: app.fetch, port }, (info) => {
+              console.log(`mcp plugin listening on http://localhost:${info.port}/mcp (retry)`)
+            })
+          }, 3000)
+        } else {
+          console.error(`mcp plugin error: ${err.message}`)
+        }
+      })
+    } catch (err) {
+      console.warn(`mcp plugin: failed to start on port ${port}: ${err}`)
+    }
   }
 
   async stop() {

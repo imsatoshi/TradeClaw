@@ -67,6 +67,7 @@ export async function fetchRealtimeData(): Promise<DotApiResponse> {
       console.warn(`DotAPI fetch failed, using cached data from ${cached.cachedAt}`)
       return cached.data
     }
-    throw err
+    console.warn(`DotAPI fetch failed and no cache available, starting with empty market data: ${err}`)
+    return { currentTime: new Date().toISOString(), lastUpdated: new Date().toISOString(), marketData: {}, news: [] }
   }
 }
