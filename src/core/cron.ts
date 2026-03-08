@@ -319,7 +319,9 @@ export function createCronEngine(opts: CronEngineOpts): CronEngine {
     if (nextMs === null) return
 
     const delayMs = Math.max(0, Math.min(nextMs - now(), 60_000))
-    console.log(`cron: armed timer, next fire in ${Math.round(delayMs / 1000)}s`)
+    if (delayMs < 60_000) {
+      console.log(`cron: armed timer, next fire in ${Math.round(delayMs / 1000)}s`)
+    }
     timer = setTimeout(onTick, delayMs)
   }
 
@@ -332,7 +334,9 @@ export function createCronEngine(opts: CronEngineOpts): CronEngine {
       (j) => j.enabled && j.state.nextRunAtMs !== null && j.state.nextRunAtMs <= currentMs,
     )
 
-    console.log(`cron: tick — ${dueJobs.length} due job(s)${dueJobs.length > 0 ? ': ' + dueJobs.map((j) => j.name).join(', ') : ''}`)
+    if (dueJobs.length > 0) {
+      console.log(`cron: tick — ${dueJobs.length} due job(s): ${dueJobs.map((j) => j.name).join(', ')}`)
+    }
 
     for (const job of dueJobs) {
       await executeJob(job, currentMs)

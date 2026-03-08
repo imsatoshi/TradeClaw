@@ -48,6 +48,8 @@ export interface TakeProfitLevel {
   filledPrice?: number
   /** ISO timestamp of fill */
   filledAt?: string
+  /** Number of failed placement attempts (for retry logic) */
+  retryCount?: number
 }
 
 export interface StopLoss {

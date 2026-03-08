@@ -15,6 +15,7 @@ import {
   MinBalanceGuard,
 } from './guard-pipeline.js'
 import { EmotionGuard, type EmotionGetter } from './emotion-guard.js'
+import { AccountDrawdownGuard } from './account-drawdown-guard.js'
 
 const GUARDS_CONFIG_PATH = resolve('data/config/guards.json')
 
@@ -54,6 +55,9 @@ const GUARD_REGISTRY: Record<string, GuardFactory> = {
     }
     return new EmotionGuard(deps.emotionGetter)
   },
+  AccountDrawdown: (p) => new AccountDrawdownGuard({
+    maxDailyPercent: typeof p.maxDailyPercent === 'number' ? p.maxDailyPercent : undefined,
+  }),
 }
 
 function loadGuardsConfig(): GuardsConfig | null {

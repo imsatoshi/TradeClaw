@@ -10,6 +10,7 @@ const DEFAULT_WINDOW_MS = 5 * 60 * 1000 // 5 minutes
 export class ErrorThrottle {
   private seen = new Map<string, number>()
   private windowMs: number
+  private lastCleanup = 0
 
   constructor(windowMs = DEFAULT_WINDOW_MS) {
     this.windowMs = windowMs
@@ -20,6 +21,14 @@ export class ErrorThrottle {
    * Returns false if it was already reported within the window (suppress).
    */
   shouldReport(key: string, nowMs = Date.now()): boolean {
+    // Periodic cleanup to prevent unbounded Map growth (at most once per hour)
+    if (nowMs - this.lastCleanup > 60 * 60 * 1000) {
+      for (const [k, ts] of this.seen) {
+        if (nowMs - ts > this.windowMs) this.seen.delete(k)
+      }
+      this.lastCleanup = nowMs
+    }
+
     const last = this.seen.get(key)
     if (last != null && (nowMs - last) < this.windowMs) {
       return false

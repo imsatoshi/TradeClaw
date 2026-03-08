@@ -41,6 +41,10 @@ export class TradeManager {
   private atrCache = new Map<string, { atr: number; updatedAt: number }>()
   /** OHLCV cache for chandelier trailing — refreshed every 5 minutes */
   private ohlcvCache = new Map<string, { highs: number[]; lows: number[]; updatedAt: number }>()
+  /** Consecutive tick error counter for circuit breaker */
+  private consecutiveTickErrors = 0
+  /** Last reconciliation timestamp */
+  private lastReconcileAt = 0
 
   constructor(
     engine: FreqtradeTradingEngine,
@@ -56,6 +60,15 @@ export class TradeManager {
   /** Start the polling loop. */
   async start(intervalMs = 10_000): Promise<void> {
     await this.store.load()
+
+    // Initial reconciliation — detect trades closed while we were offline
+    try {
+      const trades = await this.engine.getRawTrades()
+      await this.reconcile(trades)
+    } catch (err) {
+      log.warn(`startup reconciliation failed: ${err}`)
+    }
+
     this.pollTimer = setInterval(() => this.safeTick(), intervalMs)
     const mode = this.isDryRun ? 'DRY-RUN' : 'LIVE'
     log.info(`started [${mode}] (poll every ${intervalMs}ms, ${this.store.getAll().length} active plans)`)
@@ -1127,8 +1140,18 @@ export class TradeManager {
     this.ticking = true
     try {
       await this.tick()
+      this.consecutiveTickErrors = 0
     } catch (err) {
-      log.error(`tick error: ${err}`)
+      this.consecutiveTickErrors++
+      log.error(`tick error (${this.consecutiveTickErrors} consecutive): ${err}`)
+      if (this.consecutiveTickErrors >= 10) {
+        enqueueSystemEvent({
+          id: 'trade-manager-circuit-breaker',
+          source: 'hook',
+          text: `⚠️ CRITICAL: TradeManager has failed ${this.consecutiveTickErrors} consecutive ticks. Last error: ${err instanceof Error ? err.message : String(err)}. Investigate immediately.`,
+          contextKey: 'trade-manager-health',
+        })
+      }
     } finally {
       this.ticking = false
     }
@@ -1145,6 +1168,11 @@ export class TradeManager {
     } catch (err) {
       log.warn(`failed to fetch trades: ${err}`)
       return
+    }
+
+    // Periodic reconciliation — detect externally closed trades
+    if (Date.now() - this.lastReconcileAt > 5 * 60 * 1000) {
+      await this.reconcile(trades)
     }
 
     for (const plan of plans) {
@@ -1395,13 +1423,24 @@ export class TradeManager {
       if (result.success) {
         nextTp.status = 'placed'
         nextTp.orderId = result.orderId
+        nextTp.retryCount = 0
         await this.store.save(plan)
         log.info(`placed TP${nextTp.level} for ${plan.symbol} — limit $${nextTp.price}, size ${exitSize.toFixed(4)}`)
       } else {
-        log.warn(`failed to place TP${nextTp.level} for ${plan.symbol}: ${result.error}`)
+        nextTp.retryCount = (nextTp.retryCount ?? 0) + 1
+        log.warn(`failed to place TP${nextTp.level} for ${plan.symbol} (attempt ${nextTp.retryCount}): ${result.error}`)
+        if (nextTp.retryCount >= 3) {
+          this.emitEvent(plan, 'tp_placement_failed', `${plan.symbol} TP${nextTp.level} placement failed ${nextTp.retryCount} times — manual intervention needed`)
+        }
+        await this.store.save(plan)
       }
     } catch (err) {
-      log.error(`TP${nextTp.level} placement error: ${err}`)
+      nextTp.retryCount = (nextTp.retryCount ?? 0) + 1
+      log.error(`TP${nextTp.level} placement error (attempt ${nextTp.retryCount}): ${err}`)
+      if (nextTp.retryCount >= 3) {
+        this.emitEvent(plan, 'tp_placement_failed', `${plan.symbol} TP${nextTp.level} placement failed ${nextTp.retryCount} times — manual intervention needed`)
+      }
+      await this.store.save(plan)
     }
   }
 
@@ -1458,6 +1497,32 @@ export class TradeManager {
   }
 
   // ==================== Event Emission ====================
+
+  /**
+   * Reconcile active plans against Freqtrade open trades.
+   * Detects trades closed externally (manual close, liquidation, etc.)
+   */
+  private async reconcile(trades: FreqtradeTrade[]): Promise<void> {
+    const plans = this.store.getAll()
+    const openTradeIds = new Set(trades.map(t => t.trade_id))
+
+    for (const plan of plans) {
+      if (
+        (plan.status === 'active' || plan.status === 'partial') &&
+        plan.freqtradeTradeId &&
+        !openTradeIds.has(plan.freqtradeTradeId)
+      ) {
+        log.warn(`reconcile: ${plan.symbol} plan ${plan.id.slice(0, 8)} — Freqtrade trade #${plan.freqtradeTradeId} no longer open`)
+        plan.status = 'error'
+        plan.errorMessage = 'Freqtrade trade closed externally'
+        await this.store.archive(plan)
+        this.pnlCache.delete(plan.id)
+        this.emitEvent(plan, 'reconcile_closed', `${plan.symbol} trade #${plan.freqtradeTradeId} was closed externally — plan archived`)
+      }
+    }
+
+    this.lastReconcileAt = Date.now()
+  }
 
   private emitEvent(plan: TradePlan, type: string, text: string): void {
     const tag = getModeTag()

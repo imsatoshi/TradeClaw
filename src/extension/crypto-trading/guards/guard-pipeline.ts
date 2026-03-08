@@ -14,6 +14,7 @@
 import type { Operation } from '../wallet/types.js';
 import type { CryptoPosition, CryptoAccountInfo } from '../interfaces.js';
 import { EmotionGuard, type EmotionGetter } from './emotion-guard.js';
+import { AccountDrawdownGuard } from './account-drawdown-guard.js';
 
 // ==================== Types ====================
 
@@ -216,6 +217,7 @@ export function createDefaultGuards(opts: {
   maxOpenTrades?: number;
   minBalanceRatio?: number;
   emotionGetter?: EmotionGetter;
+  maxDailyDrawdownPercent?: number;
 } = {}): Guard[] {
   const guards: Guard[] = [
     new MaxPositionSizeGuard({ maxPercentOfEquity: opts.maxPositionSizePercent }),
@@ -226,5 +228,6 @@ export function createDefaultGuards(opts: {
   if (opts.emotionGetter) {
     guards.push(new EmotionGuard(opts.emotionGetter));
   }
+  guards.push(new AccountDrawdownGuard({ maxDailyPercent: opts.maxDailyDrawdownPercent }));
   return guards;
 }
