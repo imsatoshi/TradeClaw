@@ -248,6 +248,7 @@ export class TelegramPlugin implements Plugin {
     if (!session) {
       session = new SessionStore(`telegram/${userId}`)
       await session.restore()
+      await session.trimToLastN(300)
       this.sessions.set(userId, session)
       console.log(`telegram: session telegram/${userId} ready`)
     }

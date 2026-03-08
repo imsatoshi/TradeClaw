@@ -305,7 +305,7 @@ export function createCronEngine(opts: CronEngineOpts): CronEngine {
     return store.jobs.find((j) => j.id === id)
   }
 
-  /** Arm the next timer. Clamp to 60s max to prevent long setTimeout drift. */
+  /** Arm the next timer. Clamp to 60s normally, 300s when next job is far away. */
   function armTimer(): void {
     if (stopped) return
 
@@ -318,7 +318,10 @@ export function createCronEngine(opts: CronEngineOpts): CronEngine {
 
     if (nextMs === null) return
 
-    const delayMs = Math.max(0, Math.min(nextMs - now(), 60_000))
+    const rawDelay = nextMs - now()
+    // Use 300s clamp when next job is >5min away, otherwise 60s
+    const maxClamp = rawDelay > 300_000 ? 300_000 : 60_000
+    const delayMs = Math.max(0, Math.min(rawDelay, maxClamp))
     if (delayMs < 60_000) {
       console.log(`cron: armed timer, next fire in ${Math.round(delayMs / 1000)}s`)
     }

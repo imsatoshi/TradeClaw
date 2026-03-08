@@ -715,9 +715,17 @@ export class TradeManager {
     const slDist = Math.abs(plan.entryPrice - plan.stopLoss.price)
     const tightenAmount = slDist * (plan.timeDecay.tightenPercent / 100)
 
-    const newSl = isLong
+    let newSl = isLong
       ? plan.stopLoss.price + tightenAmount
       : plan.stopLoss.price - tightenAmount
+
+    // Clamp: maintain ≥ 0.3% distance from entry to prevent SL too close
+    const minDistance = plan.entryPrice * 0.003
+    if (isLong && newSl > plan.entryPrice - minDistance) {
+      newSl = plan.entryPrice - minDistance
+    } else if (!isLong && newSl < plan.entryPrice + minDistance) {
+      newSl = plan.entryPrice + minDistance
+    }
 
     const oldSl = plan.stopLoss.price
     plan.stopLoss = { price: Number(newSl.toFixed(6)), status: 'monitoring' }
@@ -938,18 +946,36 @@ export class TradeManager {
 
     log.warn(`${plan.symbol} DCA HARD STOP — price $${currentPrice} hit $${plan.dca.hardStopPrice}. Force-exiting ALL.`)
 
-    // Exit main trade
+    // Fetch open trades to verify existence before force-exit
+    let openTradeIds: Set<number>
     try {
-      await this.engine.forceExit(String(plan.freqtradeTradeId))
+      const trades = await this.engine.getRawTrades()
+      openTradeIds = new Set(trades.map(t => t.trade_id))
+    } catch (err) {
+      log.error(`${plan.symbol} hard stop: failed to fetch trades, proceeding anyway: ${err}`)
+      openTradeIds = new Set() // empty = will skip verification
+    }
+
+    // Exit main trade (only if still open)
+    try {
+      if (openTradeIds.size === 0 || openTradeIds.has(Number(plan.freqtradeTradeId))) {
+        await this.engine.forceExit(String(plan.freqtradeTradeId))
+      } else {
+        log.warn(`${plan.symbol} hard stop: main trade ${plan.freqtradeTradeId} already closed externally`)
+      }
     } catch (err) {
       log.error(`${plan.symbol} hard stop main exit error: ${err}`)
     }
 
-    // Exit all DCA layer trades
+    // Exit all DCA layer trades (only if still open)
     for (const layer of plan.dca.layers) {
       if (layer.status === 'filled' && layer.freqtradeTradeId) {
         try {
-          await this.engine.forceExit(String(layer.freqtradeTradeId))
+          if (openTradeIds.size === 0 || openTradeIds.has(Number(layer.freqtradeTradeId))) {
+            await this.engine.forceExit(String(layer.freqtradeTradeId))
+          } else {
+            log.warn(`${plan.symbol} DCA L${layer.layer} trade ${layer.freqtradeTradeId} already closed externally`)
+          }
           layer.status = 'stopped'
           layer.exitPrice = currentPrice
           layer.exitAt = new Date().toISOString()

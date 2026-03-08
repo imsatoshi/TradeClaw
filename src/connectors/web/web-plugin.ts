@@ -39,6 +39,7 @@ export class WebPlugin implements Plugin {
     // Initialize session (mirrors Telegram's per-user pattern, single user for web)
     this.session = new SessionStore('web/default')
     await this.session.restore()
+    await this.session.trimToLastN(200)
 
     const app = new Hono()
     app.use('/api/*', cors())

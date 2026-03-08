@@ -41,6 +41,7 @@ export class McpAskPlugin implements Plugin {
     if (!session) {
       session = new SessionStore(`${SESSION_PREFIX}__${sessionId}`)
       await session.restore()
+      await session.trimToLastN(200)
       this.sessions.set(sessionId, session)
     }
     return session
