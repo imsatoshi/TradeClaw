@@ -5,7 +5,7 @@
  * Completed/cancelled plans → data/trade-plans/history.json (append-only)
  */
 
-import { readFile, writeFile, appendFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, appendFile, mkdir, rename } from 'fs/promises'
 import { resolve } from 'path'
 import type { TradePlan } from './types.js'
 
@@ -61,11 +61,13 @@ export class TradePlanStore {
     await this.appendHistory(plan)
   }
 
-  /** Persist all active plans to disk. */
+  /** Persist all active plans to disk (atomic: write tmp → rename). */
   private async flush(): Promise<void> {
     await mkdir(DATA_DIR, { recursive: true })
     const arr = this.getAll()
-    await writeFile(ACTIVE_FILE, JSON.stringify(arr, null, 2))
+    const tmp = `${ACTIVE_FILE}.${process.pid}.${Date.now()}.tmp`
+    await writeFile(tmp, JSON.stringify(arr, null, 2))
+    await rename(tmp, ACTIVE_FILE)
   }
 
   /** Append a completed/cancelled plan to history file. */

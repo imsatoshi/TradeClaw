@@ -45,9 +45,18 @@ export async function runGuardPipeline(
   context: GuardContext,
 ): Promise<GuardResult & { guardName?: string }> {
   for (const guard of guards) {
-    const result = await guard.check(context);
-    if (!result.allowed) {
-      return { allowed: false, reason: result.reason, guardName: guard.name };
+    try {
+      const result = await guard.check(context);
+      if (!result.allowed) {
+        return { allowed: false, reason: result.reason, guardName: guard.name };
+      }
+    } catch (err) {
+      // Guard threw an exception — treat as blocked (fail-closed)
+      return {
+        allowed: false,
+        reason: `Guard threw exception: ${err instanceof Error ? err.message : String(err)}`,
+        guardName: guard.name,
+      };
     }
   }
   return { allowed: true };

@@ -286,9 +286,14 @@ export interface CompactionResult {
  * - If microcompact is enough → returns microcompacted entries (in-memory, not written to disk)
  * - If full compact needed → writes boundary + summary to JSONL, future readActive() will pick them up
  */
-/** Track last failed compaction attempt per session to prevent retry loops. */
-const lastCompactFailure = new Map<string, number>()
-const COMPACT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes
+/** Track compaction failure state per session for exponential backoff. */
+const compactFailureState = new Map<string, { lastFailAt: number; consecutiveFailures: number }>()
+const COMPACT_BACKOFF_MS = [
+  5 * 60 * 1000,    // 5 minutes
+  15 * 60 * 1000,   // 15 minutes
+  60 * 60 * 1000,   // 1 hour
+  4 * 60 * 60 * 1000, // 4 hours (cap)
+] as const
 
 export async function compactIfNeeded(
   session: SessionStore,
@@ -304,11 +309,15 @@ export async function compactIfNeeded(
     return { compacted: false, method: 'none' }
   }
 
-  // Cooldown: skip if full compact failed recently (prevents retry loops)
-  const lastFail = lastCompactFailure.get(session.id)
-  if (lastFail && Date.now() - lastFail < COMPACT_FAILURE_COOLDOWN_MS) {
-    console.log(`compaction: skipped for session ${session.id} (cooldown after failure)`)
-    return { compacted: false, method: 'none' }
+  // Cooldown: skip if full compact failed recently (exponential backoff)
+  const failState = compactFailureState.get(session.id)
+  if (failState) {
+    const backoffIdx = Math.min(failState.consecutiveFailures - 1, COMPACT_BACKOFF_MS.length - 1)
+    const cooldownMs = COMPACT_BACKOFF_MS[Math.max(0, backoffIdx)]
+    if (Date.now() - failState.lastFailAt < cooldownMs) {
+      console.log(`compaction: skipped for session ${session.id} (cooldown ${Math.round(cooldownMs / 60000)}m after ${failState.consecutiveFailures} failure(s))`)
+      return { compacted: false, method: 'none' }
+    }
   }
 
   console.log(`compaction: session ${session.id} exceeded threshold (${currentTokens}/${threshold} tokens)`)
@@ -334,10 +343,16 @@ export async function compactIfNeeded(
     await session.appendRaw(summary)
 
     console.log(`compaction: full compact done. ${activeEntries.length} entries → summary`)
+    // Reset failure state on success
+    compactFailureState.delete(session.id)
     return { compacted: true, method: 'full' }
   } catch (err) {
-    console.error('compaction: LLM summarization failed, falling back to microcompact:', err)
-    lastCompactFailure.set(session.id, Date.now())
+    const prev = compactFailureState.get(session.id)
+    const consecutiveFailures = (prev?.consecutiveFailures ?? 0) + 1
+    compactFailureState.set(session.id, { lastFailAt: Date.now(), consecutiveFailures })
+    const backoffIdx = Math.min(consecutiveFailures - 1, COMPACT_BACKOFF_MS.length - 1)
+    const nextRetryMin = Math.round(COMPACT_BACKOFF_MS[Math.max(0, backoffIdx)] / 60000)
+    console.error(`compaction: LLM summarization failed (attempt #${consecutiveFailures}, retry in ${nextRetryMin}m):`, err)
     // Fall back to microcompact even if savings are below threshold
     return { compacted: savedTokens > 0, method: savedTokens > 0 ? 'microcompact' : 'none', activeEntries: microcompacted }
   }

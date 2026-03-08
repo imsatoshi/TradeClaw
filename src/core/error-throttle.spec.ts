@@ -43,4 +43,24 @@ describe('ErrorThrottle', () => {
     expect(throttle.shouldReport('a', 2000)).toBe(true)
     expect(throttle.shouldReport('b', 2000)).toBe(true)
   })
+
+  it('cleans up stale entries after 1 hour', () => {
+    const throttle = new ErrorThrottle(5000)
+    // Add some entries
+    throttle.shouldReport('old-key-1', 1000)
+    throttle.shouldReport('old-key-2', 1000)
+    throttle.shouldReport('recent-key', 1000)
+
+    // Jump forward 1 hour + 1ms — triggers cleanup
+    const oneHourLater = 1000 + 60 * 60 * 1000 + 1
+    // 'recent-key' reported again just before cleanup so it's still within window
+    throttle.shouldReport('recent-key', oneHourLater - 3000) // refresh it
+
+    // Trigger cleanup by calling shouldReport after 1 hour
+    throttle.shouldReport('trigger', oneHourLater)
+
+    // old keys should have been cleaned up, so reporting them again should return true
+    expect(throttle.shouldReport('old-key-1', oneHourLater + 1)).toBe(true)
+    expect(throttle.shouldReport('old-key-2', oneHourLater + 1)).toBe(true)
+  })
 })

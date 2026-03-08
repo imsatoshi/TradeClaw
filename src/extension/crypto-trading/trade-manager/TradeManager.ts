@@ -158,8 +158,8 @@ export class TradeManager {
     }
 
     plan.status = 'cancelled'
-    await this.store.archive(plan)
     this.pnlCache.delete(planId)
+    await this.store.archive(plan)
     log.info(`plan ${planId.slice(0, 8)} cancelled`)
     return { success: true }
   }
@@ -1011,8 +1011,8 @@ export class TradeManager {
       if (tp.status === 'pending' || tp.status === 'placed') tp.status = 'cancelled'
     }
     plan.status = 'completed'
-    await this.store.archive(plan)
     this.pnlCache.delete(plan.id)
+    await this.store.archive(plan)
 
     this.emitEvent(plan, 'dca_hard_stop', `${plan.symbol} DCA HARD STOP at $${currentPrice}. All positions exited. PnL: $${(plan.realizedPnl ?? 0).toFixed(2)}`)
     return true
@@ -1145,8 +1145,8 @@ export class TradeManager {
         }
 
         plan.status = 'completed'
-        await this.store.archive(plan)
         this.pnlCache.delete(plan.id)
+        await this.store.archive(plan)
         this.emitEvent(plan, 'sl_triggered', `${plan.symbol} SL triggered at $${currentPrice} (SL $${plan.stopLoss.price}). Force-exited. PnL: $${(plan.realizedPnl ?? 0).toFixed(2)}`)
         return true
       } else {
@@ -1198,7 +1198,11 @@ export class TradeManager {
 
     // Periodic reconciliation — detect externally closed trades
     if (Date.now() - this.lastReconcileAt > 5 * 60 * 1000) {
-      await this.reconcile(trades)
+      try {
+        await this.reconcile(trades)
+      } catch (err) {
+        log.warn(`reconcile failed (non-fatal): ${err}`)
+      }
     }
 
     for (const plan of plans) {
@@ -1414,8 +1418,8 @@ export class TradeManager {
     }
 
     plan.status = 'completed'
-    await this.store.archive(plan)
     this.pnlCache.delete(plan.id)
+    await this.store.archive(plan)
 
     const reason = trade?.exit_reason ?? 'trade closed'
     const totalPnl = (plan.realizedPnl ?? 0).toFixed(2)
@@ -1541,8 +1545,8 @@ export class TradeManager {
         log.warn(`reconcile: ${plan.symbol} plan ${plan.id.slice(0, 8)} — Freqtrade trade #${plan.freqtradeTradeId} no longer open`)
         plan.status = 'error'
         plan.errorMessage = 'Freqtrade trade closed externally'
-        await this.store.archive(plan)
         this.pnlCache.delete(plan.id)
+        await this.store.archive(plan)
         this.emitEvent(plan, 'reconcile_closed', `${plan.symbol} trade #${plan.freqtradeTradeId} was closed externally — plan archived`)
       }
     }
