@@ -19,7 +19,6 @@ export const newsCollectorSchema = z.object({
   feeds: z.array(feedSchema).default([
     { name: 'CoinDesk', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'coindesk' },
     { name: 'CoinTelegraph', url: 'https://cointelegraph.com/rss', source: 'cointelegraph' },
-    { name: 'The Block', url: 'https://www.theblock.co/rss.xml', source: 'theblock' },
     { name: 'CNBC Finance', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', source: 'cnbc' },
   ]),
 })
