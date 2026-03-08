@@ -30,20 +30,20 @@ describe('EmotionGuard', () => {
     expect(ctx.operation.params.usd_size).toBe(200)
   })
 
-  it('reduces size to 50% when emotion is cautious', () => {
+  it('reduces size to 35% when emotion is cautious', () => {
     const guard = new EmotionGuard(() => 'cautious')
     const ctx = makeCtx(100)
     const result = guard.check(ctx)
     expect(result.allowed).toBe(true)
-    expect(ctx.operation.params.usd_size).toBe(50)
+    expect(ctx.operation.params.usd_size).toBe(35)
   })
 
-  it('reduces size to 25% when emotion is scared', () => {
+  it('reduces size to 15% when emotion is scared', () => {
     const guard = new EmotionGuard(() => 'feeling scared')
     const ctx = makeCtx(100)
     const result = guard.check(ctx)
     expect(result.allowed).toBe(true)
-    expect(ctx.operation.params.usd_size).toBe(25)
+    expect(ctx.operation.params.usd_size).toBe(15)
   })
 
   it('blocks trade when emotion is angry', () => {

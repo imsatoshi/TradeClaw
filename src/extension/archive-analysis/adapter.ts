@@ -36,17 +36,22 @@ import type { MarketData } from './data/interfaces.js';
  * NOTE: Cognition tools (getFrontalLobe, updateFrontalLobe) are in cognition.adapter.ts
  */
 // Kelly Criterion helper — maps setup score + R:R to optimal risk%.
+// v5: Narrowed win rate range (0.45-0.55) and capped risk at 3%.
+// Without historical trade data to calibrate, we must be conservative —
+// pretending to know the win rate precisely is the #1 sizing mistake.
 function computeKellyRiskPercent(setupScore: number, riskReward: number) {
-  const p = Math.min(0.65, Math.max(0.42, 0.40 + (setupScore - 50) * 0.005));
+  // Narrower range: scores 50-100 map to 0.45-0.55 (was 0.42-0.65)
+  const p = Math.min(0.55, Math.max(0.45, 0.45 + (setupScore - 50) * 0.002));
   const q = 1 - p;
   const b = riskReward;
   const kellyFull = Math.max(0, (p * b - q) / b);
-  const kellyQuarter = kellyFull * 0.25;
-  const riskPct = Math.min(6, Math.max(1, kellyQuarter * 100));
+  // Use 1/5 Kelly instead of 1/4 — more conservative without historical calibration
+  const kellyFifth = kellyFull * 0.20;
+  const riskPct = Math.min(3, Math.max(0.5, kellyFifth * 100));
   return {
     estimatedWinRate: Math.round(p * 1000) / 1000,
     kellyFull: Math.round(kellyFull * 10000) / 10000,
-    kellyQuarter: Math.round(kellyQuarter * 10000) / 10000,
+    kellyFraction: Math.round(kellyFifth * 10000) / 10000,
     riskPercent: Math.round(riskPct * 100) / 100,
   };
 }

@@ -40,6 +40,19 @@ function scoreTrend(
     ? ((regime.emaFast - regime.emaSlow) / regime.emaSlow) * 100
     : 0
 
+  // Compute spread delta: is the spread expanding or contracting?
+  // Use 1H bars to estimate prior EMA spread (6 bars ago = ~6 hours)
+  let spreadDelta = 0
+  if (bars1h.length >= 16) {
+    const closes1h = bars1h.map(b => b.close)
+    const ema9 = sma(closes1h.slice(-15, -6), 9)  // rough EMA proxy 6 bars ago
+    const ema55 = sma(closes1h.slice(-61, -6), Math.min(55, closes1h.length - 6))
+    if (ema55 > 0) {
+      const prevSpread = ((ema9 - ema55) / ema55) * 100
+      spreadDelta = Math.abs(spread) - Math.abs(prevSpread)
+    }
+  }
+
   if (regime.regime === 'ranging') {
     spreadScore = 5 // neutral for ranging
   } else if (direction === 'long') {
@@ -53,6 +66,12 @@ function scoreTrend(
     else if (spread < -1) spreadScore = 7
     else if (spread < -0.5) spreadScore = 4
     else spreadScore = 2
+  }
+
+  // Spread delta adjustment: expanding = +2, contracting = -2
+  if (regime.regime !== 'ranging') {
+    if (spreadDelta > 0.1) spreadScore = Math.min(10, spreadScore + 2)
+    else if (spreadDelta < -0.1) spreadScore = Math.max(0, spreadScore - 2)
   }
 
   // 1H SMA20 confirmation (0-5)
@@ -72,38 +91,114 @@ function scoreTrend(
   }
 
   const score = spreadScore + trendScore
-  const detail = `EMA spread ${spread >= 0 ? '+' : ''}${spread.toFixed(2)}% (${spreadScore}/10), 1H SMA20 (${trendScore}/5)`
-  return { score, max: 15, detail, raw: { emaSpreadPct: Math.round(spread * 1000) / 1000, regime: regime.regime } }
+  const deltaLabel = spreadDelta > 0.1 ? ' expanding' : spreadDelta < -0.1 ? ' contracting' : ''
+  const detail = `EMA spread ${spread >= 0 ? '+' : ''}${spread.toFixed(2)}%${deltaLabel} (${spreadScore}/10), 1H SMA20 (${trendScore}/5)`
+  return { score, max: 15, detail, raw: { emaSpreadPct: Math.round(spread * 1000) / 1000, spreadDelta: Math.round(spreadDelta * 1000) / 1000, regime: regime.regime } }
 }
+
+/**
+ * Detect RSI divergence by comparing the last two swing lows (for long) or swing highs (for short).
+ * Bullish divergence: price lower low + RSI higher low → selling pressure exhausted.
+ * Bearish divergence: price higher high + RSI lower high → buying pressure exhausted.
+ */
+function detectRsiDivergence(
+  closes: number[],
+  rsiArr: number[],
+  direction: SignalDirection,
+  lookback = 30,
+): boolean {
+  // Align RSI with closes (RSI series is shorter by rsiPeriod)
+  const offset = closes.length - rsiArr.length
+  const startIdx = Math.max(0, rsiArr.length - lookback)
+
+  if (direction === 'long') {
+    // Find two most recent local minima in price
+    const lows: { idx: number; price: number; rsi: number }[] = []
+    for (let i = startIdx + 2; i < rsiArr.length - 1; i++) {
+      const pi = i + offset
+      if (closes[pi] < closes[pi - 1] && closes[pi] < closes[pi + 1]) {
+        lows.push({ idx: i, price: closes[pi], rsi: rsiArr[i] })
+      }
+    }
+    if (lows.length >= 2) {
+      const prev = lows[lows.length - 2]
+      const curr = lows[lows.length - 1]
+      // Price lower low but RSI higher low = bullish divergence
+      return curr.price < prev.price && curr.rsi > prev.rsi
+    }
+  } else {
+    // Find two most recent local maxima in price
+    const highs: { idx: number; price: number; rsi: number }[] = []
+    for (let i = startIdx + 2; i < rsiArr.length - 1; i++) {
+      const pi = i + offset
+      if (closes[pi] > closes[pi - 1] && closes[pi] > closes[pi + 1]) {
+        highs.push({ idx: i, price: closes[pi], rsi: rsiArr[i] })
+      }
+    }
+    if (highs.length >= 2) {
+      const prev = highs[highs.length - 2]
+      const curr = highs[highs.length - 1]
+      // Price higher high but RSI lower high = bearish divergence
+      return curr.price > prev.price && curr.rsi < prev.rsi
+    }
+  }
+  return false
+}
+
+// v5: Tokens with strong mean-reversion characteristics need stricter MTF penalty.
+// These tokens rarely sustain RSI > 70 on 1H — it almost always precedes a 3-5% dump.
+const MEAN_REVERSION_TOKENS = new Set([
+  'DOGE/USDT', 'SHIB/USDT', 'XRP/USDT', 'PEPE/USDT', 'FLOKI/USDT',
+  'WIF/USDT', 'BONK/USDT', 'MEME/USDT',
+])
 
 function scoreMomentum(
   direction: SignalDirection,
   closes15m: number[],
   bars1h: MarketData[],
   rsiPeriod: number,
+  symbol?: string,
 ): DimensionScore {
-  // 15m RSI component (0-8)
+  // 15m RSI component (0-8) — requires divergence for extreme zones
   const rsiArr = rsiSeries(closes15m, rsiPeriod)
   let rsiScore = 0
   let rsiVal = 50
+  let divergenceNote = ''
 
   if (rsiArr.length > 0) {
     rsiVal = rsiArr[rsiArr.length - 1]
 
+    // Detect RSI divergence: compare RSI at recent swing lows/highs
+    // Bullish divergence: price makes lower low but RSI makes higher low
+    // Bearish divergence: price makes higher high but RSI makes lower high
+    const hasDivergence = detectRsiDivergence(closes15m, rsiArr, direction)
+
     if (direction === 'long') {
-      if (rsiVal >= 30 && rsiVal < 45) rsiScore = 8        // oversold recovery (ideal)
-      else if (rsiVal >= 45 && rsiVal < 55) rsiScore = 5   // neutral
+      if (rsiVal >= 30 && rsiVal < 45) {
+        // Oversold zone — only high score if divergence confirms exhaustion
+        rsiScore = hasDivergence ? 8 : 4
+        if (hasDivergence) divergenceNote = ' (bullish div)'
+      } else if (rsiVal >= 45 && rsiVal < 55) rsiScore = 5   // neutral
       else if (rsiVal >= 55 && rsiVal < 65) rsiScore = 3   // mildly overbought
       else if (rsiVal >= 65) rsiScore = 0                    // overbought — no long
-      else if (rsiVal >= 25) rsiScore = 4                    // deeply oversold, bounce likely
-      else rsiScore = 2                                       // < 25: extreme oversold
+      else if (rsiVal >= 25) {
+        // Deeply oversold — could be cascade or bounce, divergence decides
+        rsiScore = hasDivergence ? 6 : 1
+        if (!hasDivergence) divergenceNote = ' (no div, cascade risk)'
+      }
+      else rsiScore = 1                                       // < 25: extreme, likely cascade
     } else {
-      if (rsiVal > 55 && rsiVal <= 70) rsiScore = 8        // overbought recovery (ideal)
-      else if (rsiVal > 45 && rsiVal <= 55) rsiScore = 5   // neutral
+      if (rsiVal > 55 && rsiVal <= 70) {
+        rsiScore = hasDivergence ? 8 : 4
+        if (hasDivergence) divergenceNote = ' (bearish div)'
+      } else if (rsiVal > 45 && rsiVal <= 55) rsiScore = 5   // neutral
       else if (rsiVal > 35 && rsiVal <= 45) rsiScore = 3   // mildly oversold
       else if (rsiVal <= 35) rsiScore = 0                    // oversold — no short
-      else if (rsiVal <= 75) rsiScore = 4                    // deeply overbought, drop likely
-      else rsiScore = 2                                       // > 75: extreme overbought
+      else if (rsiVal <= 75) {
+        rsiScore = hasDivergence ? 6 : 1
+        if (!hasDivergence) divergenceNote = ' (no div, squeeze risk)'
+      }
+      else rsiScore = 1                                       // > 75: extreme
     }
   }
 
@@ -132,7 +227,9 @@ function scoreMomentum(
     }
   }
 
-  // 1H RSI MTF penalty (0 to -3)
+  // 1H RSI MTF penalty — direction-aware (0 to -3)
+  // If 1H EMA trend aligns with our direction, high RSI is normal extension → no penalty.
+  // If against our direction → heavier penalty.
   let mtfPenalty = 0
   let mtfDetail = ''
   if (bars1h.length >= 15) {
@@ -140,25 +237,52 @@ function scoreMomentum(
     const rsi1h = rsiSeries(closes1h, 14)
     if (rsi1h.length > 0) {
       const rsi1hVal = rsi1h[rsi1h.length - 1]
-      if (direction === 'long' && rsi1hVal > 70) {
-        mtfPenalty = -3
-        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OB penalty`
-      } else if (direction === 'long' && rsi1hVal > 60) {
-        mtfPenalty = -1
-        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} mild OB`
-      } else if (direction === 'short' && rsi1hVal < 30) {
-        mtfPenalty = -3
-        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OS penalty`
-      } else if (direction === 'short' && rsi1hVal < 40) {
-        mtfPenalty = -1
-        mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} mild OS`
+      // Check 1H EMA direction: use SMA9 vs SMA21 as proxy
+      const sma9_1h = closes1h.length >= 9 ? sma(closes1h.slice(-9), 9) : 0
+      const sma21_1h = closes1h.length >= 21 ? sma(closes1h.slice(-21), 21) : 0
+      const ema1hBullish = sma9_1h > sma21_1h
+      const ema1hBearish = sma9_1h < sma21_1h
+
+      // v5: Mean-reversion tokens get stricter MTF penalty (lower threshold, heavier penalty)
+      const isMeanRev = symbol ? MEAN_REVERSION_TOKENS.has(symbol) : false
+      const obThreshold = isMeanRev ? 65 : 70
+      const osThreshold = isMeanRev ? 35 : 30
+      const heavyPenalty = isMeanRev ? -5 : -3
+      const mildObThreshold = isMeanRev ? 55 : 60
+      const mildOsThreshold = isMeanRev ? 45 : 40
+
+      if (direction === 'long' && rsi1hVal > obThreshold) {
+        if (ema1hBullish && !isMeanRev) {
+          // 1H uptrend + RSI OB = normal extension, skip penalty (not for mean-rev tokens)
+          mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OB (trend-aligned, no penalty)`
+        } else {
+          mtfPenalty = heavyPenalty
+          mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OB penalty${isMeanRev ? ' (mean-rev token)' : ' (counter-trend)'}`
+        }
+      } else if (direction === 'long' && rsi1hVal > mildObThreshold) {
+        if (!ema1hBullish || isMeanRev) {
+          mtfPenalty = isMeanRev ? -2 : -1
+          mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} mild OB${isMeanRev ? ' (mean-rev)' : ''}`
+        }
+      } else if (direction === 'short' && rsi1hVal < osThreshold) {
+        if (ema1hBearish && !isMeanRev) {
+          mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OS (trend-aligned, no penalty)`
+        } else {
+          mtfPenalty = heavyPenalty
+          mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} OS penalty${isMeanRev ? ' (mean-rev token)' : ' (counter-trend)'}`
+        }
+      } else if (direction === 'short' && rsi1hVal < mildOsThreshold) {
+        if (!ema1hBearish || isMeanRev) {
+          mtfPenalty = isMeanRev ? -2 : -1
+          mtfDetail = `, 1H RSI ${rsi1hVal.toFixed(0)} mild OS${isMeanRev ? ' (mean-rev)' : ''}`
+        }
       }
     }
   }
 
   const macdCurrent = macdHist.length > 0 ? macdHist[macdHist.length - 1] : 0
   const score = Math.max(0, rsiScore + macdScore + mtfPenalty)
-  const detail = `RSI ${rsiVal.toFixed(0)} (${rsiScore}/8), MACD ${macdDetail} (${macdScore}/5)${mtfDetail}`
+  const detail = `RSI ${rsiVal.toFixed(0)}${divergenceNote} (${rsiScore}/8), MACD ${macdDetail} (${macdScore}/5)${mtfDetail}`
   return { score, max: 20, detail, raw: { rsi15m: Math.round(rsiVal * 10) / 10, macdHist: Math.round(macdCurrent * 10000) / 10000, macdAccelerating: macdHist.length >= 2 ? (direction === 'long' ? macdCurrent > macdHist[macdHist.length - 2] : macdCurrent < macdHist[macdHist.length - 2]) : false } }
 }
 
@@ -476,24 +600,48 @@ function scoreFunding(
   let score: number
   let detail: string
 
-  // Extreme positive funding → favor short (fade)
-  // Extreme negative funding → favor long (fade)
-  if (rate > 0.0005 && direction === 'short') {
-    score = 10; detail = `${ratePct.toFixed(3)}% (extreme +, fade short)`
-  } else if (rate > 0.0003 && direction === 'short') {
-    score = 7; detail = `${ratePct.toFixed(3)}% (high +, fade short)`
-  } else if (rate < -0.0005 && direction === 'long') {
-    score = 10; detail = `${ratePct.toFixed(3)}% (extreme -, fade long)`
-  } else if (rate < -0.0003 && direction === 'long') {
-    score = 7; detail = `${ratePct.toFixed(3)}% (high -, fade long)`
-  } else if (Math.abs(rate) < 0.0001) {
-    score = 5; detail = `${ratePct.toFixed(3)}% (neutral)`
+  // Conservative funding scoring:
+  // Extreme funding = strong trend momentum. Don't blindly fade.
+  // - Extreme in OUR direction = trend confirmation (moderate score)
+  // - Extreme AGAINST our direction = caution, not auto-fade
+  //   (fading requires rate declining from peak, which we can't detect without history)
+  // - Neutral = safe (good score)
+  if (Math.abs(rate) < 0.0001) {
+    score = 6; detail = `${ratePct.toFixed(3)}% (neutral, safe)`
+  } else if (rate > 0.0005) {
+    if (direction === 'short') {
+      // Extreme positive funding, wanting to short — crowded long, BUT could still squeeze higher
+      score = 5; detail = `${ratePct.toFixed(3)}% (extreme +, possible fade but risky without rate decline)`
+    } else {
+      // Extreme positive funding, wanting to long — very crowded, caution
+      score = 1; detail = `${ratePct.toFixed(3)}% (extreme +, crowded longs, risky for more long)`
+    }
+  } else if (rate > 0.0003) {
+    if (direction === 'short') {
+      score = 5; detail = `${ratePct.toFixed(3)}% (high +, potential fade)`
+    } else {
+      score = 2; detail = `${ratePct.toFixed(3)}% (high +, crowded side)`
+    }
+  } else if (rate < -0.0005) {
+    if (direction === 'long') {
+      score = 5; detail = `${ratePct.toFixed(3)}% (extreme -, possible fade but risky without rate decline)`
+    } else {
+      score = 1; detail = `${ratePct.toFixed(3)}% (extreme -, crowded shorts, risky for more short)`
+    }
+  } else if (rate < -0.0003) {
+    if (direction === 'long') {
+      score = 5; detail = `${ratePct.toFixed(3)}% (high -, potential fade)`
+    } else {
+      score = 2; detail = `${ratePct.toFixed(3)}% (high -, crowded side)`
+    }
   } else {
-    // Funding goes against our direction
-    score = 2; detail = `${ratePct.toFixed(3)}% (against direction)`
+    // Mild funding, aligned or not
+    const aligned = (rate > 0 && direction === 'long') || (rate < 0 && direction === 'short')
+    score = aligned ? 4 : 3
+    detail = `${ratePct.toFixed(3)}% (mild, ${aligned ? 'aligned' : 'neutral'})`
   }
 
-  return { score, max: 10, detail, raw: { fundingRate: funding ? Math.round(funding.fundingRate * 1000000) / 1000000 : 0 } }
+  return { score, max: 10, detail, raw: { fundingRate: Math.round(funding.fundingRate * 1000000) / 1000000 } }
 }
 
 // ==================== Crash / Capitulation Detector ====================
@@ -603,7 +751,7 @@ export async function scoreSetup(
   const rsiArr = rsiSeries(closes, RSI_PERIOD)
 
   const trend = scoreTrend(direction, regime, bars)
-  const momentum = scoreMomentum(direction, closes, bars, RSI_PERIOD)
+  const momentum = scoreMomentum(direction, closes, bars, RSI_PERIOD, symbol)
   const acceleration = scoreAcceleration(direction, closes)
   const structure = scoreStructure(direction, closes, highs, lows, rsiArr, volumes, SWING_WINDOW)
   const candle = scoreCandleQuality(direction, bars)
@@ -615,12 +763,23 @@ export async function scoreSetup(
   let totalScore = trend.score + momentum.score + acceleration.score + structure.score
     + candle.score + volume.score + volatility.score + fundingScore.score + crashRisk.score
 
-  // Global volatility penalty: high BBWP (>70th percentile) makes all setups riskier
+  // Regime-aware volatility penalty/bonus:
+  // Trending + high BBWP = trend acceleration (bonus)
+  // Ranging + high BBWP = whipsaw risk (penalty)
   const bbwpRaw = volatility.raw?.bbwp
   if (typeof bbwpRaw === 'number' && bbwpRaw > 70) {
-    const volPenalty = bbwpRaw > 85 ? 15 : 10
-    totalScore = Math.max(0, totalScore - volPenalty)
-    volatility.detail += ` [HIGH-VOL PENALTY: -${volPenalty}]`
+    const isTrending = regime.regime === 'uptrend' || regime.regime === 'downtrend'
+    if (isTrending) {
+      // High vol in trend = acceleration confirmation — small bonus
+      const volBonus = bbwpRaw > 85 ? 5 : 3
+      totalScore += volBonus
+      volatility.detail += ` [TREND-VOL BOOST: +${volBonus}]`
+    } else {
+      // High vol in ranging = whipsaw danger — penalty
+      const volPenalty = bbwpRaw > 85 ? 15 : 10
+      totalScore = Math.max(0, totalScore - volPenalty)
+      volatility.detail += ` [RANGE-VOL PENALTY: -${volPenalty}]`
+    }
   }
 
   return {

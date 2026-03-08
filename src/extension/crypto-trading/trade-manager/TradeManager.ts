@@ -548,23 +548,31 @@ export class TradeManager {
     if (!plan.entryPrice) return
 
     // Get ATR — either cached on plan or fetch fresh
-    let atr = plan.atrAtEntry
-    if (!atr) {
+    let entryAtr = plan.atrAtEntry
+    if (!entryAtr) {
       const fetched = await this.fetchAtr(plan.symbol)
       if (!fetched) return // can't compute without ATR
-      atr = fetched
-      plan.atrAtEntry = atr
+      entryAtr = fetched
+      plan.atrAtEntry = entryAtr
       await this.store.save(plan)
+    }
+
+    // v4: Use max(entryATR, currentATR) so SL doesn't tighten disproportionately
+    // when volatility expands during a trending move
+    let atr = entryAtr
+    const currentAtr = await this.fetchAtr(plan.symbol)
+    if (currentAtr && currentAtr > entryAtr) {
+      atr = currentAtr
     }
 
     const isLong = plan.direction === 'long'
     const entry = plan.entryPrice
     const sign = isLong ? 1 : -1
 
-    // Profit in ATR multiples
+    // Profit in ATR multiples (use entry ATR for profit measurement, current ATR for SL distance)
     const profitAtr = isLong
-      ? (currentPrice - entry) / atr
-      : (entry - currentPrice) / atr
+      ? (currentPrice - entry) / entryAtr
+      : (entry - currentPrice) / entryAtr
 
     // Select stages by profile (default to reversal)
     const profile = plan.profile ?? 'reversal'
@@ -678,6 +686,18 @@ export class TradeManager {
         : currentPrice + trailAmount
     }
 
+    // v5: Minimum distance protection — prevent SL from tightening too close
+    // during flash crashes when ATR spikes. SL must stay ≥2.5% from peak price.
+    if (plan.peakPrice) {
+      const minDistFromPeak = plan.peakPrice * 0.025
+      if (isLong && newSlPrice > plan.peakPrice - minDistFromPeak) {
+        newSlPrice = plan.peakPrice - minDistFromPeak
+      } else if (!isLong && newSlPrice < (plan.peakPrice + minDistFromPeak)) {
+        // For shorts, peakPrice is the lowest favorable price
+        // but peakPrice tracking is inverted — skip for now if not applicable
+      }
+    }
+
     // Only move SL in the favorable direction (never move it backwards)
     const shouldMove = isLong
       ? newSlPrice > plan.stopLoss.price
@@ -739,9 +759,10 @@ export class TradeManager {
   // ==================== DCA Logic ====================
 
   /** Default DCA parameters for reversal profile */
-  private static readonly DCA_TRIGGER_ATR_MULTIPLES = [1.5, 2.5]
+  private static readonly DCA_TRIGGER_ATR_MULTIPLES = [1.5] // v4: max 1 DCA layer (was [1.5, 2.5])
   private static readonly DCA_LAYER_STAKE_RATIO = 0.5 // each layer = 50% of initial stake
   private static readonly DCA_HARD_STOP_ATR_MULTIPLE = 3.5
+  private static readonly DCA_MIN_ENTRY_SCORE = 75 // v4: disable DCA for low-confidence entries
 
   /**
    * Compute DCA layers after entry fill.
@@ -749,6 +770,13 @@ export class TradeManager {
    */
   private computeDcaLayers(plan: TradePlan): void {
     if (!plan.dca?.enabled || !plan.entryPrice || !plan.atrAtEntry || !plan.positionSize) return
+
+    // v4: Disable DCA for low-confidence entries
+    if (plan.entryScore !== undefined && plan.entryScore < TradeManager.DCA_MIN_ENTRY_SCORE) {
+      log.info(`${plan.symbol} DCA disabled: entry score ${plan.entryScore} < ${TradeManager.DCA_MIN_ENTRY_SCORE}`)
+      plan.dca.enabled = false
+      return
+    }
 
     const atr = plan.atrAtEntry
     const entry = plan.entryPrice
@@ -782,6 +810,19 @@ export class TradeManager {
   private async checkDcaTriggers(plan: TradePlan, currentPrice: number, trades: FreqtradeTrade[]): Promise<void> {
     if (!plan.dca?.enabled || plan.dca.layers.length === 0) return
     if (!plan.entryPrice) return
+
+    // v4: Regime consistency check — if entry was in a specific regime and price has moved
+    // adversely beyond 2x ATR, the regime has likely changed. Skip DCA.
+    if (plan.entryRegime && plan.entryRegime !== 'ranging' && plan.atrAtEntry) {
+      const isLong = plan.direction === 'long'
+      const adverseMove = isLong
+        ? plan.entryPrice - currentPrice
+        : currentPrice - plan.entryPrice
+      if (adverseMove > 2.5 * plan.atrAtEntry) {
+        log.info(`${plan.symbol} DCA skipped: adverse move ${(adverseMove / plan.atrAtEntry).toFixed(1)}x ATR suggests regime change`)
+        return
+      }
+    }
 
     const isLong = plan.direction === 'long'
 

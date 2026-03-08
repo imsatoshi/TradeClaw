@@ -20,6 +20,16 @@ import {
  * Compute SL multiplier based on volatility profile.
  * High-volatility coins need wider stops to avoid noise wicks.
  */
+/** Minimum R:R threshold adapts to market regime.
+ * Ranging markets profit at lower R:R (higher win rate, smaller moves).
+ * Trending markets can use moderate R:R (trend continuation provides edge). */
+function minRiskReward(regime?: string, isPending = false): number {
+  const base = regime === 'ranging' ? 1.2
+    : (regime === 'uptrend' || regime === 'downtrend') ? 1.5
+    : 1.8
+  return isPending ? base + 0.2 : base // pending zones require slightly higher bar
+}
+
 function dynamicSlMultiplier(atr: number, price: number, regime?: string, profile?: TradeProfile): number {
   const volRatio = (atr / price) * 100 // ATR as % of price
   let mult: number
@@ -307,7 +317,7 @@ export function checkEntryTrigger(
     const weightedTP = tp1 * r1 + tp2 * r2 + tp3 * r3
     const rr = Math.min((weightedTP - entry) / slDist, 5.0)
 
-    if (rr < 1.8) return null
+    if (rr < minRiskReward(regime)) return null
 
     return {
       triggered: true,
@@ -420,7 +430,7 @@ export function checkEntryTrigger(
     const weightedTP = tp1 * r1s + tp2 * r2s + tp3 * r3s
     const rr = Math.min((entry - weightedTP) / slDist, 5.0)
 
-    if (rr < 1.8) return null
+    if (rr < minRiskReward(regime)) return null
 
     return {
       triggered: true,
@@ -494,8 +504,10 @@ export function computePendingZone(
     // Only create zone if support is within reasonable distance (0.3% to 3%)
     if (distPct < 0.3 || distPct > 3.0) return null
 
-    const idealEntry = targetLevel
-    const zoneHigh = targetLevel + 0.15 * atr
+    // v5: Add slippage buffer — market orders won't fill at exact zone center
+    const slippage = 0.1 * atr
+    const idealEntry = targetLevel + slippage // assume slightly worse fill
+    const zoneHigh = targetLevel + 0.15 * atr + slippage
     const zoneLow = targetLevel - 0.3 * atr
     const sl = zoneLow - slMult * 0.5 * atr // tighter SL since we're entering at structure
 
@@ -505,7 +517,7 @@ export function computePendingZone(
     if (slDist <= 0) return null
     const weightedTP = tps[0] * zr1 + tps[1] * zr2 + tps[2] * zr3
     const rr = Math.min((weightedTP - idealEntry) / slDist, 5.0)
-    if (rr < 2.0) return null // higher bar for pending zones
+    if (rr < minRiskReward(regime, true)) return null // higher bar for pending zones
 
     return {
       symbol,
@@ -532,8 +544,10 @@ export function computePendingZone(
     const distPct = ((targetLevel - currentPrice) / currentPrice) * 100
     if (distPct < 0.3 || distPct > 3.0) return null
 
-    const idealEntry = targetLevel
-    const zoneLow = targetLevel - 0.15 * atr
+    // v5: Slippage buffer for short — assume slightly worse fill (higher entry)
+    const slippageS = 0.1 * atr
+    const idealEntry = targetLevel - slippageS // shorts enter slightly lower than resistance
+    const zoneLow = targetLevel - 0.15 * atr - slippageS
     const zoneHigh = targetLevel + 0.3 * atr
     const sl = zoneHigh + slMult * 0.5 * atr
 
@@ -543,7 +557,7 @@ export function computePendingZone(
     if (slDist <= 0) return null
     const weightedTP = tps[0] * zr1s + tps[1] * zr2s + tps[2] * zr3s
     const rr = Math.min((idealEntry - weightedTP) / slDist, 5.0)
-    if (rr < 2.0) return null
+    if (rr < minRiskReward(regime, true)) return null
 
     return {
       symbol,

@@ -136,6 +136,13 @@ export interface TradePlan {
   /** DCA configuration (only for 'reversal' profile) */
   dca?: DcaConfig
 
+  // --- Entry context (for DCA gating) ---
+
+  /** Market regime at entry time (for DCA regime check) */
+  entryRegime?: 'uptrend' | 'downtrend' | 'ranging'
+  /** Setup score at entry time (DCA disabled below 75) */
+  entryScore?: number
+
   // --- Progressive protection ---
 
   /** ATR(14, 1H) at entry time — used for progressive SL stages */

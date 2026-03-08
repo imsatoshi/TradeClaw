@@ -15,23 +15,29 @@ import type { Guard, GuardContext, GuardResult } from './guard-pipeline.js'
 
 export type EmotionGetter = () => string
 
-/** Multiplier for each recognized emotion keyword. */
+/**
+ * Multiplier for each recognized emotion keyword.
+ * v5: More aggressive reduction for negative emotions.
+ * Rationale: emotional trading degrades win-rate, not just sizing.
+ * cautious → assume win-rate drops ~10% → Kelly says ~35% of normal size
+ * scared → assume win-rate drops ~20% → Kelly says ~15% of normal size
+ */
 const EMOTION_MULTIPLIER: Record<string, number> = {
   confident: 1.0,
   neutral: 1.0,
   calm: 1.0,
   focused: 1.0,
-  cautious: 0.5,
-  anxious: 0.5,
-  uncertain: 0.5,
-  scared: 0.25,
-  fearful: 0.25,
+  cautious: 0.35,   // was 0.5 — win-rate degradation model
+  anxious: 0.35,     // was 0.5
+  uncertain: 0.35,   // was 0.5
+  scared: 0.15,      // was 0.25
+  fearful: 0.15,     // was 0.25
   angry: 0,
   tilted: 0,
   frustrated: 0,
   revenge: 0,
-  fomo: 0.25,
-  greedy: 0.5,
+  fomo: 0.15,        // was 0.25 — FOMO is high-risk emotional state
+  greedy: 0.35,      // was 0.5
 }
 
 function matchEmotion(emotionStr: string): { keyword: string; multiplier: number } {
