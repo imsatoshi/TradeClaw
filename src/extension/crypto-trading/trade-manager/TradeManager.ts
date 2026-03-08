@@ -24,6 +24,74 @@ import { atrSeries } from '../../analysis-kit/tools/strategy-scanner/helpers.js'
 
 const log = createLogger('trade-manager')
 
+// ==================== Bounded Cache ====================
+
+/** Simple bounded Map with TTL-based expiry and max-size eviction. */
+class BoundedCache<V> {
+  private store = new Map<string, { value: V; insertedAt: number }>()
+  private readonly maxSize: number
+  private readonly ttlMs: number
+
+  constructor(opts: { maxSize?: number; ttlMs?: number } = {}) {
+    this.maxSize = opts.maxSize ?? 200
+    this.ttlMs = opts.ttlMs ?? 60 * 60 * 1000 // 1 hour default
+  }
+
+  get(key: string): V | undefined {
+    const entry = this.store.get(key)
+    if (!entry) return undefined
+    if (Date.now() - entry.insertedAt > this.ttlMs) {
+      this.store.delete(key)
+      return undefined
+    }
+    return entry.value
+  }
+
+  set(key: string, value: V): void {
+    this.store.set(key, { value, insertedAt: Date.now() })
+    this.evict()
+  }
+
+  delete(key: string): void {
+    this.store.delete(key)
+  }
+
+  get size(): number {
+    return this.store.size
+  }
+
+  /** Iterate over non-expired entries. */
+  *entries(): IterableIterator<[string, V]> {
+    const now = Date.now()
+    for (const [key, entry] of this.store) {
+      if (now - entry.insertedAt <= this.ttlMs) {
+        yield [key, entry.value]
+      }
+    }
+  }
+
+  /** Evict expired entries, then evict oldest if over maxSize. */
+  private evict(): void {
+    const now = Date.now()
+    // TTL pass
+    for (const [key, entry] of this.store) {
+      if (now - entry.insertedAt > this.ttlMs) {
+        this.store.delete(key)
+      }
+    }
+    // Size pass — evict oldest entries until within limit
+    if (this.store.size > this.maxSize) {
+      const sorted = [...this.store.entries()].sort(
+        (a, b) => a[1].insertedAt - b[1].insertedAt,
+      )
+      const toRemove = sorted.length - this.maxSize
+      for (let i = 0; i < toRemove; i++) {
+        this.store.delete(sorted[i][0])
+      }
+    }
+  }
+}
+
 // ==================== DCA Config ====================
 interface DcaConfig {
   maxLayers: number
@@ -67,12 +135,12 @@ export class TradeManager {
   private directEngine?: ICryptoTradingEngine
   private isDryRun: boolean
   private ticking = false
-  /** Live P&L snapshots, refreshed each tick (plan.id → PnL) */
-  private pnlCache = new Map<string, TradePlanPnL>()
-  /** ATR cache per symbol — refreshed every 5 minutes */
-  private atrCache = new Map<string, { atr: number; updatedAt: number }>()
-  /** OHLCV cache for chandelier trailing — refreshed every 5 minutes */
-  private ohlcvCache = new Map<string, { highs: number[]; lows: number[]; updatedAt: number }>()
+  /** Live P&L snapshots, refreshed each tick (plan.id → PnL) — bounded: 200 entries, 1h TTL */
+  private pnlCache = new BoundedCache<TradePlanPnL>({ maxSize: 200, ttlMs: 60 * 60 * 1000 })
+  /** ATR cache per symbol — refreshed every 5 minutes — bounded: 200 entries, 1h TTL */
+  private atrCache = new BoundedCache<{ atr: number; updatedAt: number }>({ maxSize: 200, ttlMs: 60 * 60 * 1000 })
+  /** OHLCV cache for chandelier trailing — refreshed every 5 minutes — bounded: 200 entries, 1h TTL */
+  private ohlcvCache = new BoundedCache<{ highs: number[]; lows: number[]; updatedAt: number }>({ maxSize: 200, ttlMs: 60 * 60 * 1000 })
   /** Consecutive tick error counter for circuit breaker */
   private consecutiveTickErrors = 0
   /** Last reconciliation timestamp */
@@ -731,9 +799,9 @@ export class TradeManager {
       const minDistFromPeak = plan.peakPrice * 0.025
       if (isLong && newSlPrice > plan.peakPrice - minDistFromPeak) {
         newSlPrice = plan.peakPrice - minDistFromPeak
-      } else if (!isLong && newSlPrice < (plan.peakPrice + minDistFromPeak)) {
-        // For shorts, peakPrice is the lowest favorable price
-        // but peakPrice tracking is inverted — skip for now if not applicable
+      } else if (!isLong && newSlPrice < plan.peakPrice + minDistFromPeak) {
+        // For shorts, peakPrice is the lowest favorable price — SL must stay above it by 2.5%
+        newSlPrice = plan.peakPrice + minDistFromPeak
       }
     }
 
@@ -887,7 +955,7 @@ export class TradeManager {
           symbol: plan.symbol,
           side: isLong ? 'buy' : 'sell',
           type: 'market',
-          usdSize: layer.stakeAmount,
+          usd_size: layer.stakeAmount,
         })
 
         if (result.success) {
@@ -1635,11 +1703,42 @@ export class TradeManager {
         !openTradeIds.has(plan.freqtradeTradeId)
       ) {
         log.warn(`reconcile: ${plan.symbol} plan ${plan.id.slice(0, 8)} — Freqtrade trade #${plan.freqtradeTradeId} no longer open`)
-        plan.status = 'error'
-        plan.errorMessage = 'Freqtrade trade closed externally'
+
+        // Try to recover P&L from the closed trade data
+        let closedPnl: number | undefined
+        let closeRate: number | undefined
+        let exitReason: string | undefined
+        try {
+          const closedTrade = await this.engine.getTradeById(plan.freqtradeTradeId)
+          if (closedTrade) {
+            closedPnl = closedTrade.profit_abs
+            closeRate = closedTrade.close_rate
+            exitReason = closedTrade.exit_reason
+            log.info(`reconcile: recovered P&L for ${plan.symbol} trade #${plan.freqtradeTradeId}: $${closedPnl?.toFixed(2)} (${exitReason ?? 'unknown reason'})`)
+          }
+        } catch (err) {
+          log.warn(`reconcile: failed to fetch closed trade data for #${plan.freqtradeTradeId}: ${err}`)
+        }
+
+        // Record final P&L if available, otherwise estimate from plan data
+        if (closedPnl != null) {
+          plan.realizedPnl = (plan.realizedPnl ?? 0) + closedPnl
+        } else if (closeRate != null && plan.entryPrice) {
+          // Fallback: estimate from close_rate
+          const dir = plan.direction === 'long' ? 1 : -1
+          const pnlEstimate = dir * (closeRate - plan.entryPrice) * (plan.positionSize ?? 0)
+          plan.realizedPnl = (plan.realizedPnl ?? 0) + pnlEstimate
+        }
+
+        plan.status = 'completed'
+        plan.errorMessage = exitReason
+          ? `Closed externally (${exitReason})`
+          : 'Closed externally'
         this.pnlCache.delete(plan.id)
         await this.store.archive(plan)
-        this.emitEvent(plan, 'reconcile_closed', `${plan.symbol} trade #${plan.freqtradeTradeId} was closed externally — plan archived`)
+
+        const totalPnl = (plan.realizedPnl ?? 0).toFixed(2)
+        this.emitEvent(plan, 'reconcile_closed', `${plan.symbol} trade #${plan.freqtradeTradeId} was closed externally (${exitReason ?? 'unknown'}). P&L: $${totalPnl}`)
       }
     }
 

@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'crypto';
+import { createLogger } from '../../../core/logger.js';
 import type { IWallet, WalletConfig } from './interfaces';
 import type {
   CommitHash,
@@ -31,6 +32,8 @@ import type {
  *
  * Uses SHA-256 to hash the content, taking the first 8 characters
  */
+const log = createLogger('wallet');
+
 function generateCommitHash(content: object): CommitHash {
   const hash = createHash('sha256')
     .update(JSON.stringify(content))
@@ -150,7 +153,11 @@ export class Wallet implements IWallet {
     this.head = hash;
 
     // Persist
-    await this.config.onCommit?.(this.exportState());
+    try {
+      await this.config.onCommit?.(this.exportState());
+    } catch (err) {
+      log.error('onCommit callback failed (push)', err instanceof Error ? err.message : String(err));
+    }
 
     // Clear staging area
     this.stagingArea = [];
@@ -366,7 +373,11 @@ export class Wallet implements IWallet {
     this.head = hash;
 
     // Persist
-    await this.config.onCommit?.(this.exportState());
+    try {
+      await this.config.onCommit?.(this.exportState());
+    } catch (err) {
+      log.error('onCommit callback failed (sync)', err instanceof Error ? err.message : String(err));
+    }
 
     return { hash, updatedCount: updates.length, updates };
   }

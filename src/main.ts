@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
-import { readFile, writeFile, appendFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, appendFile, mkdir, rename } from 'fs/promises'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'path'
 import { Engine } from './core/engine.js'
@@ -128,21 +128,68 @@ async function main() {
   // Initialize crypto trading symbol whitelist from config
   initCryptoAllowedSymbols(config.crypto.allowedSymbols)
 
-  // Crypto trading engine (CCXT or none) — non-fatal on failure
-  let cryptoResult: Awaited<ReturnType<typeof createCryptoTradingEngine>> = null
-  try {
-    cryptoResult = await createCryptoTradingEngine(config)
-    if (cryptoResult) {
-      console.log('crypto trading engine: initialized')
-    } else {
-      console.log('crypto trading engine: disabled (provider = none)')
-    }
-  } catch (err) {
+  // ---- Parallel init: kick off independent async tasks concurrently ----
+  // Crypto engine (network), market data (network), disk reads can all run in parallel.
+
+  const cryptoEnginePromise = createCryptoTradingEngine(config).catch((err) => {
     console.warn('crypto trading engine init failed (non-fatal, continuing without it):', err)
+    return null as Awaited<ReturnType<typeof createCryptoTradingEngine>>
+  })
+
+  const marketDataPromise = fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe).catch((err) => {
+    console.warn('exchange OHLCV fetch failed (non-fatal, starting with empty data):', err)
+    return {} as Record<string, import('./extension/archive-analysis/data/interfaces.js').MarketData[]>
+  })
+
+  const walletFilePromise = readFile(WALLET_FILE, 'utf-8').then(
+    (raw) => {
+      try {
+        return JSON.parse(raw) as WalletExportState
+      } catch (parseErr) {
+        console.warn(`wallet state file corrupted, renaming to .corrupted and starting fresh: ${parseErr}`)
+        rename(WALLET_FILE, `${WALLET_FILE}.corrupted`).catch(() => {})
+        return undefined
+      }
+    },
+    () => undefined, // file not found → fresh start
+  )
+
+  const brainFilePromise = readFile(BRAIN_FILE, 'utf-8').then(
+    (raw) => {
+      try {
+        return JSON.parse(raw) as BrainExportState
+      } catch (parseErr) {
+        console.warn(`brain state file corrupted, renaming to .corrupted and starting fresh: ${parseErr}`)
+        rename(BRAIN_FILE, `${BRAIN_FILE}.corrupted`).catch(() => {})
+        return undefined
+      }
+    },
+    () => undefined, // not found → fresh start
+  )
+
+  const personaPromise = readFile(PERSONA_FILE, 'utf-8').catch(async () => {
+    try { return await readFile(PERSONA_DEFAULT_FILE, 'utf-8') } catch { return '' }
+  })
+
+  // Await all independent init tasks together
+  const [cryptoResult, marketData, savedState, brainExport, persona] = await Promise.all([
+    cryptoEnginePromise,
+    marketDataPromise,
+    walletFilePromise,
+    brainFilePromise,
+    personaPromise,
+  ])
+
+  if (cryptoResult) {
+    console.log('crypto trading engine: initialized')
+  } else {
+    console.log('crypto trading engine: disabled (provider = none or init failed)')
   }
+  console.log(`market data: loaded ${Object.keys(marketData).length} pairs from Binance`)
+
   const cryptoEngine: ICryptoTradingEngine = cryptoResult?.engine ?? null as unknown as ICryptoTradingEngine
 
-  // TradeManager: auto TP/SL lifecycle management
+  // TradeManager: auto TP/SL lifecycle management (depends on cryptoResult)
   let tradeManager: TradeManager | undefined
   if (cryptoResult && cryptoResult.engine instanceof FreqtradeTradingEngine) {
     tradeManager = new TradeManager(
@@ -179,26 +226,11 @@ async function main() {
         onCommit: onCryptoCommit,
       }
 
-  // Restore wallet from disk if available
-  let savedState: WalletExportState | undefined
-  try {
-    const raw = await readFile(WALLET_FILE, 'utf-8')
-    savedState = JSON.parse(raw)
-  } catch { /* file not found → fresh start */ }
-
   const wallet = savedState
     ? Wallet.restore(savedState, cryptoWalletConfig)
     : new Wallet(cryptoWalletConfig)
 
   // Sandbox (data access — OHLCV from Binance exchange)
-  let marketData: Record<string, import('./extension/archive-analysis/data/interfaces.js').MarketData[]> = {}
-  try {
-    marketData = await fetchExchangeOHLCV([...CRYPTO_ALLOWED_SYMBOLS], config.engine.timeframe)
-    console.log(`market data: loaded ${Object.keys(marketData).length} pairs from Binance`)
-  } catch (err) {
-    console.warn('exchange OHLCV fetch failed (non-fatal, starting with empty data):', err)
-  }
-
   const marketProvider = new RealMarketDataProvider(marketData)
 
   const sandbox = new Sandbox(
@@ -222,22 +254,9 @@ async function main() {
     }
   }
 
-  let brainExport: BrainExportState | undefined
-  try {
-    const raw = await readFile(BRAIN_FILE, 'utf-8')
-    brainExport = JSON.parse(raw)
-  } catch { /* not found → fresh start */ }
-
   const brain = brainExport
     ? Brain.restore(brainExport, { onCommit: brainOnCommit })
     : new Brain({ onCommit: brainOnCommit })
-
-  // Build system prompt: persona + current brain state
-  // Persona layering: user override (data/config/persona.md) > default (data/default/persona.default.md)
-  let persona = ''
-  try { persona = await readFile(PERSONA_FILE, 'utf-8') } catch {
-    try { persona = await readFile(PERSONA_DEFAULT_FILE, 'utf-8') } catch { /* use empty */ }
-  }
 
   const frontalLobe = brain.getFrontalLobe()
   const emotion = brain.getEmotion().current

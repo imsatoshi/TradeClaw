@@ -18,7 +18,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile, appendFile, mkdir, stat as fsStat, truncate as fsTruncate } from 'node:fs/promises'
+import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { readFile, writeFile, appendFile, mkdir, stat as fsStat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { getActiveEntries } from './compaction.js'
 
@@ -154,7 +155,14 @@ export class SessionStore {
     try {
       const currentSize = (await fsStat(this.filePath)).size
       if (currentSize > size) {
-        await fsTruncate(this.filePath, size)
+        // Atomic truncate: read retained portion, write to temp file, then rename.
+        // renameSync is atomic on the same filesystem, so a crash mid-operation
+        // leaves either the original file or the fully-written new file intact.
+        const buf = readFileSync(this.filePath)
+        const retained = buf.subarray(0, size)
+        const tmpPath = this.filePath + '.tmp'
+        writeFileSync(tmpPath, retained)
+        renameSync(tmpPath, this.filePath)
         // Restore lastUuid from the truncated file
         const entries = await this.readAll()
         this.lastUuid = entries.length > 0 ? entries[entries.length - 1].uuid : null

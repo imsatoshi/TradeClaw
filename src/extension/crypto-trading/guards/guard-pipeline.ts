@@ -15,6 +15,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import type { Operation } from '../wallet/types.js';
 import type { CryptoPosition, CryptoAccountInfo } from '../interfaces.js';
+import { CRYPTO_DEFAULT_LEVERAGE } from '../interfaces.js';
 import { EmotionGuard, type EmotionGetter } from './emotion-guard.js';
 import { AccountDrawdownGuard } from './account-drawdown-guard.js';
 
@@ -69,8 +70,11 @@ export async function runGuardPipeline(
 // ==================== Guard implementations ====================
 
 /**
- * Block if the projected position notional value exceeds a percentage of account equity.
+ * Block if the projected position MARGIN usage exceeds a percentage of account equity.
  * Default: 25% of equity.
+ *
+ * Margin = notional / leverage. With 10x leverage, a $1000 notional position
+ * only uses $100 of margin, so it's the margin that matters for risk sizing.
  */
 export class MaxPositionSizeGuard implements Guard {
   readonly name = 'MaxPositionSizeGuard';
@@ -87,36 +91,43 @@ export class MaxPositionSizeGuard implements Guard {
     const { positions, account, operation } = ctx;
     const symbol = operation.params.symbol as string;
 
-    // Estimate the USD value of this order
+    // Determine leverage for this order
+    const orderLeverage = (operation.params.leverage as number | undefined) ?? CRYPTO_DEFAULT_LEVERAGE;
+    const leverage = Math.max(orderLeverage, 1); // floor at 1x
+
+    // Estimate the USD notional value of this order
     const usdSize = operation.params.usd_size as number | undefined;
     const size = operation.params.size as number | undefined;
     const price = operation.params.price as number | undefined;
 
-    let addedValue = 0;
+    let addedNotional = 0;
     if (usdSize) {
-      addedValue = usdSize;
+      addedNotional = usdSize;
     } else if (size && price) {
-      addedValue = size * price;
+      addedNotional = size * price;
     } else if (size) {
       // Try to estimate from existing position's mark price
       const existing = positions.find(p => p.symbol === symbol);
       if (existing) {
-        addedValue = size * existing.markPrice;
+        addedNotional = size * existing.markPrice;
       }
     }
 
-    if (addedValue === 0 || account.equity <= 0) return { allowed: true };
+    if (addedNotional === 0 || account.equity <= 0) return { allowed: true };
 
-    // Include existing position value for the same symbol
+    // Convert notional to margin (margin = notional / leverage)
+    const addedMargin = addedNotional / leverage;
+
+    // Include existing position's margin for the same symbol
     const existing = positions.find(p => p.symbol === symbol);
-    const currentValue = existing?.positionValue ?? 0;
-    const projectedValue = currentValue + addedValue;
-    const percent = (projectedValue / account.equity) * 100;
+    const currentMargin = existing ? (existing.margin || existing.positionValue / Math.max(existing.leverage, 1)) : 0;
+    const projectedMargin = currentMargin + addedMargin;
+    const percent = (projectedMargin / account.equity) * 100;
 
     if (percent > this.maxPercent) {
       return {
         allowed: false,
-        reason: `Position for ${symbol} would be ${percent.toFixed(1)}% of equity ($${account.equity.toFixed(2)}), exceeds ${this.maxPercent}% limit`,
+        reason: `Margin for ${symbol} would be ${percent.toFixed(1)}% of equity ($${account.equity.toFixed(2)}), exceeds ${this.maxPercent}% limit (notional $${(addedNotional + (existing?.positionValue ?? 0)).toFixed(0)} at ${leverage}x leverage)`,
       };
     }
 
@@ -188,10 +199,14 @@ export class CooldownGuard implements Guard {
       }
     }
 
-    // Record the trade time (even before execution — we gate on attempt)
-    this.lastTradeTime.set(symbol, now);
-    this.saveState();
+    // Don't record here — call recordTrade() after successful execution
     return { allowed: true };
+  }
+
+  /** Record a successful trade. Call AFTER order execution succeeds. */
+  recordTrade(symbol: string): void {
+    this.lastTradeTime.set(symbol, Date.now());
+    this.saveState();
   }
 }
 
@@ -252,6 +267,51 @@ export class MinBalanceGuard implements Guard {
   }
 }
 
+// ==================== Rate Limit Guard ====================
+
+/**
+ * Sliding-window rate limiter: blocks if more than `maxOrders` order
+ * placements occur within `windowMs` milliseconds.
+ * Default: max 10 orders per 60 seconds.
+ */
+export class RateLimitGuard implements Guard {
+  readonly name = 'RateLimitGuard';
+  private maxOrders: number;
+  private windowMs: number;
+  /** Timestamps of recent order attempts (oldest first). */
+  private timestamps: number[] = [];
+
+  constructor(opts: { maxOrders?: number; windowMs?: number } = {}) {
+    this.maxOrders = opts.maxOrders ?? 10;
+    this.windowMs = opts.windowMs ?? 60_000;
+  }
+
+  check(ctx: GuardContext): GuardResult {
+    if (ctx.operation.action !== 'placeOrder') return { allowed: true };
+
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+
+    // Evict expired timestamps
+    while (this.timestamps.length > 0 && this.timestamps[0] < cutoff) {
+      this.timestamps.shift();
+    }
+
+    if (this.timestamps.length >= this.maxOrders) {
+      const oldestAge = now - this.timestamps[0];
+      const retryIn = Math.ceil((this.windowMs - oldestAge) / 1000);
+      return {
+        allowed: false,
+        reason: `Rate limit: ${this.maxOrders} orders in ${this.windowMs / 1000}s window reached. Retry in ~${retryIn}s.`,
+      };
+    }
+
+    // Record this order timestamp
+    this.timestamps.push(now);
+    return { allowed: true };
+  }
+}
+
 // ==================== Factory ====================
 
 /**
@@ -265,8 +325,11 @@ export function createDefaultGuards(opts: {
   minBalanceRatio?: number;
   emotionGetter?: EmotionGetter;
   maxDailyDrawdownPercent?: number;
+  rateLimitMaxOrders?: number;
+  rateLimitWindowMs?: number;
 } = {}): Guard[] {
   const guards: Guard[] = [
+    new RateLimitGuard({ maxOrders: opts.rateLimitMaxOrders, windowMs: opts.rateLimitWindowMs }),
     new MaxPositionSizeGuard({ maxPercentOfEquity: opts.maxPositionSizePercent }),
     new CooldownGuard({ minIntervalMs: opts.cooldownMs }),
     new MaxOpenTradesGuard({ maxOpenTrades: opts.maxOpenTrades }),

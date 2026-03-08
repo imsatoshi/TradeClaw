@@ -6,7 +6,7 @@ import type { OrderStatusUpdate, WalletState } from './wallet/types';
 import { createCryptoWalletToolsImpl } from './wallet/adapter';
 import type { TradeManager } from './trade-manager/TradeManager';
 import { createTradePlanTools } from './trade-manager/adapter';
-import { runGuardPipeline, createDefaultGuards, type Guard, type GuardContext } from './guards/guard-pipeline';
+import { runGuardPipeline, createDefaultGuards, CooldownGuard, type Guard, type GuardContext } from './guards/guard-pipeline';
 
 /**
  * Create crypto trading AI tools (market interaction + wallet management)
@@ -30,9 +30,36 @@ export function createCryptoTradingTools(
 ) {
   // Initialize guard pipeline (code-level safety checks, cannot be bypassed by AI)
   const guards = guardOverrides ?? createDefaultGuards();
+  const cooldownGuard = guards.find((g): g is CooldownGuard => g.name === 'CooldownGuard') as CooldownGuard | undefined;
+
+  const walletTools = createCryptoWalletToolsImpl(wallet);
+
+  // Wrap push to record cooldowns on successful placeOrder executions
+  const originalPush = walletTools.cryptoWalletPush;
+  const wrappedPush = tool({
+    description: originalPush.description ?? '',
+    inputSchema: z.object({}),
+    execute: async () => {
+      const result = await wallet.push();
+      // Record cooldown for each successfully filled placeOrder using commit log
+      if (cooldownGuard && result.filled.length > 0) {
+        const lastCommit = wallet.log({ limit: 1 })[0];
+        if (lastCommit) {
+          for (const op of lastCommit.operations) {
+            if (op.action === 'placeOrder' && op.status === 'filled' && op.symbol) {
+              cooldownGuard.recordTrade(op.symbol);
+            }
+          }
+        }
+      }
+      return result;
+    },
+  });
+
   return {
     // ==================== Wallet operations ====================
-    ...createCryptoWalletToolsImpl(wallet),
+    ...walletTools,
+    cryptoWalletPush: wrappedPush,
 
     // ==================== Trade Plan management (auto TP/SL) ====================
     ...(tradeManager ? createTradePlanTools(tradeManager) : {}),

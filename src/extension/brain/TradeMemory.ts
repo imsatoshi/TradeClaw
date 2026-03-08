@@ -8,7 +8,7 @@
  * File: data/brain/trade-memory.json
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 import { createLogger } from '../../core/logger.js'
 
@@ -44,10 +44,17 @@ export interface TradeMemoryState {
 // ==================== Core Functions ====================
 
 export async function loadTradeMemory(): Promise<TradeMemoryState> {
+  let raw: string
   try {
-    const raw = await readFile(MEMORY_FILE, 'utf-8')
-    return JSON.parse(raw) as TradeMemoryState
+    raw = await readFile(MEMORY_FILE, 'utf-8')
   } catch {
+    return { patterns: [], recentLessons: [] } // file not found → fresh start
+  }
+  try {
+    return JSON.parse(raw) as TradeMemoryState
+  } catch (parseErr) {
+    log.warn(`trade memory file corrupted, renaming to .corrupted and starting fresh: ${parseErr}`)
+    rename(MEMORY_FILE, `${MEMORY_FILE}.corrupted`).catch(() => {})
     return { patterns: [], recentLessons: [] }
   }
 }

@@ -514,6 +514,13 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
     return this.get<FreqtradeTrade[]>('/api/v1/status');
   }
 
+  /** Fetch a specific trade by ID (including closed trades) from /api/v1/trades. */
+  async getTradeById(tradeId: number): Promise<FreqtradeTrade | undefined> {
+    this.ensureInit();
+    const response = await this.get<{ trades?: FreqtradeTrade[] }>('/api/v1/trades');
+    return (response.trades ?? []).find(t => t.trade_id === tradeId);
+  }
+
   // ==================== Additional Freqtrade-specific methods ====================
 
   /**
@@ -840,6 +847,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
             'Authorization': this.authHeader,
             'Content-Type': 'application/json',
           },
+          signal: AbortSignal.timeout(30_000),
         });
         if (!response.ok) {
           const text = await response.text();
@@ -860,6 +868,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
         });
         if (!response.ok) {
           const text = await response.text();
@@ -880,6 +889,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
         });
         if (!response.ok) {
           const text = await response.text();
@@ -899,6 +909,7 @@ export class FreqtradeTradingEngine implements ICryptoTradingEngine {
             'Authorization': this.authHeader,
             'Content-Type': 'application/json',
           },
+          signal: AbortSignal.timeout(30_000),
         });
         if (!response.ok) {
           const text = await response.text();

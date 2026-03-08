@@ -545,11 +545,12 @@ function scoreVolume(
     else { score = 1; detail = `${volRatio.toFixed(1)}x avg (weak)` }
   } else {
     // Ranging mode: prefer normal-to-slightly-low volume; very low = dead market (risky), high = breakout incoming
-    if (volRatio >= 0.8 && volRatio <= 1.2) { score = 7; detail = `${volRatio.toFixed(1)}x avg (ideal for ranging)` }
-    else if (volRatio < 0.8 && volRatio >= 0.5) { score = 4; detail = `${volRatio.toFixed(1)}x avg (low, caution)` }
-    else if (volRatio < 0.5) { score = 1; detail = `${volRatio.toFixed(1)}x avg (dead market)` }
-    else if (volRatio <= 1.5) { score = 3; detail = `${volRatio.toFixed(1)}x avg (elevated for ranging)` }
-    else { score = 0; detail = `${volRatio.toFixed(1)}x avg (breakout volume, skip mean-reversion)` }
+    // Ordered from most restrictive to least restrictive to avoid overlapping ranges
+    if (volRatio > 1.5) { score = 0; detail = `${volRatio.toFixed(1)}x avg (breakout volume, skip mean-reversion)` }
+    else if (volRatio > 1.2) { score = 3; detail = `${volRatio.toFixed(1)}x avg (elevated for ranging)` }
+    else if (volRatio >= 0.8) { score = 7; detail = `${volRatio.toFixed(1)}x avg (ideal for ranging)` }
+    else if (volRatio >= 0.5) { score = 4; detail = `${volRatio.toFixed(1)}x avg (low, caution)` }
+    else { score = 1; detail = `${volRatio.toFixed(1)}x avg (dead market)` }
   }
 
   return { score, max: 10, detail, raw: { volumeRatio: Math.round(volRatio * 100) / 100 } }

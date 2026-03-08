@@ -6,6 +6,7 @@
  */
 
 import { createHash } from 'crypto';
+import { createLogger } from '../../core/logger.js';
 import type {
   CommitHash,
   BrainCommit,
@@ -13,6 +14,8 @@ import type {
   BrainState,
   BrainExportState,
 } from './types';
+
+const log = createLogger('brain');
 
 export interface BrainConfig {
   /** Called after each commit for persistence */
@@ -62,6 +65,10 @@ export class Brain {
   // ==================== Mutations ====================
 
   updateFrontalLobe(content: string): { success: boolean; message: string } {
+    // Skip commit if content is unchanged
+    if (this.state.frontalLobe === content) {
+      return { success: true, message: 'Frontal lobe unchanged, skipped' };
+    }
     this.state.frontalLobe = content;
     this.createCommit('frontal_lobe', content.slice(0, 100));
     return { success: true, message: 'Frontal lobe updated successfully' };
@@ -71,6 +78,10 @@ export class Brain {
     emotion: string,
     reason: string,
   ): { success: boolean; message: string } {
+    // Skip commit if emotion is unchanged
+    if (this.state.emotion === emotion) {
+      return { success: true, message: `Emotion unchanged (${emotion}), skipped` };
+    }
     const from = this.state.emotion;
     this.state.emotion = emotion;
     this.createCommit('emotion', reason);
@@ -117,6 +128,9 @@ export class Brain {
     this.commits.push(commit);
     this.head = hash;
 
-    this.config.onCommit?.(this.exportState());
+    // Fire-and-forget with error swallowing — onCommit is for persistence, must not crash the brain
+    Promise.resolve(this.config.onCommit?.(this.exportState())).catch((err) => {
+      log.error('onCommit callback failed', err instanceof Error ? err.message : String(err));
+    });
   }
 }

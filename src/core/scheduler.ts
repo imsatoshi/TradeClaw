@@ -275,6 +275,7 @@ const DEFAULT_COALESCE_MS = 250
 const RETRY_BASE_MS = 2000
 const RETRY_MAX_MS = 120_000    // cap at 2 minutes
 const MAX_CONSECUTIVE_FAILURES = 5  // stop retrying after 5 consecutive failures
+const DEFAULT_EXECUTION_TIMEOUT_MS = 120_000  // 2 minutes default timeout for runOnce
 
 export function createScheduler(
   config: SchedulerConfig,
@@ -284,10 +285,13 @@ export function createScheduler(
     coalesceMs?: number
     /** Inject clock for testing. */
     now?: () => number
+    /** Max execution time for runOnce in ms (default 120s). */
+    executionTimeoutMs?: number
   },
 ): Scheduler {
   const coalesceMs = opts?.coalesceMs ?? DEFAULT_COALESCE_MS
   const now = opts?.now ?? Date.now
+  const executionTimeoutMs = opts?.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS
 
   let intervalTimer: ReturnType<typeof setInterval> | null = null
   let coalesceTimer: ReturnType<typeof setTimeout> | null = null
@@ -354,7 +358,7 @@ export function createScheduler(
     const systemEvents = hasSystemEvents() ? drainSystemEvents() : []
 
     try {
-      const result = await runOnce({
+      const executionPromise = runOnce({
         reason,
         prompt: config.heartbeat.prompt,
         systemEvents: systemEvents.map((e) => ({
@@ -363,6 +367,14 @@ export function createScheduler(
           text: e.text,
         })),
       })
+
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`runOnce timed out after ${executionTimeoutMs}ms`)), executionTimeoutMs)
+      })
+
+      const result = await Promise.race([executionPromise, timeoutPromise])
+      clearTimeout(timeoutId)
 
       // FIX(Bug 1): If runOnce skipped (e.g. engine-busy), re-enqueue the
       // system events so they are not lost, and schedule a retry.

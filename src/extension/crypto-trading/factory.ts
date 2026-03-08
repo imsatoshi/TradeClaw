@@ -66,10 +66,20 @@ export async function createCryptoTradingEngine(
     }
 
     case 'freqtrade': {
+      // Environment variables override config file values (avoid hardcoded credentials)
+      const ftUsername = process.env.FREQTRADE_USERNAME || providerConfig.username;
+      const ftPassword = process.env.FREQTRADE_PASSWORD || providerConfig.password;
+
+      if (!ftUsername || !ftPassword) {
+        throw new Error(
+          'Freqtrade credentials required: set FREQTRADE_USERNAME and FREQTRADE_PASSWORD in .env, or configure in crypto.json',
+        );
+      }
+
       const engine = new FreqtradeTradingEngine({
         url: providerConfig.url,
-        username: providerConfig.username,
-        password: providerConfig.password,
+        username: ftUsername,
+        password: ftPassword,
         defaultStakeAmount: providerConfig.defaultStakeAmount,
       });
 
