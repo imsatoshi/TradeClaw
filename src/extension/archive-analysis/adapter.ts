@@ -886,8 +886,8 @@ IMPORTANT: After completion, report the full summary to the user, especially:
       description: `
 Calculate optimal position size with Kelly Criterion and risk management checks.
 
-When setupScore and riskReward are provided, uses Kelly Criterion (quarter-Kelly)
-to dynamically size the position based on setup quality (1-6% risk).
+When setupScore and riskReward are provided, uses Kelly Criterion (1/5 Kelly, conservative)
+to dynamically size the position based on setup quality (0.5-3% risk).
 Falls back to flat riskPercent when Kelly params are not provided.
 
 Returns:

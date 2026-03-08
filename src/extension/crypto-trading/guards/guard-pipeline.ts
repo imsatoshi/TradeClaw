@@ -66,14 +66,14 @@ export async function runGuardPipeline(
 
 /**
  * Block if the projected position notional value exceeds a percentage of account equity.
- * Default: 40% of equity.
+ * Default: 25% of equity.
  */
 export class MaxPositionSizeGuard implements Guard {
   readonly name = 'MaxPositionSizeGuard';
   private maxPercent: number;
 
   constructor(opts: { maxPercentOfEquity?: number } = {}) {
-    this.maxPercent = opts.maxPercentOfEquity ?? 40;
+    this.maxPercent = opts.maxPercentOfEquity ?? 25;
   }
 
   check(ctx: GuardContext): GuardResult {
@@ -122,7 +122,7 @@ export class MaxPositionSizeGuard implements Guard {
 
 /**
  * Block if the same symbol was traded within N milliseconds.
- * Default: 60 seconds.
+ * Default: 300 seconds (5 minutes).
  */
 export class CooldownGuard implements Guard {
   readonly name = 'CooldownGuard';
@@ -130,7 +130,7 @@ export class CooldownGuard implements Guard {
   private lastTradeTime = new Map<string, number>();
 
   constructor(opts: { minIntervalMs?: number } = {}) {
-    this.minIntervalMs = opts.minIntervalMs ?? 60_000;
+    this.minIntervalMs = opts.minIntervalMs ?? 300_000;
   }
 
   check(ctx: GuardContext): GuardResult {
@@ -159,14 +159,14 @@ export class CooldownGuard implements Guard {
 
 /**
  * Block if already at the max number of concurrent open positions.
- * Default: 5 (matches CRYPTO_MAX_OPEN_TRADES).
+ * Default: 3.
  */
 export class MaxOpenTradesGuard implements Guard {
   readonly name = 'MaxOpenTradesGuard';
   private maxOpenTrades: number;
 
   constructor(opts: { maxOpenTrades?: number } = {}) {
-    this.maxOpenTrades = opts.maxOpenTrades ?? 5;
+    this.maxOpenTrades = opts.maxOpenTrades ?? 3;
   }
 
   check(ctx: GuardContext): GuardResult {
