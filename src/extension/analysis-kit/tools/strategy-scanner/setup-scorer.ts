@@ -1,7 +1,7 @@
 /**
- * Multi-factor setup scorer v2 — 8-dimension scoring system.
+ * Multi-factor setup scorer v3 — 9-dimension scoring system.
  *
- * Scores each (symbol, direction) pair on 8 dimensions (0-100 total):
+ * Scores each (symbol, direction) pair on 9 dimensions (0-110 total):
  *   1. Trend Strength  (15) — EMA spread + SMA20
  *   2. Momentum        (15) — RSI + MACD + MTF RSI gate
  *   3. Acceleration    (10) — ROC delta (rate of change of rate of change)
@@ -10,6 +10,7 @@
  *   6. Volume          (10) — volume ratio (trend vs mean-reversion)
  *   7. Volatility      (10) — BBWP + absolute bandwidth
  *   8. Funding         (10) — funding rate alignment
+ *   9. Crash Risk      (10) — multi-TF RSI_3 crash/capitulation detection
  *
  * All indicator functions are reused from helpers.ts.
  */
@@ -494,6 +495,85 @@ function scoreFunding(
   return { score, max: 10, detail, raw: { fundingRate: funding ? Math.round(funding.fundingRate * 1000000) / 1000000 : 0 } }
 }
 
+// ==================== Crash / Capitulation Detector ====================
+
+/**
+ * Multi-timeframe RSI_3 crash detector.
+ * Inspired by NFIX7's 6800-line protections_long_global — but instead of
+ * hard-coded AND chains, we compute a crash score and expose raw RSI_3 values
+ * for the AI to reason about independently.
+ *
+ * Score logic:
+ *   - Each TF with RSI_3 < 15 (long) or > 85 (short) adds penalty
+ *   - 3+ TFs in extreme = "severe crash" → large penalty
+ *   - Capitulation (all TFs extreme oversold) → actually bullish signal
+ */
+export function scoreCrashRisk(
+  direction: SignalDirection,
+  bars1h: MarketData[],
+  bars4h?: MarketData[],
+): DimensionScore {
+  const closes1h = bars1h.map(b => b.close)
+  const rsi3_1h_arr = rsiSeries(closes1h, 3)
+  const rsi3_1h = rsi3_1h_arr.length > 0 ? rsi3_1h_arr[rsi3_1h_arr.length - 1] : 50
+
+  let rsi3_4h = 50
+  if (bars4h && bars4h.length >= 10) {
+    const closes4h = bars4h.map(b => b.close)
+    const rsi3_4h_arr = rsiSeries(closes4h, 3)
+    if (rsi3_4h_arr.length > 0) rsi3_4h = rsi3_4h_arr[rsi3_4h_arr.length - 1]
+  }
+
+  // Count extreme timeframes
+  const isLong = direction === 'long'
+  const extremeThreshold = 15
+  let extremeCount = 0
+  if (isLong) {
+    if (rsi3_1h < extremeThreshold) extremeCount++
+    if (rsi3_4h < extremeThreshold) extremeCount++
+  } else {
+    if (rsi3_1h > (100 - extremeThreshold)) extremeCount++
+    if (rsi3_4h > (100 - extremeThreshold)) extremeCount++
+  }
+
+  // Determine crash severity
+  let severity: 'none' | 'mild' | 'severe' | 'capitulation' = 'none'
+  let score = 10 // max = 10, no crash = full score
+
+  if (extremeCount >= 2) {
+    // Both TFs in extreme — check for capitulation vs crash
+    const bothDeepExtreme = isLong
+      ? (rsi3_1h < 5 && rsi3_4h < 10)
+      : (rsi3_1h > 95 && rsi3_4h > 90)
+
+    if (bothDeepExtreme) {
+      severity = 'capitulation'
+      score = 8 // capitulation can be a reversal opportunity — mild penalty
+    } else {
+      severity = 'severe'
+      score = 0 // severe crash, block entries
+    }
+  } else if (extremeCount === 1) {
+    severity = 'mild'
+    score = 4 // caution
+  }
+
+  const detail = severity === 'none'
+    ? `RSI3 normal (1h:${rsi3_1h.toFixed(0)}, 4h:${rsi3_4h.toFixed(0)})`
+    : `${severity.toUpperCase()} — RSI3 1h:${rsi3_1h.toFixed(0)}, 4h:${rsi3_4h.toFixed(0)}`
+
+  return {
+    score,
+    max: 10,
+    detail,
+    raw: {
+      rsi3_1h: Math.round(rsi3_1h * 10) / 10,
+      rsi3_4h: Math.round(rsi3_4h * 10) / 10,
+      crashSeverity: severity,
+    },
+  }
+}
+
 // ==================== Main Scorer ====================
 
 export async function scoreSetup(
@@ -502,6 +582,7 @@ export async function scoreSetup(
   regime: MarketRegime,
   bars: MarketData[],
   funding?: FundingRateInfo,
+  bars4h?: MarketData[],
 ): Promise<SetupScore> {
   // Load configurable params (reuses existing config system)
   const p = await getStrategyParamsFor('pipeline', symbol)
@@ -528,9 +609,10 @@ export async function scoreSetup(
   const volume = scoreVolume(regime.regime, volumes, VOL_AVG_PERIOD)
   const volatility = scoreVolatility(closes, BB_PERIOD, BB_MULT, BBWP_LOOKBACK)
   const fundingScore = scoreFunding(direction, funding)
+  const crashRisk = scoreCrashRisk(direction, bars, bars4h)
 
   let totalScore = trend.score + momentum.score + acceleration.score + structure.score
-    + candle.score + volume.score + volatility.score + fundingScore.score
+    + candle.score + volume.score + volatility.score + fundingScore.score + crashRisk.score
 
   // Global volatility penalty: high BBWP (>70th percentile) makes all setups riskier
   const bbwpRaw = volatility.raw?.bbwp
@@ -554,6 +636,7 @@ export async function scoreSetup(
       volume,
       volatility,
       funding: fundingScore,
+      crashRisk,
     },
     entry: null, // filled by entry-trigger.ts if score qualifies
   }

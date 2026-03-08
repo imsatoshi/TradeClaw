@@ -8,7 +8,7 @@
  */
 
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
-import type { EntryTrigger, SignalDirection, PendingZone } from './types.js'
+import type { EntryTrigger, SignalDirection, PendingZone, TriggerType, TradeProfile } from './types.js'
 import {
   findSwingHighs, findSwingLows, rsiSeries, atrSeries,
   detectLiquidityZones, findStructuralLevels,
@@ -20,7 +20,7 @@ import {
  * Compute SL multiplier based on volatility profile.
  * High-volatility coins need wider stops to avoid noise wicks.
  */
-function dynamicSlMultiplier(atr: number, price: number, regime?: string): number {
+function dynamicSlMultiplier(atr: number, price: number, regime?: string, profile?: TradeProfile): number {
   const volRatio = (atr / price) * 100 // ATR as % of price
   let mult: number
   if (volRatio > 3.0) mult = 2.5       // extreme vol (meme coins)
@@ -28,9 +28,14 @@ function dynamicSlMultiplier(atr: number, price: number, regime?: string): numbe
   else if (volRatio > 1.0) mult = 1.8  // normal (was 1.5, widened to reduce noise wicks)
   else mult = 1.3                      // low vol (was 1.2)
 
-  // Regime adjustment: trending needs wider stops, ranging tighter
-  if (regime === 'uptrend' || regime === 'downtrend') mult *= 1.2
-  else if (regime === 'ranging') mult *= 0.85
+  // Profile-based SL factor overrides regime adjustment when set
+  if (profile) {
+    mult *= PROFILE_SL_FACTOR[profile]
+  } else {
+    // Regime adjustment: trending needs wider stops, ranging tighter
+    if (regime === 'uptrend' || regime === 'downtrend') mult *= 1.2
+    else if (regime === 'ranging') mult *= 0.85
+  }
 
   return mult
 }
@@ -43,10 +48,53 @@ function dynamicSlMultiplier(atr: number, price: number, regime?: string): numbe
  * - Ranging: take profits early (front-loaded)
  * - Default: balanced
  */
-function tpRatios(regime?: string): [number, number, number] {
+function tpRatios(regime?: string, profile?: TradeProfile): [number, number, number] {
+  // Profile ratios override regime-based ratios when set
+  if (profile) return PROFILE_TP_RATIOS[profile]
   if (regime === 'uptrend' || regime === 'downtrend') return [0.3, 0.3, 0.4]
   if (regime === 'ranging') return [0.5, 0.3, 0.2]
   return [0.4, 0.3, 0.3]
+}
+
+// ==================== Trade Profile Mapping ====================
+
+/**
+ * Map trigger type + regime to a trade profile.
+ * Profile determines SL width, TP ratios, DCA eligibility, trailing behavior.
+ */
+export function mapToProfile(triggerType: TriggerType, regime?: string): TradeProfile {
+  switch (triggerType) {
+    case 'bullish_confirm':
+    case 'bearish_confirm':
+      return (regime === 'uptrend' || regime === 'downtrend') ? 'trend' : 'reversal'
+    case 'support_bounce':
+    case 'resistance_reject':
+      return 'reversal'
+    case 'bos_pullback':
+      return (regime === 'uptrend' || regime === 'downtrend') ? 'trend' : 'breakout'
+    case 'liquidity_sweep':
+      return 'scalp'
+    case 'pending_zone':
+      return (regime === 'uptrend' || regime === 'downtrend') ? 'trend' : 'reversal'
+    default:
+      return 'reversal'
+  }
+}
+
+/** SL width factor per profile (multiplied with base ATR multiplier) */
+export const PROFILE_SL_FACTOR: Record<TradeProfile, number> = {
+  trend: 1.3,
+  reversal: 1.0,
+  breakout: 0.8,
+  scalp: 0.7,
+}
+
+/** TP split ratios per profile (overrides regime-based ratios when profile is set) */
+export const PROFILE_TP_RATIOS: Record<TradeProfile, [number, number, number]> = {
+  trend: [0.25, 0.35, 0.40],
+  reversal: [0.50, 0.30, 0.20],
+  breakout: [0.40, 0.30, 0.30],
+  scalp: [0.60, 0.40, 0.00],
 }
 
 // ==================== Structure-Based TP ====================
@@ -163,12 +211,14 @@ export function checkEntryTrigger(
 
   let triggered = false
   let reason = ''
+  let triggerType: TriggerType | undefined
 
   if (direction === 'long') {
     // Trigger 1: Bullish confirmation — current close > previous high + break margin + volume above average
     const breakMargin = 0.15 * atr
     if (current.close > prev.high + breakMargin && currentVol > avgVol20) {
       triggered = true
+      triggerType = 'bullish_confirm'
       reason = `bullish confirm: close $${current.close.toFixed(4)} > prev high $${prev.high.toFixed(4)} +margin, vol ${(currentVol / avgVol20).toFixed(1)}x`
     }
 
@@ -182,6 +232,7 @@ export function checkEntryTrigger(
         const hasWick = body > 0 ? lowerWick >= body * 0.5 : lowerWick > 0
         if (distPct >= 0 && distPct <= 1.0 && current.close > current.open && hasWick) {
           triggered = true
+          triggerType = 'support_bounce'
           reason = `support bounce: at swing low $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection`
         }
       }
@@ -195,6 +246,7 @@ export function checkEntryTrigger(
         const distPct = ((entry - recentHigh.price) / recentHigh.price) * 100
         if (age <= 12 && distPct >= -0.3 && distPct <= 1.0 && current.close > current.open) {
           triggered = true
+          triggerType = 'bos_pullback'
           reason = `BOS pullback: retesting swing high $${recentHigh.price.toFixed(2)} (${distPct.toFixed(1)}%, ${age} bars ago)`
         }
       }
@@ -208,6 +260,7 @@ export function checkEntryTrigger(
         const closedAbove = current.close > lz.price * 1.001
         if (sweptBelow && closedAbove && current.close > current.open) {
           triggered = true
+          triggerType = 'liquidity_sweep'
           reason = `liquidity sweep: wicked below EQL $${lz.price.toFixed(4)} (${lz.count} touches), reclaimed`
           break
         }
@@ -216,8 +269,11 @@ export function checkEntryTrigger(
 
     if (!triggered) return null
 
-    // Dynamic SL
-    const slMult = dynamicSlMultiplier(atr, entry, regime)
+    // Derive profile from trigger type + regime
+    const profile = triggerType ? mapToProfile(triggerType, regime) : undefined
+
+    // Dynamic SL (profile-aware)
+    const slMult = dynamicSlMultiplier(atr, entry, regime, profile)
     let sl = entry - slMult * atr
 
     // Improve SL using structure — place below nearest support
@@ -241,7 +297,8 @@ export function checkEntryTrigger(
     const slDist = entry - sl
     if (slDist <= 0) return null
 
-    const [r1, r2, r3] = tpRatios(regime)
+    // Profile-aware TP ratios
+    const [r1, r2, r3] = tpRatios(regime, profile)
     const weightedTP = tp1 * r1 + tp2 * r2 + tp3 * r3
     const rr = Math.min((weightedTP - entry) / slDist, 5.0)
 
@@ -260,6 +317,8 @@ export function checkEntryTrigger(
       reason,
       tpSource,
       slSource: supports.length > 0 ? 'structure' : 'dynamic',
+      triggerType,
+      profile,
     }
   } else {
     // SHORT triggers
@@ -268,6 +327,7 @@ export function checkEntryTrigger(
     const breakMargin = 0.15 * atr
     if (current.close < prev.low - breakMargin && currentVol > avgVol20) {
       triggered = true
+      triggerType = 'bearish_confirm'
       reason = `bearish confirm: close $${current.close.toFixed(4)} < prev low $${prev.low.toFixed(4)} -margin, vol ${(currentVol / avgVol20).toFixed(1)}x`
     }
 
@@ -281,6 +341,7 @@ export function checkEntryTrigger(
         const hasWick = body > 0 ? upperWick >= body * 0.5 : upperWick > 0
         if (distPct >= 0 && distPct <= 1.0 && current.close < current.open && hasWick) {
           triggered = true
+          triggerType = 'resistance_reject'
           reason = `resistance reject: at swing high $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection`
         }
       }
@@ -294,6 +355,7 @@ export function checkEntryTrigger(
         const distPct = ((recentLow.price - entry) / recentLow.price) * 100
         if (age <= 12 && distPct >= -0.3 && distPct <= 1.0 && current.close < current.open) {
           triggered = true
+          triggerType = 'bos_pullback'
           reason = `BOS pullback: retesting swing low $${recentLow.price.toFixed(2)} (${distPct.toFixed(1)}%, ${age} bars ago)`
         }
       }
@@ -307,6 +369,7 @@ export function checkEntryTrigger(
         const closedBelow = current.close < lz.price * 0.999
         if (sweptAbove && closedBelow && current.close < current.open) {
           triggered = true
+          triggerType = 'liquidity_sweep'
           reason = `liquidity sweep: wicked above EQH $${lz.price.toFixed(4)} (${lz.count} touches), rejected`
           break
         }
@@ -315,8 +378,11 @@ export function checkEntryTrigger(
 
     if (!triggered) return null
 
-    // Dynamic SL
-    const slMult = dynamicSlMultiplier(atr, entry, regime)
+    // Derive profile from trigger type + regime
+    const profile = triggerType ? mapToProfile(triggerType, regime) : undefined
+
+    // Dynamic SL (profile-aware)
+    const slMult = dynamicSlMultiplier(atr, entry, regime, profile)
     let sl = entry + slMult * atr
 
     // Improve SL using structure — place above nearest resistance
@@ -339,7 +405,8 @@ export function checkEntryTrigger(
     const slDist = sl - entry
     if (slDist <= 0) return null
 
-    const [r1s, r2s, r3s] = tpRatios(regime)
+    // Profile-aware TP ratios
+    const [r1s, r2s, r3s] = tpRatios(regime, profile)
     const weightedTP = tp1 * r1s + tp2 * r2s + tp3 * r3s
     const rr = Math.min((entry - weightedTP) / slDist, 5.0)
 
@@ -358,6 +425,8 @@ export function checkEntryTrigger(
       reason,
       tpSource,
       slSource: resistances.length > 0 ? 'structure' : 'dynamic',
+      triggerType,
+      profile,
     }
   }
 }
@@ -402,7 +471,9 @@ export function computePendingZone(
   const liquidityZones = detectLiquidityZones(swingHighs, swingLows)
   const { resistances, supports } = findStructuralLevels(swingHighs, swingLows, currentPrice, liquidityZones)
 
-  const slMult = dynamicSlMultiplier(atr, currentPrice, regime)
+  // Pending zones use 'pending_zone' trigger type for profile mapping
+  const pendingProfile = mapToProfile('pending_zone', regime)
+  const slMult = dynamicSlMultiplier(atr, currentPrice, regime, pendingProfile)
   const now = Date.now()
 
   if (direction === 'long') {
@@ -419,7 +490,7 @@ export function computePendingZone(
     const sl = zoneLow - slMult * 0.5 * atr // tighter SL since we're entering at structure
 
     const { tps } = computeStructureTPs(direction, idealEntry, atr, resistances, supports)
-    const [zr1, zr2, zr3] = tpRatios(regime)
+    const [zr1, zr2, zr3] = tpRatios(regime, pendingProfile)
     const slDist = idealEntry - sl
     if (slDist <= 0) return null
     const weightedTP = tps[0] * zr1 + tps[1] * zr2 + tps[2] * zr3
@@ -457,7 +528,7 @@ export function computePendingZone(
     const sl = zoneHigh + slMult * 0.5 * atr
 
     const { tps } = computeStructureTPs(direction, idealEntry, atr, resistances, supports)
-    const [zr1s, zr2s, zr3s] = tpRatios(regime)
+    const [zr1s, zr2s, zr3s] = tpRatios(regime, pendingProfile)
     const slDist = sl - idealEntry
     if (slDist <= 0) return null
     const weightedTP = tps[0] * zr1s + tps[1] * zr2s + tps[2] * zr3s
@@ -514,6 +585,7 @@ export function checkPendingZone(
     reason: `pending zone triggered: ${zone.reason}`,
     tpSource: 'structure',
     slSource: 'structure',
+    triggerType: 'pending_zone',
   }
 }
 

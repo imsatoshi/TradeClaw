@@ -6,6 +6,33 @@
 
 export type TradePlanStatus = 'pending' | 'active' | 'partial' | 'completed' | 'cancelled' | 'error'
 
+/** Trade profile — drives SL width, TP ratios, DCA eligibility, trailing behavior */
+export type TradeProfile = 'trend' | 'reversal' | 'breakout' | 'scalp'
+
+export interface DcaLayer {
+  layer: number
+  triggerPrice: number
+  stakeAmount: number
+  status: 'pending' | 'triggered' | 'filled' | 'exited' | 'stopped'
+  filledPrice?: number
+  filledAmount?: number
+  filledAt?: string
+  exitPrice?: number
+  exitAt?: string
+  /** Freqtrade trade_id for this DCA layer (each layer is a separate trade) */
+  freqtradeTradeId?: number
+}
+
+export interface DcaConfig {
+  enabled: boolean
+  maxLayers: number
+  hardStopPrice: number
+  tpProfitThreshold: number
+  layers: DcaLayer[]
+  totalDcaAmount?: number
+  avgEntryPrice?: number
+}
+
 export interface TakeProfitLevel {
   /** TP level number, starting from 1 */
   level: number
@@ -100,6 +127,13 @@ export interface TradePlan {
   /** Realized P&L from filled TPs (accumulated, persisted) */
   realizedPnl?: number
 
+  // --- Signal profile ---
+
+  /** Trade profile — determines SL/TP/DCA strategy */
+  profile?: TradeProfile
+  /** DCA configuration (only for 'reversal' profile) */
+  dca?: DcaConfig
+
   // --- Progressive protection ---
 
   /** ATR(14, 1H) at entry time — used for progressive SL stages */
@@ -118,4 +152,8 @@ export interface TradePlan {
   }
   /** Whether time-decay SL tightening has already been applied */
   timeDecayApplied?: boolean
+
+  // --- SL proximity warning ---
+  /** Whether SL proximity warning has been emitted (reset when SL moves) */
+  slWarningEmitted?: boolean
 }

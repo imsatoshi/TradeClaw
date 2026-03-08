@@ -718,6 +718,7 @@ async function main() {
               `   Volume: ${d.volume.score}/${d.volume.max} (${d.volume.detail})`,
               `   Volatility: ${d.volatility.score}/${d.volatility.max} (${d.volatility.detail})`,
               `   Funding: ${d.funding.score}/${d.funding.max} (${d.funding.detail})`,
+              `   CrashRisk: ${d.crashRisk.score}/${d.crashRisk.max} (${d.crashRisk.detail})`,
             )
 
             // Entry trigger details

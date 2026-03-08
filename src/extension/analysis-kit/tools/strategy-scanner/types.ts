@@ -112,10 +112,18 @@ export interface SetupScore {
     volume:       DimensionScore  // max 10
     volatility:   DimensionScore  // max 10
     funding:      DimensionScore  // max 10
+    crashRisk:    DimensionScore  // max 10 — multi-TF RSI_3 crash detection
   }
   /** Entry trigger result (null if score below threshold) */
   entry: EntryTrigger | null
 }
+
+/** Entry trigger classification */
+export type TriggerType = 'bullish_confirm' | 'support_bounce' | 'bos_pullback' | 'liquidity_sweep'
+  | 'bearish_confirm' | 'resistance_reject' | 'pending_zone'
+
+/** Trade profile — drives SL width, TP ratios, DCA eligibility */
+export type TradeProfile = 'trend' | 'reversal' | 'breakout' | 'scalp'
 
 /** 1H entry trigger with precise SL/TP levels. */
 export interface EntryTrigger {
@@ -132,6 +140,10 @@ export interface EntryTrigger {
   /** How TP/SL were derived */
   tpSource?: 'structure' | 'atr'
   slSource?: 'structure' | 'atr' | 'dynamic'
+  /** Classified trigger type */
+  triggerType?: TriggerType
+  /** Recommended trade profile based on trigger + regime */
+  profile?: TradeProfile
 }
 
 /** Pending entry zone — setup qualifies but no immediate trigger. */

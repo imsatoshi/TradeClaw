@@ -211,7 +211,7 @@ export async function runStrategyScan(
 
     for (const direction of directions) {
       try {
-        const score = await scoreSetup(symbol, direction, regime, bars1h, funding)
+        const score = await scoreSetup(symbol, direction, regime, bars1h, funding, ohlcv4h[symbol])
 
         // Fresh regime penalty: reduce score by 10 if regime just changed (< 8 bars = 32 hours)
         if (regime.isFreshRegime) {

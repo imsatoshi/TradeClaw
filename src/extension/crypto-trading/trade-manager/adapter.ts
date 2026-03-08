@@ -55,12 +55,19 @@ Example: 2-level TP plan with trailing stop
           type: z.enum(['fixed', 'percent', 'chandelier']).describe('"fixed" = absolute $ distance, "percent" = % of price, "chandelier" = ATR multiplier anchored to period high/low (recommended)'),
           lookbackBars: z.number().int().min(5).max(50).optional().describe('Lookback bars for chandelier mode (default 14)'),
         }).optional().describe('Trailing stop config. Recommended: chandelier with distance 2.5 (= 2.5x ATR from period high/low).'),
+        profile: z.enum(['trend', 'reversal', 'breakout', 'scalp']).optional().describe('Trade profile from Scanner signal. Determines SL/TP/DCA strategy. "trend" = wide SL + chandelier trailing, "reversal" = DCA-eligible + front-loaded TP, "breakout" = tight SL, "scalp" = fastest exit. If omitted, defaults to "reversal".'),
+        enableDca: z.boolean().optional().describe('Enable DCA (dollar-cost averaging) for this plan. Only works with "reversal" profile. When enabled, TradeManager will auto-add to position at ATR-based levels if price drops. Default: false.'),
       }),
-      execute: async ({ symbol, direction, takeProfits, stopLossPrice, reason, autoBreakeven, trailingStop }) => {
+      execute: async ({ symbol, direction, takeProfits, stopLossPrice, reason, autoBreakeven, trailingStop, profile, enableDca }) => {
         // Validate sizeRatio sum
         const ratioSum = takeProfits.reduce((s, tp) => s + tp.sizeRatio, 0)
         if (Math.abs(ratioSum - 1.0) > 0.01) {
           return { success: false, error: `Take-profit sizeRatio sum is ${ratioSum.toFixed(2)}, must equal 1.0` }
+        }
+
+        // DCA only allowed for reversal profile
+        if (enableDca && profile && profile !== 'reversal') {
+          return { success: false, error: `DCA is only available for "reversal" profile, got "${profile}"` }
         }
 
         const plan = await manager.addPlan({
@@ -71,11 +78,15 @@ Example: 2-level TP plan with trailing stop
           reason,
           autoBreakeven,
           trailingStop,
+          profile: profile ?? 'reversal',
+          enableDca,
         })
 
         const features: string[] = []
+        if (plan.profile) features.push(`profile: ${plan.profile}`)
         if (plan.autoBreakeven) features.push('auto-breakeven after TP1')
         if (plan.trailingStop) features.push(`trailing ${plan.trailingStop.type === 'percent' ? plan.trailingStop.distance + '%' : '$' + plan.trailingStop.distance}`)
+        if (plan.dca?.enabled) features.push(`DCA: max ${plan.dca.maxLayers} layers`)
 
         return {
           success: true,
@@ -215,6 +226,30 @@ Already-filled TP levels are preserved — only pending levels are updated.`,
       }),
       execute: async ({ planId }) => {
         return await manager.cancelPlan(planId)
+      },
+    }),
+
+    cryptoPartialExit: tool({
+      description: `Partially exit an active position to reduce risk exposure.
+
+Use this to de-risk when:
+- Position is in drawdown but you want to keep some exposure for recovery
+- Profit is high but momentum weakening — lock in partial gains
+- Market structure deteriorating — reduce size before SL hits
+- DCA layers are active and you want to reduce overall risk
+
+Unlike full SL exit, this keeps the remaining position alive with its TP/SL plan.
+The exited portion's P&L is added to realized P&L.
+
+IMPORTANT: exitRatio is of the CURRENT remaining position, not the original.
+Max 50% per call to prevent accidental full exits.`,
+      inputSchema: z.object({
+        planId: z.string().describe('The plan ID to partially exit'),
+        exitRatio: z.number().min(0.1).max(0.5).describe('Fraction of remaining position to exit (0.1 = 10%, max 0.5 = 50%)'),
+        reason: z.string().describe('Why you are de-risking (logged for trade review)'),
+      }),
+      execute: async ({ planId, exitRatio, reason }) => {
+        return await manager.partialExit(planId, exitRatio, reason)
       },
     }),
   }
