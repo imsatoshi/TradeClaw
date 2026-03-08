@@ -689,6 +689,7 @@ async function main() {
           '',
           '--- SETUP SCORES (multi-factor pipeline) ---',
           `Scored ${pipeline.length} setups across ${scanResult.symbols.length} symbols: ${qualified.length} qualified (Grade A/B), ${triggered.length} with entry trigger`,
+          `Data freshness: scanned at ${scanResult.scannedAt} (${((Date.now() - new Date(scanResult.scannedAt).getTime()) / 1000).toFixed(0)}s ago)`,
         )
 
         if (pipeline.length > 0) {
@@ -748,6 +749,17 @@ async function main() {
           }
         } else {
           parts.push('(no setups scored — insufficient data)')
+        }
+
+        // Show pending zones waiting for pullback
+        const zonesFromPipeline = pipeline.filter(s => s.pendingZone)
+        if (zonesFromPipeline.length > 0) {
+          parts.push('', '--- PENDING ZONES (waiting for pullback entry) ---')
+          for (const ps of zonesFromPipeline) {
+            const z = ps.pendingZone!
+            const expiresInH = Math.max(0, (z.expiresAt - Date.now()) / 3600000).toFixed(1)
+            parts.push(`  ${ps.symbol} ${ps.direction.toUpperCase()} [Grade ${ps.grade}]: ideal entry $${z.idealEntry.toFixed(4)}, zone $${z.zoneLow.toFixed(4)}-$${z.zoneHigh.toFixed(4)}, expires in ${expiresInH}h`)
+          }
         }
 
         strategyBlock = parts.join('\n')

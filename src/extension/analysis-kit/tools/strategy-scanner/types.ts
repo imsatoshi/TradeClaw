@@ -105,9 +105,9 @@ export interface SetupScore {
   regime: 'uptrend' | 'downtrend' | 'ranging'
   dimensions: {
     trend:        DimensionScore  // max 15
-    momentum:     DimensionScore  // max 15
+    momentum:     DimensionScore  // max 20
     acceleration: DimensionScore  // max 10
-    structure:    DimensionScore  // max 20
+    structure:    DimensionScore  // max 15
     candle:       DimensionScore  // max 10
     volume:       DimensionScore  // max 10
     volatility:   DimensionScore  // max 10

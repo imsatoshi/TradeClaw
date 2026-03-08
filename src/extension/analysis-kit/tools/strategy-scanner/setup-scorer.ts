@@ -3,9 +3,9 @@
  *
  * Scores each (symbol, direction) pair on 9 dimensions (0-110 total):
  *   1. Trend Strength  (15) — EMA spread + SMA20
- *   2. Momentum        (15) — RSI + MACD + MTF RSI gate
+ *   2. Momentum        (20) — RSI + MACD + MTF RSI gate
  *   3. Acceleration    (10) — ROC delta (rate of change of rate of change)
- *   4. Structure       (20) — FVG + validated BOS sequence + CHoCH
+ *   4. Structure       (15) — FVG + validated BOS sequence + CHoCH
  *   5. Candle Quality  (10) — body ratio + wick rejection + engulfing
  *   6. Volume          (10) — volume ratio (trend vs mean-reversion)
  *   7. Volatility      (10) — BBWP + absolute bandwidth
@@ -159,7 +159,7 @@ function scoreMomentum(
   const macdCurrent = macdHist.length > 0 ? macdHist[macdHist.length - 1] : 0
   const score = Math.max(0, rsiScore + macdScore + mtfPenalty)
   const detail = `RSI ${rsiVal.toFixed(0)} (${rsiScore}/8), MACD ${macdDetail} (${macdScore}/5)${mtfDetail}`
-  return { score, max: 15, detail, raw: { rsi15m: Math.round(rsiVal * 10) / 10, macdHist: Math.round(macdCurrent * 10000) / 10000, macdAccelerating: macdHist.length >= 2 ? (direction === 'long' ? macdCurrent > macdHist[macdHist.length - 2] : macdCurrent < macdHist[macdHist.length - 2]) : false } }
+  return { score, max: 20, detail, raw: { rsi15m: Math.round(rsiVal * 10) / 10, macdHist: Math.round(macdCurrent * 10000) / 10000, macdAccelerating: macdHist.length >= 2 ? (direction === 'long' ? macdCurrent > macdHist[macdHist.length - 2] : macdCurrent < macdHist[macdHist.length - 2]) : false } }
 }
 
 function scoreAcceleration(
@@ -302,12 +302,13 @@ function scoreStructure(
     }
   }
 
-  // Cap bonus at 4 to keep max at 20
+  // Cap bonus at 4 to keep max at 15
   const bonusScore = Math.min(chochScore + liqScore, 4)
 
-  const score = fvgScore + bosScore + bonusScore
+  let score = fvgScore + bosScore + bonusScore
+  score = Math.min(score, 15)
   const detail = `${fvgDetail} (${fvgScore}/6), ${bosDetail} (${bosScore}/10)${chochDetail}${liqDetail}`
-  return { score, max: 20, detail, raw: { hasFVG: fvgScore > 0, bosConfirmed: bosScore >= 6, hasCHoCH: chochScore > 0, hasLiqZone: liqScore > 0 } }
+  return { score, max: 15, detail, raw: { hasFVG: fvgScore > 0, bosConfirmed: bosScore >= 6, hasCHoCH: chochScore > 0, hasLiqZone: liqScore > 0 } }
 }
 
 function scoreCandleQuality(

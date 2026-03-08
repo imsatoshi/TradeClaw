@@ -216,10 +216,13 @@ export function checkEntryTrigger(
   if (direction === 'long') {
     // Trigger 1: Bullish confirmation — current close > previous high + break margin + volume above average
     const breakMargin = 0.15 * atr
-    if (current.close > prev.high + breakMargin && currentVol > avgVol20) {
+    const isBullishCandle = current.close > current.open
+    const prevRange = prev.high - prev.low
+    const prevWeak = prevRange > 0 && prev.close < prev.low + 0.4 * prevRange
+    if (current.close > prev.high + breakMargin && currentVol > avgVol20 && isBullishCandle && prevWeak) {
       triggered = true
       triggerType = 'bullish_confirm'
-      reason = `bullish confirm: close $${current.close.toFixed(4)} > prev high $${prev.high.toFixed(4)} +margin, vol ${(currentVol / avgVol20).toFixed(1)}x`
+      reason = `bullish confirm: close $${current.close.toFixed(4)} > prev high $${prev.high.toFixed(4)} +margin, vol ${(currentVol / avgVol20).toFixed(1)}x, after weak prev`
     }
 
     // Trigger 2: Support bounce — at swing low + bullish candle with meaningful lower wick
@@ -230,10 +233,12 @@ export function checkEntryTrigger(
         const body = Math.abs(current.close - current.open)
         const lowerWick = Math.min(current.close, current.open) - current.low
         const hasWick = body > 0 ? lowerWick >= body * 0.5 : lowerWick > 0
-        if (distPct >= 0 && distPct <= 1.0 && current.close > current.open && hasWick) {
+        const currentRsi = rsiArr[rsiArr.length - 1]
+        const hasOversoldOrVol = currentRsi < 35 || currentVol > avgVol20 * 1.5
+        if (distPct >= 0 && distPct <= 1.0 && current.close > current.open && hasWick && hasOversoldOrVol) {
           triggered = true
           triggerType = 'support_bounce'
-          reason = `support bounce: at swing low $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection`
+          reason = `support bounce: at swing low $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection, ${currentRsi < 35 ? `RSI ${currentRsi.toFixed(0)} oversold` : `vol ${(currentVol / avgVol20).toFixed(1)}x spike`}`
         }
       }
     }
@@ -325,10 +330,13 @@ export function checkEntryTrigger(
 
     // Trigger 1: Bearish confirmation
     const breakMargin = 0.15 * atr
-    if (current.close < prev.low - breakMargin && currentVol > avgVol20) {
+    const isBearishCandle = current.close < current.open
+    const prevRangeS = prev.high - prev.low
+    const prevStrong = prevRangeS > 0 && prev.close > prev.high - 0.4 * prevRangeS
+    if (current.close < prev.low - breakMargin && currentVol > avgVol20 && isBearishCandle && prevStrong) {
       triggered = true
       triggerType = 'bearish_confirm'
-      reason = `bearish confirm: close $${current.close.toFixed(4)} < prev low $${prev.low.toFixed(4)} -margin, vol ${(currentVol / avgVol20).toFixed(1)}x`
+      reason = `bearish confirm: close $${current.close.toFixed(4)} < prev low $${prev.low.toFixed(4)} -margin, vol ${(currentVol / avgVol20).toFixed(1)}x, after strong prev`
     }
 
     // Trigger 2: Resistance rejection
@@ -339,10 +347,12 @@ export function checkEntryTrigger(
         const body = Math.abs(current.close - current.open)
         const upperWick = current.high - Math.max(current.close, current.open)
         const hasWick = body > 0 ? upperWick >= body * 0.5 : upperWick > 0
-        if (distPct >= 0 && distPct <= 1.0 && current.close < current.open && hasWick) {
+        const currentRsiS = rsiArr[rsiArr.length - 1]
+        const hasOverboughtOrVol = currentRsiS > 65 || currentVol > avgVol20 * 1.5
+        if (distPct >= 0 && distPct <= 1.0 && current.close < current.open && hasWick && hasOverboughtOrVol) {
           triggered = true
           triggerType = 'resistance_reject'
-          reason = `resistance reject: at swing high $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection`
+          reason = `resistance reject: at swing high $${nearest.price.toFixed(4)} (${distPct.toFixed(1)}%), wick rejection, ${currentRsiS > 65 ? `RSI ${currentRsiS.toFixed(0)} overbought` : `vol ${(currentVol / avgVol20).toFixed(1)}x spike`}`
         }
       }
     }
