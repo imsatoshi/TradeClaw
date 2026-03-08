@@ -1,7 +1,24 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { IAnalysisContext } from './interfaces';
 import { calculate } from '../thinking-kit/tools/calculate.tool';
+
+interface KellyConfig {
+  winRateMin: number; winRateMax: number; scoreBase: number;
+  scoreGainFactor: number; kellyDivisor: number; riskMaxPct: number; riskMinPct: number;
+}
+let _kellyConfig: KellyConfig | null = null;
+function getKellyConfig(): KellyConfig {
+  if (_kellyConfig) return _kellyConfig;
+  try {
+    _kellyConfig = JSON.parse(readFileSync(resolve('data/config/kelly.json'), 'utf-8'));
+  } catch {
+    _kellyConfig = { winRateMin: 0.45, winRateMax: 0.55, scoreBase: 50, scoreGainFactor: 0.002, kellyDivisor: 5, riskMaxPct: 3, riskMinPct: 0.5 };
+  }
+  return _kellyConfig!;
+}
 import { calculateIndicator } from './tools/calculate-indicator.tool';
 
 import { CRYPTO_ALLOWED_SYMBOLS, CRYPTO_DEFAULT_LEVERAGE, CRYPTO_MAX_OPEN_TRADES } from '../crypto-trading/interfaces.js';
@@ -40,18 +57,17 @@ import type { MarketData } from './data/interfaces.js';
 // Without historical trade data to calibrate, we must be conservative —
 // pretending to know the win rate precisely is the #1 sizing mistake.
 function computeKellyRiskPercent(setupScore: number, riskReward: number) {
-  // Narrower range: scores 50-100 map to 0.45-0.55 (was 0.42-0.65)
-  const p = Math.min(0.55, Math.max(0.45, 0.45 + (setupScore - 50) * 0.002));
+  const cfg = getKellyConfig();
+  const p = Math.min(cfg.winRateMax, Math.max(cfg.winRateMin, cfg.winRateMin + (setupScore - cfg.scoreBase) * cfg.scoreGainFactor));
   const q = 1 - p;
   const b = riskReward;
   const kellyFull = Math.max(0, (p * b - q) / b);
-  // Use 1/5 Kelly instead of 1/4 — more conservative without historical calibration
-  const kellyFifth = kellyFull * 0.20;
-  const riskPct = Math.min(3, Math.max(0.5, kellyFifth * 100));
+  const kellyFraction = kellyFull / cfg.kellyDivisor;
+  const riskPct = Math.min(cfg.riskMaxPct, Math.max(cfg.riskMinPct, kellyFraction * 100));
   return {
     estimatedWinRate: Math.round(p * 1000) / 1000,
     kellyFull: Math.round(kellyFull * 10000) / 10000,
-    kellyFraction: Math.round(kellyFifth * 10000) / 10000,
+    kellyFraction: Math.round(kellyFraction * 10000) / 10000,
     riskPercent: Math.round(riskPct * 100) / 100,
   };
 }

@@ -15,6 +15,8 @@
  * All indicator functions are reused from helpers.ts.
  */
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import type { MarketRegime } from './regime.js'
 import type { SetupScore, DimensionScore, SignalDirection, FundingRateInfo } from './types.js'
@@ -145,12 +147,19 @@ function detectRsiDivergence(
   return false
 }
 
-// v5: Tokens with strong mean-reversion characteristics need stricter MTF penalty.
-// These tokens rarely sustain RSI > 70 on 1H — it almost always precedes a 3-5% dump.
-const MEAN_REVERSION_TOKENS = new Set([
-  'DOGE/USDT', 'SHIB/USDT', 'XRP/USDT', 'PEPE/USDT', 'FLOKI/USDT',
-  'WIF/USDT', 'BONK/USDT', 'MEME/USDT',
-])
+// v5→v6: Mean-reversion token list loaded from data/config/tokens.json
+let _meanRevTokens: Set<string> | null = null
+function getMeanReversionTokens(): Set<string> {
+  if (_meanRevTokens) return _meanRevTokens
+  try {
+    const raw = readFileSync(resolve('data/config/tokens.json'), 'utf-8')
+    const cfg = JSON.parse(raw) as { meanReversionTokens?: string[] }
+    _meanRevTokens = new Set(cfg.meanReversionTokens ?? [])
+  } catch {
+    _meanRevTokens = new Set(['DOGE/USDT', 'SHIB/USDT', 'XRP/USDT', 'PEPE/USDT', 'FLOKI/USDT', 'WIF/USDT', 'BONK/USDT', 'MEME/USDT'])
+  }
+  return _meanRevTokens
+}
 
 function scoreMomentum(
   direction: SignalDirection,
@@ -244,7 +253,7 @@ function scoreMomentum(
       const ema1hBearish = sma9_1h < sma21_1h
 
       // v5: Mean-reversion tokens get stricter MTF penalty (lower threshold, heavier penalty)
-      const isMeanRev = symbol ? MEAN_REVERSION_TOKENS.has(symbol) : false
+      const isMeanRev = symbol ? getMeanReversionTokens().has(symbol) : false
       const obThreshold = isMeanRev ? 65 : 70
       const osThreshold = isMeanRev ? 35 : 30
       const heavyPenalty = isMeanRev ? -5 : -3
@@ -733,6 +742,11 @@ export async function scoreSetup(
   funding?: FundingRateInfo,
   bars4h?: MarketData[],
 ): Promise<SetupScore> {
+  // Safety: warn if regime is missing or unexpected
+  if (!regime?.regime) {
+    console.warn(`setup-scorer: regime is null/undefined for ${symbol}, scoring confidence reduced`)
+  }
+
   // Load configurable params (reuses existing config system)
   const p = await getStrategyParamsFor('pipeline', symbol)
 

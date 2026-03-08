@@ -85,11 +85,11 @@ describe('EmotionGuard', () => {
     expect(result.allowed).toBe(true)
   })
 
-  it('allows unknown emotions at full size', () => {
+  it('reduces size to 50% for unknown emotions (cautious fallback)', () => {
     const guard = new EmotionGuard(() => 'contemplative')
     const ctx = makeCtx(100)
     const result = guard.check(ctx)
     expect(result.allowed).toBe(true)
-    expect(ctx.operation.params.usd_size).toBe(100)
+    expect(ctx.operation.params.usd_size).toBe(50)
   })
 })

@@ -1,0 +1,9 @@
+{
+  "winRateMin": 0.45,
+  "winRateMax": 0.55,
+  "scoreBase": 50,
+  "scoreGainFactor": 0.002,
+  "kellyDivisor": 5,
+  "riskMaxPct": 3,
+  "riskMinPct": 0.5
+}

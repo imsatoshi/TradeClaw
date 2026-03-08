@@ -5,6 +5,6 @@
     { "name": "MaxOpenTrades",   "enabled": true, "params": { "maxOpenTrades": 3 } },
     { "name": "MinBalance",      "enabled": true, "params": { "minBalanceRatio": 0.3 } },
     { "name": "Emotion",         "enabled": true, "params": {} },
-    { "name": "AccountDrawdown", "enabled": true, "params": { "maxDailyDrawdownPct": 5 } }
+    { "name": "AccountDrawdown", "enabled": true, "params": { "maxDailyDrawdownPct": 5, "timezoneOffsetHours": 8 } }
   ]
 }

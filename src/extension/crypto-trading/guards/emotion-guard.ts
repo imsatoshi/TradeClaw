@@ -6,6 +6,7 @@
  *   cautious            → 50%  (half size)
  *   scared / fearful    → 25%  (quarter size)
  *   angry / tilted      → 0%   (blocked)
+ *   unknown             → 50%  (cautious fallback)
  *
  * The guard modifies usd_size in the operation params when reducing,
  * and blocks entirely when the multiplier is 0.
@@ -47,8 +48,9 @@ function matchEmotion(emotionStr: string): { keyword: string; multiplier: number
       return { keyword, multiplier }
     }
   }
-  // Unknown emotion → allow but log
-  return { keyword: lower, multiplier: 1.0 }
+  // Unknown emotion → conservative fallback (fail-safe)
+  console.warn(`emotion-guard: unrecognized emotion "${lower}", defaulting to cautious (0.5)`)
+  return { keyword: lower, multiplier: 0.5 }
 }
 
 export class EmotionGuard implements Guard {

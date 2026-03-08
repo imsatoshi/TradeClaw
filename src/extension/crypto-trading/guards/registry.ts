@@ -56,7 +56,8 @@ const GUARD_REGISTRY: Record<string, GuardFactory> = {
     return new EmotionGuard(deps.emotionGetter)
   },
   AccountDrawdown: (p) => new AccountDrawdownGuard({
-    maxDailyPercent: typeof p.maxDailyPercent === 'number' ? p.maxDailyPercent : undefined,
+    maxDailyPercent: typeof p.maxDailyDrawdownPct === 'number' ? p.maxDailyDrawdownPct : undefined,
+    timezoneOffsetHours: typeof p.timezoneOffsetHours === 'number' ? p.timezoneOffsetHours : undefined,
   }),
 }
 

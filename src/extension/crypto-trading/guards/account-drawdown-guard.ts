@@ -1,7 +1,7 @@
 /**
  * AccountDrawdownGuard — Block new trades if daily equity drawdown exceeds threshold.
  *
- * Tracks a daily high watermark (reset at UTC midnight) and blocks non-reduceOnly
+ * Tracks a daily high watermark (reset at midnight in configured timezone, default UTC+8) and blocks non-reduceOnly
  * placeOrder operations when current equity drops below watermark * (1 - maxDailyPercent/100).
  */
 
@@ -11,15 +11,20 @@ export class AccountDrawdownGuard implements Guard {
   readonly name = 'AccountDrawdownGuard';
 
   private maxDailyPercent: number;
+  private tzOffsetHours: number;
   private highWatermark = 0;
-  private watermarkDate = ''; // YYYY-MM-DD in UTC
+  private watermarkDate = ''; // YYYY-MM-DD in local TZ
 
-  constructor(opts: { maxDailyPercent?: number } = {}) {
+  constructor(opts: { maxDailyPercent?: number; timezoneOffsetHours?: number } = {}) {
     this.maxDailyPercent = opts.maxDailyPercent ?? 5;
+    this.tzOffsetHours = opts.timezoneOffsetHours ?? 8; // default UTC+8
   }
 
-  private todayUTC(): string {
-    return new Date().toISOString().slice(0, 10);
+  /** Get today's date string in configured timezone. */
+  private todayLocal(): string {
+    const now = new Date();
+    const localMs = now.getTime() + this.tzOffsetHours * 3600_000;
+    return new Date(localMs).toISOString().slice(0, 10);
   }
 
   check(ctx: GuardContext): GuardResult {
@@ -29,7 +34,7 @@ export class AccountDrawdownGuard implements Guard {
     const equity = ctx.account.equity;
     if (equity <= 0) return { allowed: true };
 
-    const today = this.todayUTC();
+    const today = this.todayLocal();
 
     // Reset watermark on new UTC day
     if (today !== this.watermarkDate) {
@@ -47,7 +52,7 @@ export class AccountDrawdownGuard implements Guard {
       const drawdownPct = ((this.highWatermark - equity) / this.highWatermark * 100).toFixed(2);
       return {
         allowed: false,
-        reason: `Daily drawdown ${drawdownPct}% exceeds ${this.maxDailyPercent}% limit (equity $${equity.toFixed(2)}, watermark $${this.highWatermark.toFixed(2)}). No new positions until recovery or next UTC day.`,
+        reason: `Daily drawdown ${drawdownPct}% exceeds ${this.maxDailyPercent}% limit (equity $${equity.toFixed(2)}, watermark $${this.highWatermark.toFixed(2)}). No new positions until recovery or next day (UTC+${this.tzOffsetHours}).`,
       };
     }
 

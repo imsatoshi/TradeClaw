@@ -54,6 +54,47 @@ import { createEventLog } from './core/event-log.js'
 import type { Heartbeat } from './task/heartbeat/index.js'
 import { NewsCollectorStore, NewsCollector, createNewsArchiveTools } from './extension/news-collector/index.js'
 
+const GUARDS_CONFIG_FILE = resolve('data/config/guards.json')
+
+/**
+ * Read guard thresholds from guards.json for the system prompt.
+ * Falls back to code defaults if config is missing.
+ */
+function buildRiskRulesFromConfig(): string[] {
+  let guardParams: Record<string, Record<string, unknown>> = {}
+  try {
+    const raw = readFileSync(GUARDS_CONFIG_FILE, 'utf-8')
+    const cfg = JSON.parse(raw) as { guards: { name: string; enabled: boolean; params: Record<string, unknown> }[] }
+    for (const g of cfg.guards) {
+      if (g.enabled) guardParams[g.name] = g.params ?? {}
+    }
+  } catch {
+    // use defaults
+  }
+
+  const maxPosPct = (guardParams.MaxPositionSize?.maxPercentOfEquity as number) ?? 25
+  const cooldownMs = (guardParams.Cooldown?.minIntervalMs as number) ?? 300_000
+  const cooldownSec = Math.round(cooldownMs / 1000)
+  const maxOpen = (guardParams.MaxOpenTrades?.maxOpenTrades as number) ?? 3
+  const minBalRatio = (guardParams.MinBalance?.minBalanceRatio as number) ?? 0.3
+  const minBalPct = Math.round(minBalRatio * 100)
+  const maxDrawdownPct = (guardParams.AccountDrawdown?.maxDailyDrawdownPct as number) ?? 5
+
+  return [
+    '### Risk Rules:',
+    '- Every new trade MUST have a TradePlan with SL and at least 1 TP level',
+    '- Position sizing: use Kelly Criterion — pass setupScore and riskReward to calculatePositionSize for dynamic risk (1/5 Kelly). Fallback: 2% flat risk if no score available.',
+    '- Target SL: 1-3% from entry (based on ATR / market structure)',
+    '- Target TP: regime-adaptive R:R minimum (ranging: 1.2x, trending: 1.5x, default: 1.8x)',
+    `- Max concurrent positions: ${maxOpen} (guard limit)`,
+    `- Max ${maxPosPct}% of equity per single trade stake`,
+    `- Cooldown: ${cooldownSec}s between trades on same pair`,
+    `- No new trades if available balance < ${minBalPct}% of equity`,
+    `- Max daily account drawdown: ${maxDrawdownPct}%`,
+    '- ALWAYS use proposeTradeWithButtons for strategy signals (user must confirm)',
+  ]
+}
+
 const WALLET_FILE = resolve('data/crypto-trading/commit.json')
 const BRAIN_FILE = resolve('data/brain/commit.json')
 const FRONTAL_LOBE_FILE = resolve('data/brain/frontal-lobe.md')
@@ -384,16 +425,7 @@ async function main() {
     '- After TP1 fills: auto-breakeven moves SL to entry automatically (if enabled). Focus on TP2+ targets.',
     '- Use trailing stop for trending markets: let profits run while protecting gains',
     '',
-    '### Risk Rules:',
-    '- Every new trade MUST have a TradePlan with SL and at least 1 TP level',
-    '- Position sizing: use Kelly Criterion — pass setupScore and riskReward to calculatePositionSize for dynamic risk (0.5-3% based on setup quality, 1/5 Kelly). Fallback: 2% flat risk if no score available.',
-    '- Target SL: 1-3% from entry (based on ATR / market structure)',
-    '- Target TP: regime-adaptive R:R minimum (ranging: 1.2x, trending: 1.5x, default: 1.8x)',
-    '- Max concurrent positions: 3 (guard limit)',
-    '- Max 25% of equity per single trade stake',
-    '- Cooldown: 300s between trades on same pair',
-    '- No new trades if available balance < 30% of equity',
-    '- ALWAYS use proposeTradeWithButtons for strategy signals (user must confirm)',
+    ...buildRiskRulesFromConfig(),
     '',
     '### 语言（Language）:',
     '- 必须使用中文回复。这是硬性要求，不可违反。',

@@ -7,12 +7,48 @@
  * - Pending entry zones generated when setup qualifies but no immediate trigger
  */
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { MarketData } from '../../../archive-analysis/data/interfaces.js'
 import type { EntryTrigger, SignalDirection, PendingZone, TriggerType, TradeProfile } from './types.js'
 import {
   findSwingHighs, findSwingLows, rsiSeries, atrSeries,
   detectLiquidityZones, findStructuralLevels,
 } from './helpers.js'
+
+// ==================== Config Loader ====================
+
+interface EntryTriggerConfig {
+  slMultiplier: { extremeVol: { threshold: number; multiplier: number }; highVol: { threshold: number; multiplier: number }; normalVol: { threshold: number; multiplier: number }; lowVol: { multiplier: number } }
+  regimeSlAdjust: { trending: number; ranging: number }
+  minRiskReward: { ranging: number; trending: number; default: number; pendingBonus: number }
+  tpRatios: { trending: [number, number, number]; ranging: [number, number, number]; default: [number, number, number] }
+  profileSlFactor: Record<string, number>
+  profileTpRatios: Record<string, [number, number, number]>
+  pendingZoneTtlHours: { trending: number; ranging: number; default: number }
+}
+
+let _etConfig: EntryTriggerConfig | null = null
+
+function getETConfig(): EntryTriggerConfig {
+  if (_etConfig) return _etConfig
+  try {
+    const raw = readFileSync(resolve('data/config/entry-trigger.json'), 'utf-8')
+    _etConfig = JSON.parse(raw) as EntryTriggerConfig
+  } catch {
+    // Hardcoded defaults (same as before config existed)
+    _etConfig = {
+      slMultiplier: { extremeVol: { threshold: 3.0, multiplier: 2.5 }, highVol: { threshold: 2.0, multiplier: 2.0 }, normalVol: { threshold: 1.0, multiplier: 1.8 }, lowVol: { multiplier: 1.3 } },
+      regimeSlAdjust: { trending: 1.2, ranging: 0.85 },
+      minRiskReward: { ranging: 1.2, trending: 1.5, default: 1.8, pendingBonus: 0.2 },
+      tpRatios: { trending: [0.3, 0.3, 0.4], ranging: [0.5, 0.3, 0.2], default: [0.4, 0.3, 0.3] },
+      profileSlFactor: { trend: 1.3, reversal: 1.0, breakout: 0.8, scalp: 0.7 },
+      profileTpRatios: { trend: [0.25, 0.35, 0.40], reversal: [0.50, 0.30, 0.20], breakout: [0.40, 0.30, 0.30], scalp: [0.60, 0.40, 0.00] },
+      pendingZoneTtlHours: { trending: 2, ranging: 8, default: 4 },
+    }
+  }
+  return _etConfig
+}
 
 // ==================== Dynamic SL Multiplier ====================
 
@@ -24,27 +60,29 @@ import {
  * Ranging markets profit at lower R:R (higher win rate, smaller moves).
  * Trending markets can use moderate R:R (trend continuation provides edge). */
 function minRiskReward(regime?: string, isPending = false): number {
-  const base = regime === 'ranging' ? 1.2
-    : (regime === 'uptrend' || regime === 'downtrend') ? 1.5
-    : 1.8
-  return isPending ? base + 0.2 : base // pending zones require slightly higher bar
+  const cfg = getETConfig().minRiskReward
+  const base = regime === 'ranging' ? cfg.ranging
+    : (regime === 'uptrend' || regime === 'downtrend') ? cfg.trending
+    : cfg.default
+  return isPending ? base + cfg.pendingBonus : base
 }
 
 function dynamicSlMultiplier(atr: number, price: number, regime?: string, profile?: TradeProfile): number {
+  const cfg = getETConfig()
   const volRatio = (atr / price) * 100 // ATR as % of price
   let mult: number
-  if (volRatio > 3.0) mult = 2.5       // extreme vol (meme coins)
-  else if (volRatio > 2.0) mult = 2.0  // high vol
-  else if (volRatio > 1.0) mult = 1.8  // normal (was 1.5, widened to reduce noise wicks)
-  else mult = 1.3                      // low vol (was 1.2)
+  if (volRatio > cfg.slMultiplier.extremeVol.threshold) mult = cfg.slMultiplier.extremeVol.multiplier
+  else if (volRatio > cfg.slMultiplier.highVol.threshold) mult = cfg.slMultiplier.highVol.multiplier
+  else if (volRatio > cfg.slMultiplier.normalVol.threshold) mult = cfg.slMultiplier.normalVol.multiplier
+  else mult = cfg.slMultiplier.lowVol.multiplier
 
   // Profile-based SL factor overrides regime adjustment when set
   if (profile) {
-    mult *= PROFILE_SL_FACTOR[profile]
+    mult *= (cfg.profileSlFactor[profile] ?? 1.0)
   } else {
     // Regime adjustment: trending needs wider stops, ranging tighter
-    if (regime === 'uptrend' || regime === 'downtrend') mult *= 1.2
-    else if (regime === 'ranging') mult *= 0.85
+    if (regime === 'uptrend' || regime === 'downtrend') mult *= cfg.regimeSlAdjust.trending
+    else if (regime === 'ranging') mult *= cfg.regimeSlAdjust.ranging
   }
 
   return mult
@@ -59,11 +97,25 @@ function dynamicSlMultiplier(atr: number, price: number, regime?: string, profil
  * - Default: balanced
  */
 function tpRatios(regime?: string, profile?: TradeProfile): [number, number, number] {
+  const cfg = getETConfig()
   // Profile ratios override regime-based ratios when set
-  if (profile) return PROFILE_TP_RATIOS[profile]
-  if (regime === 'uptrend' || regime === 'downtrend') return [0.3, 0.3, 0.4]
-  if (regime === 'ranging') return [0.5, 0.3, 0.2]
-  return [0.4, 0.3, 0.3]
+  if (profile) {
+    const pr = cfg.profileTpRatios[profile]
+    if (pr) return pr as [number, number, number]
+  }
+  if (regime === 'uptrend' || regime === 'downtrend') return cfg.tpRatios.trending
+  if (regime === 'ranging') return cfg.tpRatios.ranging
+  return cfg.tpRatios.default
+}
+
+// ==================== SL Distance Floor ====================
+
+/** Ensure SL distance is at least 0.3% of entry price (prevents sub-tick SL on low-price coins). */
+function enforceMinSlDistance(entry: number, sl: number, direction: SignalDirection): number {
+  const minDist = entry * 0.003 // 0.3% minimum
+  const dist = Math.abs(entry - sl)
+  if (dist >= minDist) return sl
+  return direction === 'long' ? entry - minDist : entry + minDist
 }
 
 // ==================== Trade Profile Mapping ====================
@@ -91,15 +143,20 @@ export function mapToProfile(triggerType: TriggerType, regime?: string): TradePr
   }
 }
 
-/** SL width factor per profile (multiplied with base ATR multiplier) */
-export const PROFILE_SL_FACTOR: Record<TradeProfile, number> = {
-  trend: 1.3,
-  reversal: 1.0,
-  breakout: 0.8,
-  scalp: 0.7,
+/** SL width factor per profile — loaded from config, re-exported for tests */
+export function getProfileSlFactor(): Record<TradeProfile, number> {
+  const cfg = getETConfig().profileSlFactor
+  return {
+    trend: cfg.trend ?? 1.3,
+    reversal: cfg.reversal ?? 1.0,
+    breakout: cfg.breakout ?? 0.8,
+    scalp: cfg.scalp ?? 0.7,
+  }
 }
+// Keep PROFILE_SL_FACTOR for backward compat (tests)
+export const PROFILE_SL_FACTOR: Record<TradeProfile, number> = { trend: 1.3, reversal: 1.0, breakout: 0.8, scalp: 0.7 }
 
-/** TP split ratios per profile (overrides regime-based ratios when profile is set) */
+/** TP split ratios per profile — loaded from config, re-exported for tests */
 export const PROFILE_TP_RATIOS: Record<TradeProfile, [number, number, number]> = {
   trend: [0.25, 0.35, 0.40],
   reversal: [0.50, 0.30, 0.20],
@@ -301,9 +358,10 @@ export function checkEntryTrigger(
       }
     }
 
-    // Enforce minimum SL distance of 0.5×ATR
+    // Enforce minimum SL distance of 0.5×ATR and absolute floor for low-price coins
     const minSlDist = 0.5 * atr
     if (entry - sl < minSlDist) sl = entry - minSlDist
+    sl = enforceMinSlDistance(entry, sl, 'long')
 
     // Structure-based TP
     const { tps, source: tpSource } = computeStructureTPs(direction, entry, atr, resistances, supports)
@@ -414,9 +472,10 @@ export function checkEntryTrigger(
       }
     }
 
-    // Enforce minimum SL distance
+    // Enforce minimum SL distance and absolute floor for low-price coins
     const minSlDist = 0.5 * atr
     if (sl - entry < minSlDist) sl = entry + minSlDist
+    sl = enforceMinSlDistance(entry, sl, 'short')
 
     // Structure-based TP
     const { tps, source: tpSource } = computeStructureTPs(direction, entry, atr, resistances, supports)
@@ -466,10 +525,19 @@ export function computePendingZone(
   setupScore: number,
   bars: MarketData[],
   atr: number,
-  ttlMs: number = 4 * 60 * 60 * 1000, // 4 hours default
+  ttlMs?: number,
   regime?: string,
 ): PendingZone | null {
   if (bars.length < 30 || atr <= 0) return null
+
+  // Regime-adaptive TTL from config
+  if (ttlMs == null) {
+    const ttlCfg = getETConfig().pendingZoneTtlHours
+    const hours = (regime === 'uptrend' || regime === 'downtrend') ? ttlCfg.trending
+      : regime === 'ranging' ? ttlCfg.ranging
+      : ttlCfg.default
+    ttlMs = hours * 60 * 60 * 1000
+  }
 
   const closes = bars.map(b => b.close)
   const highs = bars.map(b => b.high)
@@ -509,7 +577,8 @@ export function computePendingZone(
     const idealEntry = targetLevel + slippage // assume slightly worse fill
     const zoneHigh = targetLevel + 0.15 * atr + slippage
     const zoneLow = targetLevel - 0.3 * atr
-    const sl = zoneLow - slMult * 0.5 * atr // tighter SL since we're entering at structure
+    let sl = zoneLow - slMult * 0.5 * atr // tighter SL since we're entering at structure
+    sl = enforceMinSlDistance(idealEntry, sl, 'long')
 
     const { tps } = computeStructureTPs(direction, idealEntry, atr, resistances, supports)
     const [zr1, zr2, zr3] = tpRatios(regime, pendingProfile)
@@ -549,7 +618,8 @@ export function computePendingZone(
     const idealEntry = targetLevel - slippageS // shorts enter slightly lower than resistance
     const zoneLow = targetLevel - 0.15 * atr - slippageS
     const zoneHigh = targetLevel + 0.3 * atr
-    const sl = zoneHigh + slMult * 0.5 * atr
+    let sl = zoneHigh + slMult * 0.5 * atr
+    sl = enforceMinSlDistance(idealEntry, sl, 'short')
 
     const { tps } = computeStructureTPs(direction, idealEntry, atr, resistances, supports)
     const [zr1s, zr2s, zr3s] = tpRatios(regime, pendingProfile)

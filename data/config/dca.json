@@ -1,0 +1,8 @@
+{
+  "maxLayers": 2,
+  "tpProfitThreshold": 0.015,
+  "triggerAtrMultiples": [1.5],
+  "layerStakeRatio": 0.5,
+  "hardStopAtrMultiple": 3.5,
+  "minEntryScore": 75
+}

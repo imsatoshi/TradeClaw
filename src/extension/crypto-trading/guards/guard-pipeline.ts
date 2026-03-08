@@ -11,10 +11,14 @@
  * - MinBalanceGuard:       Block if available balance < N% of equity after trade
  */
 
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import type { Operation } from '../wallet/types.js';
 import type { CryptoPosition, CryptoAccountInfo } from '../interfaces.js';
 import { EmotionGuard, type EmotionGetter } from './emotion-guard.js';
 import { AccountDrawdownGuard } from './account-drawdown-guard.js';
+
+const COOLDOWN_STATE_FILE = resolve('data/state/cooldown.json');
 
 // ==================== Types ====================
 
@@ -131,6 +135,39 @@ export class CooldownGuard implements Guard {
 
   constructor(opts: { minIntervalMs?: number } = {}) {
     this.minIntervalMs = opts.minIntervalMs ?? 300_000;
+    this.loadState();
+  }
+
+  /** Load persisted cooldown state from disk (survives restarts). */
+  private loadState(): void {
+    try {
+      const raw = readFileSync(COOLDOWN_STATE_FILE, 'utf-8');
+      const data = JSON.parse(raw) as Record<string, number>;
+      const now = Date.now();
+      for (const [symbol, ts] of Object.entries(data)) {
+        // Only restore entries still within the cooldown window
+        if (now - ts < this.minIntervalMs) {
+          this.lastTradeTime.set(symbol, ts);
+        }
+      }
+    } catch {
+      // No state file or invalid — start fresh
+    }
+  }
+
+  /** Persist current cooldown state to disk. */
+  private saveState(): void {
+    try {
+      const dir = dirname(COOLDOWN_STATE_FILE);
+      mkdirSync(dir, { recursive: true });
+      const data: Record<string, number> = {};
+      for (const [symbol, ts] of this.lastTradeTime) {
+        data[symbol] = ts;
+      }
+      writeFileSync(COOLDOWN_STATE_FILE, JSON.stringify(data), 'utf-8');
+    } catch {
+      // Best-effort — don't crash if write fails
+    }
   }
 
   check(ctx: GuardContext): GuardResult {
@@ -153,6 +190,7 @@ export class CooldownGuard implements Guard {
 
     // Record the trade time (even before execution — we gate on attempt)
     this.lastTradeTime.set(symbol, now);
+    this.saveState();
     return { allowed: true };
   }
 }

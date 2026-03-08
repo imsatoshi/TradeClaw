@@ -9,6 +9,8 @@
  */
 
 import { randomUUID } from 'crypto'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { FreqtradeTradingEngine } from '../providers/freqtrade/FreqtradeTradingEngine.js'
 import type { FreqtradeTrade } from '../providers/freqtrade/types.js'
 import type { ICryptoTradingEngine } from '../interfaces.js'
@@ -21,6 +23,36 @@ import { fetchExchangeOHLCV } from '../../archive-analysis/data/ExchangeClient.j
 import { atrSeries } from '../../analysis-kit/tools/strategy-scanner/helpers.js'
 
 const log = createLogger('trade-manager')
+
+// ==================== DCA Config ====================
+interface DcaConfig {
+  maxLayers: number
+  tpProfitThreshold: number
+  triggerAtrMultiples: number[]
+  layerStakeRatio: number
+  hardStopAtrMultiple: number
+  minEntryScore: number
+}
+
+const DCA_CONFIG_FILE = resolve('data/config/dca.json')
+const DCA_DEFAULTS: DcaConfig = {
+  maxLayers: 2,
+  tpProfitThreshold: 0.015,
+  triggerAtrMultiples: [1.5],
+  layerStakeRatio: 0.5,
+  hardStopAtrMultiple: 3.5,
+  minEntryScore: 75,
+}
+
+function loadDcaConfig(): DcaConfig {
+  try {
+    const raw = readFileSync(DCA_CONFIG_FILE, 'utf-8')
+    const parsed = JSON.parse(raw)
+    return { ...DCA_DEFAULTS, ...parsed }
+  } catch {
+    return DCA_DEFAULTS
+  }
+}
 
 /** Normalize Freqtrade pair: "ZEC/USDT:USDT" → "ZEC/USDT" */
 function normalizePair(pair: string): string {
@@ -95,6 +127,13 @@ export class TradeManager {
     profile?: TradeProfile
     enableDca?: boolean
   }): Promise<TradePlan> {
+    // Guard: reject if too many plans in memory (prevent unbounded growth)
+    const MAX_PLANS = 20
+    const existingPlans = this.store.getAll()
+    if (existingPlans.length >= MAX_PLANS) {
+      throw new Error(`Cannot create plan: ${existingPlans.length} plans already exist (max ${MAX_PLANS}). Cancel or archive old plans first.`)
+    }
+
     const now = new Date().toISOString()
     const profile = params.profile ?? 'reversal'
     const plan: TradePlan = {
@@ -124,9 +163,9 @@ export class TradeManager {
     if (params.enableDca && profile === 'reversal') {
       plan.dca = {
         enabled: true,
-        maxLayers: 2,
+        maxLayers: this.dcaConfig.maxLayers,
         hardStopPrice: 0,
-        tpProfitThreshold: 0.015,
+        tpProfitThreshold: this.dcaConfig.tpProfitThreshold,
         layers: [],
       }
     }
@@ -758,11 +797,8 @@ export class TradeManager {
 
   // ==================== DCA Logic ====================
 
-  /** Default DCA parameters for reversal profile */
-  private static readonly DCA_TRIGGER_ATR_MULTIPLES = [1.5] // v4: max 1 DCA layer (was [1.5, 2.5])
-  private static readonly DCA_LAYER_STAKE_RATIO = 0.5 // each layer = 50% of initial stake
-  private static readonly DCA_HARD_STOP_ATR_MULTIPLE = 3.5
-  private static readonly DCA_MIN_ENTRY_SCORE = 75 // v4: disable DCA for low-confidence entries
+  /** DCA parameters — loaded from data/config/dca.json */
+  private readonly dcaConfig = loadDcaConfig()
 
   /**
    * Compute DCA layers after entry fill.
@@ -772,8 +808,8 @@ export class TradeManager {
     if (!plan.dca?.enabled || !plan.entryPrice || !plan.atrAtEntry || !plan.positionSize) return
 
     // v4: Disable DCA for low-confidence entries
-    if (plan.entryScore !== undefined && plan.entryScore < TradeManager.DCA_MIN_ENTRY_SCORE) {
-      log.info(`${plan.symbol} DCA disabled: entry score ${plan.entryScore} < ${TradeManager.DCA_MIN_ENTRY_SCORE}`)
+    if (plan.entryScore !== undefined && plan.entryScore < this.dcaConfig.minEntryScore) {
+      log.info(`${plan.symbol} DCA disabled: entry score ${plan.entryScore} < ${this.dcaConfig.minEntryScore}`)
       plan.dca.enabled = false
       return
     }
@@ -786,15 +822,15 @@ export class TradeManager {
     // Estimate initial stake in USDT
     const initialStake = plan.positionSize * entry
 
-    const layers: DcaLayer[] = TradeManager.DCA_TRIGGER_ATR_MULTIPLES.map((mult, i) => ({
+    const layers: DcaLayer[] = this.dcaConfig.triggerAtrMultiples.map((mult, i) => ({
       layer: i + 1,
       triggerPrice: Number((entry + sign * mult * atr).toFixed(6)),
-      stakeAmount: Number((initialStake * TradeManager.DCA_LAYER_STAKE_RATIO).toFixed(2)),
+      stakeAmount: Number((initialStake * this.dcaConfig.layerStakeRatio).toFixed(2)),
       status: 'pending' as const,
     }))
 
     // Hard stop price
-    const hardStop = Number((entry + sign * TradeManager.DCA_HARD_STOP_ATR_MULTIPLE * atr).toFixed(6))
+    const hardStop = Number((entry + sign * this.dcaConfig.hardStopAtrMultiple * atr).toFixed(6))
 
     plan.dca.layers = layers
     plan.dca.hardStopPrice = hardStop
@@ -1479,7 +1515,22 @@ export class TradeManager {
     const nextTp = plan.takeProfits.find(tp => tp.status === 'pending')
     if (!nextTp || !plan.positionSize) return
 
-    const exitSize = plan.positionSize * nextTp.sizeRatio
+    // Clamp exit size to remaining position (guards against partial liquidation / manual close)
+    const alreadyExited = plan.takeProfits
+      .filter(tp => tp.status === 'filled')
+      .reduce((sum, tp) => sum + tp.sizeRatio, 0)
+    const remainingByPlan = plan.positionSize * Math.max(0, 1 - alreadyExited)
+    const remainingByTrade = trade.amount // actual live position from exchange
+    const remainingSize = Math.min(remainingByPlan, remainingByTrade)
+    const rawExitSize = plan.positionSize * nextTp.sizeRatio
+    const exitSize = Math.min(rawExitSize, remainingSize)
+
+    if (exitSize <= 0) {
+      log.warn(`${plan.symbol} TP${nextTp.level} — remaining size ≤ 0, marking cancelled`)
+      nextTp.status = 'cancelled'
+      await this.store.save(plan)
+      return
+    }
 
     try {
       const result = await this.engine.placeOrder({
