@@ -70,9 +70,9 @@ TradePlan 生命周期: pending → active → partial → completed
 | **多级止盈** | 1-5 个 TP 级别，按比例逐级平仓（Freqtrade 限制每笔交易只能有一个挂单，TradeManager 自动逐级下单） |
 | **止损监控** | TradeManager 每 10s 检查价格，突破 SL 时通过 Freqtrade forceExit 平仓（不再依赖 CCXT 止损单） |
 | **SL/TP 验证** | 入场时强制校验：SL 方向、距离 0.3%-15%、TP 方向、R:R ≥ 1.0，不合理的计划直接拒绝 |
-| **渐进保护** | ATR 阶梯式 SL 收紧：+1.0x → -0.5x ATR，+1.5x → 保本，+2.5x → 锁 +1x，+3.5x → 锁 +2x |
+| **渐进保护** | ATR 阶梯式 SL 收紧：+1.0x → -0.5x ATR，+1.5x → 保本，+2.5x → 锁 +1x，+3.5x → 锁 +2x。使用 max(入场ATR, 当前ATR) 防止趋势加速时 SL 过紧 |
 | **自动保本** | TP1 成交后自动将 SL 移到入场价（默认开启，可关闭） |
-| **Chandelier 追踪止损** | SL 锚定周期高/低点 - ATR 倍数，优于简单固定/百分比追踪（推荐 2.5x ATR） |
+| **Chandelier 追踪止损** | SL 锚定周期高/低点 - ATR 倍数，优于简单固定/百分比追踪（推荐 2.5x ATR）。最小距离保护：SL 不能比 peak 的 2.5% 更近 |
 | **Regime 自适应 TP** | Scanner 根据市场状态动态调整 TP 比例：趋势 30/30/40、震荡 50/30/20、默认 40/30/30 |
 | **动态 SL 倍数** | ATR 倍数根据波动率分档 + 市场状态调整（趋势 ×1.2 放宽，震荡 ×0.85 收紧） |
 | **实时 P&L** | 每 10s 计算：浮动盈亏、已实现盈亏、风险回报比、最大回撤 |
@@ -162,11 +162,11 @@ TradePlan 生命周期: pending → active → partial → completed
 
 | 守卫 | 说明 |
 |------|------|
-| **MaxPositionSizeGuard** | 单仓位不超过 40% 权益 |
-| **CooldownGuard** | 同币对 60 秒冷却 |
-| **MaxOpenTradesGuard** | 最大并发仓位数（默认 5） |
+| **MaxPositionSizeGuard** | 单仓位不超过 25% 权益 |
+| **CooldownGuard** | 同币对 300 秒冷却 |
+| **MaxOpenTradesGuard** | 最大并发仓位数 3 |
 | **MinBalanceGuard** | 可用余额 < 30% 权益禁止开仓 |
-| **EmotionGuard** | 根据 AI 情绪状态调整仓位（cautious: 50%, scared: 25%, angry/tilted: 阻止） |
+| **EmotionGuard** | 根据 AI 情绪状态调整仓位（勝率降級模型：cautious: 35%, scared: 15%, angry/tilted: 阻止） |
 | **AccountDrawdownGuard** | 每日权益回撤 > 5% 时阻止新开仓（UTC 日重置） |
 
 **安全设计：**
@@ -190,7 +190,18 @@ TradePlan 生命周期: pending → active → partial → completed
 | BB 均值回归 | 均值回归 | 布林带极端偏离 + 反转确认 |
 | 结构突破 | 结构 | BOS/CHoCH + FVG 确认 |
 
-**9 维评分系统** (总分 110)：趋势(20) + 动量(20) + 加速度(10) + 结构(15) + K 线质量(10) + 成交量(15) + 波动率(10) + 资金费率(5) + 崩盘风险(5)
+**9 维评分系统** (总分 110)：趋势(15) + 动量(20) + 加速度(10) + 结构(15) + K 线质量(10) + 成交量(10) + 波动率(10) + 资金费率(10) + 崩盘风险(10)
+
+**v4/v5 假设修正：**
+- **RSI 背离确认** — 超卖区评分需要背离（价格更低但 RSI 更高），而非看绝对值，区分"卖压耗尽"和"级联崩盘"
+- **Regime 感知波动率** — 趋势中 BBWP 高 = 加速确认（加分），震荡中 BBWP 高 = 鞭刑风险（扣分）
+- **EMA 展幅变化率** — 展幅扩大 = 趋势加速（+2），收缩 = 趋势减速（-2）
+- **MTF RSI 方向感知** — 1H 趋势一致时不惩罚 OB/OS（正常延伸），逆向才扣分
+- **币种特性懲罰** — DOGE/XRP/SHIB 等均值回归币用更严格的 MTF 阈值和更重的惩罚
+- **资金费率保守化** — 极端费率不再自动给高分反做，无历史数据确认费率方向时保守评分
+- **R:R 门槛 regime 自适应** — 震荡 1.2x、趋势 1.5x、默认 1.8x（原全局 1.8x）
+- **Pending Zone 滑点缓冲** — 入场价加 0.1x ATR 滑点，基于实际预期填价计算 R:R
+- **Kelly 保守化** — 1/5 Kelly（原 1/4），胜率范围 0.45-0.55（原 0.42-0.65），上限 3%（原 6%）
 
 **入场触发器增强：**
 - Bullish/Bearish 确认需蜡烛方向一致 + 前一根 K 线弱势
@@ -316,7 +327,7 @@ cp freqtrade/strategies/TradeClaw.py /path/to/freqtrade/user_data/strategies/
 | **Session 自动裁剪** | 启动时裁剪历史（Telegram: 300, Web: 200 条），防止内存溢出 |
 | **Compaction 指数退避** | LLM 压缩失败后 5m → 15m → 1h → 4h 退避 |
 | **错误节流** | 重复错误日志 5 分钟内只记录一次，每小时清理过期条目 |
-| **DCA 安全** | 硬止损前验证交易是否仍存在，避免对已关闭交易调用 forceExit |
+| **DCA 条件门槛** | 最多 1 层 DCA（原 2 层），entry score < 75 禁用，逆行 > 2.5x ATR 跳过（regime 可能已变） |
 
 ## 其他功能
 
