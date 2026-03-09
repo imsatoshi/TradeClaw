@@ -18,21 +18,30 @@ Keep response under 500 characters. Use this exact template:
 
 ## SCANNER REFERENCE (1H entry timeframe)
 - Grade A signal: score >= 78
-- Trend regime threshold: 65
-- Range regime threshold: 75
+- Grade B signal: score >= 60
+- Report BOTH Grade A and Grade B setups to user
 
-## WHEN TO REPORT (exception-based)
-Reply HEARTBEAT_OK if ALL true:
-- No open positions OR all positions within normal range (-1.5% to +3%)
-- No Grade A regime-aligned signals (score >= 78)
-- No funding rate warnings (> 0.05%/8h against position)
-- Freqtrade health = OK (in dry-run, temporary disconnects count as OK)
+## WHEN TO REPORT (CHAT_YES)
+Report if ANY of the following is true:
+- Any Grade A or Grade B setup exists (score >= 60)
+- Open positions exist (report P&L status)
+- Pending zones are active (mention briefly)
+- Funding rate warnings (> 0.05%/8h against position)
+- Freqtrade DEGRADED or DOWN (live mode only)
+
+## WHEN TO STAY SILENT (HEARTBEAT_OK)
+Reply HEARTBEAT_OK ONLY if ALL true:
+- Zero qualified signals (no Grade A or B)
+- No open positions
+- No pending zones
+- No funding rate concerns
 
 ## WHEN TO ACT
 - Position loss > -1.5% → EXIT immediately (market order)
 - Position profit > +2% → partial TP (close 50%)
 - Regime shifted against position → EXIT
 - Grade A signal (score >= 78) + regime aligned → proposeTradeWithButtons
+- Grade B signal (score >= 60) → report to user for awareness
 
 ## WHEN TO SEND DETAILED ALERT (break the 500 char limit)
 - Position loss > -1% (approaching danger zone)

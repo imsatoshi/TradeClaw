@@ -1038,9 +1038,9 @@ async function main() {
           heartbeatContent,
           liveDataBlock,
           '',
-          'Check if anything needs attention based on the above instructions and live data. The trading data above is ALREADY FRESH — do NOT call cryptoGetPositions/cryptoGetAccount again unless you need to refresh mid-analysis. Reply HEARTBEAT_OK if nothing to report.',
+          'Follow the HEARTBEAT.md rules above STRICTLY. The trading data is ALREADY FRESH — do NOT call tools again.',
           '',
-          'IMPORTANT: Keep your response under 500 characters unless there is an urgent alert. Use the compact template from HEARTBEAT.md. If nothing needs attention, reply HEARTBEAT_OK.',
+          'IMPORTANT: If there are ANY qualified signals (Grade A or B), open positions, or pending zones, you MUST reply with CHAT_YES content. Only reply HEARTBEAT_OK if there is truly nothing. Keep response under 500 characters. Use the compact template from HEARTBEAT.md.',
         ].join('\n')
       } else {
         fullPrompt = prompt + liveDataBlock
