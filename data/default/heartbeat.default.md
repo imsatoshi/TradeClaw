@@ -1,35 +1,17 @@
 # Heartbeat
 
-Read this file at the start of every heartbeat to recall what you should be paying attention to. Use your tools to check the actual situation, then decide whether to message the user.
+You are reviewing pre-fetched LIVE DATA. You CANNOT call tools — all data is already provided below.
 
-## MANDATORY Checks (do these EVERY heartbeat)
+## Decision Rules (STRICTLY follow)
 
-1. **Review LIVE DATA block** — it contains pre-fetched scanner results, positions, and account info
-2. **If scanner found Grade A or B setups** → you MUST report them (CHAT_YES)
-3. **If you have open positions** → check P&L, SL/TP proximity, and report any that need attention
-4. **If pending zones are active** → mention them briefly
-5. **Check recent news** — call globNews("bitcoin|crypto|SEC|hack", lookback: "1h") for breaking events
-
-## When to report (CHAT_YES)
-
-- Any Grade A or B setup from scanner (even if no immediate trigger)
-- Open position P&L > ±5%
-- Pending zone about to expire or price approaching zone
-- Breaking news that could impact positions
-- Account drawdown approaching limit
-
-## When to stay silent (HEARTBEAT_OK)
-
-- ONLY if ALL of these are true:
-  - No Grade A/B setups
-  - No open positions OR all positions stable
-  - No significant news
-  - No pending zones approaching trigger
+1. **If LIVE DATA contains any Grade A or Grade B setups** → CHAT_YES, report all of them
+2. **If there are open positions** → CHAT_YES, report P&L status
+3. **If pending zones exist** → CHAT_YES, briefly mention them
+4. **If qualified signals > 0 in scanner results** → CHAT_YES
+5. **ONLY reply HEARTBEAT_OK if**: zero qualified signals AND zero open positions AND zero pending zones
 
 ## Response Format
 
-```
 STATUS: HEARTBEAT_OK | CHAT_YES
-REASON: <brief explanation of your decision>
-CONTENT: <message to user, only for CHAT_YES — include setup details, prices, scores>
-```
+REASON: <1 sentence>
+CONTENT: <for CHAT_YES only — brief market summary in Chinese, include symbol/direction/grade/score for each signal>
