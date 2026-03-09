@@ -12,6 +12,21 @@ import { readFile, appendFile, mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 const REVIEWS_DIR = resolve('data/trade-reviews')
+const ACTIVE_PLANS_FILE = resolve('data/trade-plans/active.json')
+const HISTORY_PLANS_FILE = resolve('data/trade-plans/history.json')
+
+/** Look up a trade plan by ID to get the authoritative direction. */
+async function lookupPlanDirection(planId: string): Promise<'long' | 'short' | null> {
+  for (const file of [ACTIVE_PLANS_FILE, HISTORY_PLANS_FILE]) {
+    try {
+      const raw = await readFile(file, 'utf-8')
+      const plans = JSON.parse(raw) as { id: string; direction: 'long' | 'short' }[]
+      const match = plans.find(p => p.id === planId)
+      if (match) return match.direction
+    } catch { /* file not found or parse error */ }
+  }
+  return null
+}
 
 function currentMonthFile(): string {
   const now = new Date()
@@ -43,7 +58,16 @@ You SHOULD call this after every completed trade — wins AND losses.
         wouldRepeat: z.boolean().describe('Would you take this exact same trade again in the same conditions?'),
         lesson: z.string().describe('1-2 sentence lesson learned from this trade'),
       }),
-      execute: async ({ planId, symbol, direction, outcome, pnlPercent, pnlUsd, whyItWorked, whatAlmostWentWrong, keyIndicator, wouldRepeat, lesson }) => {
+      execute: async ({ planId, symbol, direction: aiDirection, outcome, pnlPercent, pnlUsd, whyItWorked, whatAlmostWentWrong, keyIndicator, wouldRepeat, lesson }) => {
+        // Validate direction against actual trade plan — AI often hallucinates this
+        let direction = aiDirection
+        const planDirection = await lookupPlanDirection(planId)
+        let directionOverridden = false
+        if (planDirection && planDirection !== aiDirection) {
+          direction = planDirection
+          directionOverridden = true
+        }
+
         const entry = {
           ts: Date.now(),
           planId,
@@ -69,6 +93,7 @@ You SHOULD call this after every completed trade — wins AND losses.
         return {
           saved: true,
           message: `Review recorded for ${symbol} ${direction} (${outcome}, ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(1)}%)`,
+          ...(directionOverridden && { warning: `Direction corrected: AI said "${aiDirection}" but plan ${planId} is "${direction}"` }),
         }
       },
     }),
